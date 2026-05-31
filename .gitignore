@@ -31,9 +31,8 @@ gen3-capture/capture_*.bin
 gen3-capture/capture_*.log
 gen3-capture/gen3_config.ini
 
-# ─── Big release binaries (publish these as GitHub Releases instead) ──
-website/downloads/*.exe
-website/downloads/*.zip
+# ─── Website (kept off GitHub — lives on the marketing host only) ─────
+website/
 
 # ─── GivEnergy API Catalogue reference tooling (separate project) ─────
 serve.py

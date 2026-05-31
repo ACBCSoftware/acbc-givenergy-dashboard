@@ -3,7 +3,7 @@
 A local, self-hosted energy monitoring dashboard for GivEnergy inverters.  
 Connects directly to your inverter via Modbus TCP — no cloud dependency, no subscription, no data leaving your home.
 
-![Dashboard screenshot](website/img/dashboard-live.png)
+![Dashboard screenshot](docs/screenshot.png)
 
 ---
 
