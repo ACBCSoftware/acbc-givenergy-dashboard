@@ -1,0 +1,2051 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GivEnergy">
+<meta name="theme-color" content="#0d1b35">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<title>ACBC - GivEnergy Portal</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d1b35'/><path d='M18 2L9 18h6l-3 12 11-16h-6z' fill='%23f59e0b'/></svg>">
+<style>
+:root {
+  --bg-top: #0d1b35;
+  --bg-bot: #060d1c;
+  --text:   #ddeeff;
+  --muted:  #5a7a9e;
+  --card:   rgba(255,255,255,0.06);
+  --border: rgba(255,255,255,0.10);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{
+  height:100%;background:var(--bg-bot);overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--text);
+}
+#app{
+  height:100dvh;display:flex;flex-direction:column;
+  background:linear-gradient(160deg,var(--bg-top) 0%,var(--bg-bot) 100%);
+}
+
+/* ── Header ───────────────────────────────────── */
+#hdr{
+  flex-shrink:0;
+  padding:calc(env(safe-area-inset-top,0px) + 12px) 12px 8px;
+  display:flex;align-items:flex-start;justify-content:space-between;
+}
+#hdr-title{font-size:1rem;font-weight:700;letter-spacing:.3px;color:var(--text)}
+#hdr-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+#status-pill{
+  display:flex;align-items:center;gap:6px;
+  background:rgba(0,0,0,0.30);border:1px solid var(--border);
+  border-radius:20px;padding:4px 10px;font-size:.72rem;color:var(--muted);
+}
+#dot{width:7px;height:7px;border-radius:50%;background:#555;transition:background .5s,box-shadow .5s}
+#dot.on {background:#4ade80;box-shadow:0 0 7px #4ade80}
+#dot.err{background:#f87171;box-shadow:0 0 7px #f87171}
+#weather-badge{
+  display:flex;flex-direction:column;align-items:center;gap:3px;
+  background:rgba(0,0,0,0.30);border:1px solid var(--border);
+  border-radius:14px;padding:7px 13px;min-width:110px;cursor:default;
+}
+#wx-row1{display:flex;align-items:center;gap:7px}
+#wx-icon{font-size:1.4rem;line-height:1}
+#wx-temp{font-size:1.1rem;font-weight:700;color:var(--text)}
+#wx-row2{font-size:.75rem;color:var(--muted);white-space:nowrap}
+#wx-row3{font-size:.65rem;color:var(--muted);opacity:.7;white-space:nowrap}
+#ver-bar{
+  flex-shrink:0;text-align:center;
+  font-size:.6rem;color:var(--muted);opacity:.45;
+  padding:2px 12px calc(4px + env(safe-area-inset-bottom,0px));
+  letter-spacing:.3px;
+}
+
+/* ── Settings panel ───────────────────────────── */
+#settings-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#sett-top-row{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border);
+}
+#sett-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
+#sett-body{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:14px}
+.sett-section{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:12px;padding:12px 14px;display:flex;flex-direction:column;gap:10px;
+}
+.sett-heading{
+  font-size:.72rem;font-weight:700;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.6px;
+}
+.sett-hint{font-size:.7rem;color:var(--muted);opacity:.7}
+.sett-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sett-row label{font-size:.8rem;color:var(--muted);flex-shrink:0}
+.sett-row input{
+  background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);font-size:.82rem;padding:8px 10px;width:58%;outline:none;
+  transition:border-color .2s;
+}
+.sett-row input:focus{border-color:#f59e0b}
+#sett-save{
+  background:rgba(245,158,11,.18);border:1px solid #f59e0b;border-radius:14px;
+  color:#f59e0b;padding:13px;font-size:.88rem;font-weight:600;
+  cursor:pointer;width:100%;transition:background .2s;
+}
+#sett-save:active{background:rgba(245,158,11,.35)}
+#sett-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px}
+
+/* ── Control button ───────────────────────────── */
+#ctrl-btn{
+  font-size:.85rem; cursor:pointer; opacity:.45;
+  margin-left:8px; transition:opacity .2s;
+  user-select:none;
+}
+#ctrl-btn:hover{ opacity:.9 }
+
+/* ── Control panel ────────────────────────────── */
+#ctrl-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#ctrl-top-row{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border);
+}
+#ctrl-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
+#ctrl-body{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:14px}
+.ctrl-section{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:10px;
+}
+.ctrl-heading{font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+.ctrl-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.ctrl-label{font-size:.85rem;color:var(--muted)}
+.ctrl-value{font-size:.85rem;color:var(--text);font-weight:600}
+/* Action buttons */
+.ctrl-actions{display:flex;gap:8px;flex-wrap:wrap}
+.ctrl-btn{
+  flex:1;min-width:120px;
+  background:var(--bg-card);border:1px solid var(--border);border-radius:10px;
+  color:var(--text);padding:11px 10px;font-size:.82rem;font-weight:600;
+  cursor:pointer;transition:all .2s;text-align:center;
+}
+.ctrl-btn:active{opacity:.7}
+.ctrl-btn.green{background:rgba(74,222,128,.30);border-color:#4ade80;color:#4ade80}
+.ctrl-btn.red  {background:rgba(248,113,113,.30);border-color:#f87171;color:#f87171}
+.ctrl-btn.amber{background:rgba(245,158,11,.35);border-color:#f59e0b;color:#f59e0b}
+.ctrl-btn.active-mode{background:rgba(245,158,11,.40);border-color:#f59e0b;color:#f59e0b;font-weight:700}
+/* Slot display */
+.slot-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.slot-box{
+  background:rgba(0,0,0,.3);border:1px solid var(--border);
+  border-radius:8px;padding:8px 10px;
+}
+.slot-box label{font-size:.68rem;color:var(--muted);display:block;margin-bottom:3px;text-transform:uppercase;letter-spacing:.4px}
+.slot-box .slot-time{
+  font-size:.88rem;font-weight:600;color:var(--text);
+  background:none;border:none;width:100%;outline:none;
+  font-family:inherit;cursor:pointer;padding:0;
+}
+.slot-box .slot-time:focus{color:var(--amber)}
+/* Status message */
+#ctrl-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px;padding:0 4px}
+
+/* ── Logs panel ───────────────────────────────── */
+#logs-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#logs-top-row{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border);
+}
+#logs-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
+#logs-body{flex:1;overflow-y:auto;padding:10px 12px 24px;display:flex;flex-direction:column;gap:6px}
+.log-row{
+  display:flex;gap:10px;align-items:flex-start;
+  background:var(--card);border:1px solid var(--border);
+  border-radius:9px;padding:9px 11px;
+}
+.log-icon{font-size:.95rem;flex-shrink:0;line-height:1.4;width:18px;text-align:center}
+.log-main{flex:1;min-width:0}
+.log-msg{font-size:.82rem;color:var(--text);line-height:1.35;word-wrap:break-word}
+.log-time{font-size:.68rem;color:var(--muted);margin-top:2px}
+.log-row.kind-command{border-left:3px solid #4ade80}
+.log-row.kind-error  {border-left:3px solid #f87171}
+.log-row.kind-fault  {border-left:3px solid #f87171}
+.log-row.kind-status {border-left:3px solid #818cf8}
+.log-row.kind-info   {border-left:3px solid var(--muted)}
+#logs-empty{text-align:center;color:var(--muted);font-size:.85rem;padding:40px 20px}
+.ctrl-slider-wrap{display:flex;align-items:center;gap:10px;padding:4px 0}
+.ctrl-slider{
+  -webkit-appearance:none;appearance:none;
+  flex:1;height:6px;border-radius:3px;
+  background:rgba(255,255,255,0.22);outline:none;cursor:pointer;
+}
+.ctrl-slider::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:26px;height:26px;border-radius:50%;
+  background:var(--amber);
+  border:2px solid rgba(255,255,255,0.5);
+  box-shadow:0 0 10px rgba(245,158,11,.7), 0 2px 4px rgba(0,0,0,.4);
+  cursor:pointer;
+}
+.ctrl-slider::-moz-range-thumb{
+  width:26px;height:26px;border-radius:50%;
+  background:var(--amber);
+  border:2px solid rgba(255,255,255,0.5);
+  box-shadow:0 0 10px rgba(245,158,11,.7);
+  cursor:pointer;
+}
+.ctrl-slider-val{
+  min-width:40px;text-align:right;font-size:.88rem;
+  font-weight:700;color:var(--amber);
+}
+.ctrl-btn-sm{padding:7px 12px;font-size:.78rem;flex-shrink:0;min-width:unset}
+
+/* ── Password modal ───────────────────────────── */
+#pw-modal{
+  display:none;position:fixed;inset:0;z-index:100;
+  background:rgba(6,13,28,0.88);
+  align-items:center;justify-content:center;
+}
+#pw-modal.open{display:flex}
+#pw-box{
+  background:var(--bg-top);border:1px solid var(--border);
+  border-radius:18px;padding:28px 24px;width:min(320px,88vw);
+  display:flex;flex-direction:column;gap:14px;
+}
+#pw-title{font-size:1rem;font-weight:700;color:var(--text);text-align:center}
+#pw-subtitle{font-size:.78rem;color:var(--muted);text-align:center}
+#pw-input{
+  background:rgba(0,0,0,0.4);border:1px solid var(--border);border-radius:10px;
+  color:var(--text);font-size:.9rem;padding:11px 14px;outline:none;
+  transition:border-color .2s;
+}
+#pw-input:focus{border-color:#f59e0b}
+#pw-btn-row{display:flex;gap:10px}
+#pw-submit{
+  flex:1;background:rgba(245,158,11,.18);border:1px solid #f59e0b;border-radius:12px;
+  color:#f59e0b;padding:12px;font-size:.88rem;font-weight:600;cursor:pointer;
+}
+#pw-submit:active{background:rgba(245,158,11,.35)}
+#pw-cancel{
+  flex:1;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;
+  color:var(--muted);padding:12px;font-size:.88rem;font-weight:600;cursor:pointer;
+}
+#pw-cancel:active{opacity:.6}
+#pw-error{font-size:.75rem;color:#f87171;text-align:center;min-height:16px}
+
+/* ── Flow canvas area ─────────────────────────── */
+#flow-wrap{flex:1;min-height:0;position:relative;}
+#cv{position:absolute;inset:0;width:100%;height:100%}
+
+/* ── Node elements — positioned by JS ────────── */
+/* Outer nodes: text above ring for solar (top), below for battery/grid (bottom) */
+.node{
+  position:absolute;
+  display:flex;flex-direction:column;align-items:center;
+  pointer-events:none;user-select:none;
+}
+/* Solar: label+value sit ABOVE the ring, so they appear away from centre */
+.node.text-above{flex-direction:column-reverse;}
+
+.node-ring{
+  border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  border:2px solid transparent;
+  background:radial-gradient(circle at 35% 35%, #101e3a, #04091a);
+  transition:border-color .5s,box-shadow .5s;
+}
+.node-ring svg{width:58%;height:58%;display:block;}
+.node-val{font-weight:700;text-align:center;white-space:nowrap;line-height:1.15;margin:4px 0 1px}
+.node-lbl{font-size:.78rem;text-align:center;white-space:nowrap;color:var(--muted);}
+.node-sub{font-size:.72rem;text-align:center;white-space:nowrap;margin-top:3px;transition:color .5s}
+
+/* Home node is centred differently — pin ring centre to position */
+#n-home{transform:translate(-50%,-50%)}
+/* Outer nodes: pin the RING centre to position, but direction of text changes */
+#n-solar{transform:translate(-50%,0)}      /* ring top edge at y; text above = above y */
+#n-battery{transform:translate(-50%,-100%)}/* ring bottom edge at y; text below = below y */
+#n-grid{transform:translate(-50%,-100%)}
+
+/* ── Battery bar ──────────────────────────────── */
+#bat-section{flex-shrink:0;padding:6px 20px 4px;}
+#bat-row{display:flex;align-items:center;gap:10px}
+#bat-icon{flex-shrink:0;font-size:1.2rem}
+#bat-bar-wrap{
+  flex:1;height:16px;border-radius:8px;
+  background:rgba(255,255,255,0.10);
+  border:1px solid rgba(255,255,255,0.14);overflow:hidden;
+}
+#bat-bar{height:100%;border-radius:8px;transition:width 1.2s ease,background 1.2s ease}
+#bat-pct{font-size:1.3rem;font-weight:700;min-width:46px;text-align:right}
+#bat-detail{font-size:.68rem;color:var(--muted);margin-top:3px;text-align:center}
+
+/* ── Daily tiles ──────────────────────────────── */
+#tiles{
+  flex-shrink:0;
+  display:grid;grid-template-columns:repeat(3,1fr);gap:6px;
+  padding:8px 12px calc(8px + env(safe-area-inset-bottom,0px));
+}
+.tile{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 4px;text-align:center}
+.tile-icon{font-size:1.1rem;line-height:1}
+.tile-val{font-size:.92rem;font-weight:600;margin-top:3px}
+.tile-lbl{font-size:.68rem;color:var(--muted);margin-top:2px}
+
+/* ── History panel ──────────────────────────────── */
+#hist-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#hist-controls{flex-shrink:0;padding:8px 12px 4px;display:flex;flex-direction:column;gap:7px}
+#hist-top-row{display:flex;align-items:center;gap:6px}
+.period-btn{
+  background:rgba(255,255,255,0.06);border:1px solid var(--border);border-radius:14px;
+  color:var(--muted);padding:11px 18px;font-size:.82rem;cursor:pointer;transition:all .2s;
+}
+.period-btn.active{background:rgba(245,158,11,.18);border-color:#f59e0b;color:#f59e0b}
+#hist-nav{display:flex;align-items:center;gap:8px}
+#hist-nav-label{flex:1;text-align:center;font-size:.8rem;color:var(--muted)}
+.hnav-btn{
+  background:rgba(255,255,255,0.07);border:1px solid var(--border);border-radius:10px;
+  color:var(--text);width:48px;height:48px;font-size:1.6rem;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.hnav-btn:disabled{opacity:.3;cursor:default}
+#hist-series-row{display:flex;gap:5px;flex-wrap:wrap}
+.sbtn{
+  display:flex;align-items:center;gap:6px;
+  background:rgba(255,255,255,0.05);border:1px solid var(--border);border-radius:12px;
+  color:var(--muted);padding:10px 13px;font-size:.78rem;cursor:pointer;transition:all .2s;
+}
+.sbtn .sdot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sbtn.active{background:rgba(255,255,255,0.10);color:var(--text);border-color:rgba(255,255,255,0.2)}
+#hist-chart-wrap{flex:1;min-height:0;padding:0 12px 4px}
+#hist-canvas{display:block;width:100%;height:100%}
+#hist-summary{
+  flex-shrink:0;display:flex;gap:5px;overflow-x:auto;
+  padding:4px 12px calc(8px + env(safe-area-inset-bottom,0px));
+}
+
+/* ── Hourly panel ─────────────────────────────── */
+#hourly-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#hourly-controls{flex-shrink:0;padding:8px 12px 4px;display:flex;flex-direction:column;gap:7px}
+#hourly-top-row{display:flex;align-items:center;gap:6px}
+#hourly-nav{display:flex;align-items:center;gap:8px;flex:1}
+#hourly-nav-label{flex:1;text-align:center;font-size:.85rem;color:var(--text);font-weight:600}
+#hourly-series-row{display:flex;gap:5px;flex-wrap:wrap}
+#hourly-chart-wrap{
+  flex:1;min-height:0;display:flex;
+  padding:0 4px calc(8px + env(safe-area-inset-bottom,0px)) 0;
+}
+#hourly-axis{flex-shrink:0;width:34px;height:100%;display:block}
+#hourly-scroll{
+  flex:1;min-width:0;overflow-x:auto;overflow-y:hidden;
+  -webkit-overflow-scrolling:touch;
+}
+#hourly-canvas{display:block;height:100%}   /* width set by JS for scrolling */
+.hstile{
+  flex:1;min-width:54px;background:var(--card);border:1px solid var(--border);
+  border-radius:8px;padding:5px 4px;text-align:center;
+}
+.hstile .hv{font-size:.8rem;font-weight:600}
+.hstile .hl{font-size:.6rem;color:var(--muted);margin-top:2px}
+
+/* header view-toggle */
+#hist-back, .hist-back-style{
+  background:rgba(255,255,255,0.07);border:1px solid var(--border);border-radius:14px;
+  color:var(--muted);padding:11px 14px;font-size:.82rem;cursor:pointer;white-space:nowrap;
+}
+.tile{cursor:pointer;transition:opacity .15s}
+.tile:active{opacity:.7}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- Header -->
+  <div id="hdr">
+    <div id="hdr-title">
+      <span id="bolt" style="color:#f59e0b;cursor:pointer" title="Settings">&#9889;</span>
+      ACBC - GivEnergy Portal
+      <span id="ctrl-btn" title="Inverter Control"><svg width="15" height="13" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg></span>
+    </div>
+    <div id="hdr-right">
+      <div id="status-pill"><div id="dot"></div><span id="status-txt">Connecting…</span></div>
+      <div id="weather-badge" style="display:none">
+        <div id="wx-row1"><span id="wx-icon">—</span><span id="wx-temp">—</span></div>
+        <div id="wx-row2">—</div>
+        <div id="wx-row3">—</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Energy flow area -->
+  <div id="flow-wrap">
+    <canvas id="cv"></canvas>
+
+    <!-- ☀ Solar — top of circle, text above ring -->
+    <div class="node text-above" id="n-solar">
+      <div class="node-ring" id="r-solar">
+        <svg viewBox="0 0 40 40" fill="none">
+          <g stroke="#f59e0b" stroke-width="2.4" stroke-linecap="round">
+            <line x1="20" y1="3"  x2="20" y2="8"/>
+            <line x1="20" y1="32" x2="20" y2="37"/>
+            <line x1="3"  y1="20" x2="8"  y2="20"/>
+            <line x1="32" y1="20" x2="37" y2="20"/>
+            <line x1="7.5"  y1="7.5"  x2="10.9" y2="10.9"/>
+            <line x1="29.1" y1="29.1" x2="32.5" y2="32.5"/>
+            <line x1="32.5" y1="7.5"  x2="29.1" y2="10.9"/>
+            <line x1="10.9" y1="29.1" x2="7.5"  y2="32.5"/>
+          </g>
+          <circle cx="20" cy="20" r="8" fill="#f59e0b"/>
+        </svg>
+      </div>
+      <div class="node-val" id="v-solar">—</div>
+      <div class="node-lbl">Solar</div>
+    </div>
+
+    <!-- 🏠 Home — centre -->
+    <div class="node" id="n-home">
+      <div class="node-ring" id="r-home">
+        <svg viewBox="0 0 40 40" fill="none">
+          <path d="M20 5 L36 19 L33 19 L33 35 L25 35 L25 26 L15 26 L15 35 L7 35 L7 19 L4 19 Z"
+                fill="#67e8f9" fill-opacity=".9"/>
+          <rect x="16" y="26" width="8" height="9" rx="1" fill="#04091a"/>
+        </svg>
+      </div>
+      <div class="node-val" id="v-home">—</div>
+      <div class="node-lbl">Home</div>
+    </div>
+
+    <!-- 🔋 Battery — bottom left, text below ring -->
+    <div class="node" id="n-battery">
+      <div class="node-ring" id="r-battery">
+        <svg viewBox="0 0 44 40" fill="none">
+          <rect x="1" y="11" width="36" height="18" rx="3.5" stroke="#60a5fa" stroke-width="2.2"/>
+          <rect x="37" y="16" width="6" height="8" rx="2" fill="#60a5fa"/>
+          <rect id="batfill" x="3.5" y="13.5" width="0" height="13" rx="2" fill="#60a5fa"/>
+        </svg>
+      </div>
+      <div class="node-val" id="v-battery">—</div>
+      <div class="node-lbl">Battery</div>
+      <div class="node-sub" id="v-bat-state">—</div>
+    </div>
+
+    <!-- ⚡ Grid — bottom right, text below ring -->
+    <div class="node" id="n-grid">
+      <div class="node-ring" id="r-grid">
+        <svg viewBox="0 0 40 40" fill="none">
+          <g stroke="#f87171" stroke-width="2" stroke-linecap="round">
+            <line x1="20" y1="3"  x2="20" y2="37"/>
+            <line x1="5"  y1="13" x2="35" y2="13"/>
+            <line x1="9"  y1="22" x2="31" y2="22"/>
+            <line x1="20" y1="3"  x2="5"  y2="13"/>
+            <line x1="20" y1="3"  x2="35" y2="13"/>
+            <line x1="20" y1="37" x2="9"  y2="22"/>
+            <line x1="20" y1="37" x2="31" y2="22"/>
+          </g>
+          <circle cx="5"  cy="13" r="2.5" fill="#f87171"/>
+          <circle cx="35" cy="13" r="2.5" fill="#f87171"/>
+          <circle cx="9"  cy="22" r="2.5" fill="#f87171"/>
+          <circle cx="31" cy="22" r="2.5" fill="#f87171"/>
+        </svg>
+      </div>
+      <div class="node-val" id="v-grid">—</div>
+      <div class="node-lbl">Grid</div>
+      <div class="node-sub" id="v-grid-dir">—</div>
+    </div>
+
+  </div>
+
+  <!-- Battery gauge -->
+  <div id="bat-section">
+    <div id="bat-row">
+      <div id="bat-icon">🔋</div>
+      <div id="bat-bar-wrap"><div id="bat-bar" style="width:0%"></div></div>
+      <div id="bat-pct">—%</div>
+    </div>
+    <div id="bat-detail">Battery · connecting…</div>
+  </div>
+
+  <!-- Daily totals -->
+  <div id="tiles">
+    <div class="tile" data-series="solar_kwh">
+      <div class="tile-icon">&#9728;&#65039;</div>
+      <div class="tile-val" id="t-solar">—</div>
+      <div class="tile-lbl">Solar today</div>
+    </div>
+    <div class="tile" data-series="grid_in_kwh">
+      <div class="tile-icon" style="color:#f87171">&#9660;</div>
+      <div class="tile-val" id="t-import">—</div>
+      <div class="tile-lbl">Grid import today</div>
+    </div>
+    <div class="tile" data-series="grid_out_kwh">
+      <div class="tile-icon" style="color:#4ade80">&#9650;</div>
+      <div class="tile-val" id="t-export">—</div>
+      <div class="tile-lbl">Grid export today</div>
+    </div>
+  </div>
+
+  <div id="ver-bar">V1.5 Public Beta &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
+  <!-- v1.2 includes inverter control + activity log -->
+
+  <!-- Password modal -->
+  <div id="pw-modal">
+    <div id="pw-box">
+      <div id="pw-title">&#9889; Settings</div>
+      <div id="pw-subtitle">Enter admin password to continue</div>
+      <input id="pw-input" type="password" placeholder="Password" autocomplete="current-password">
+      <div id="pw-btn-row">
+        <button id="pw-cancel">Cancel</button>
+        <button id="pw-submit">Unlock</button>
+      </div>
+      <div id="pw-error"></div>
+    </div>
+  </div>
+
+  <!-- Settings panel -->
+  <div id="settings-panel">
+    <div id="sett-top-row">
+      <button id="sett-back" class="hist-back-style">&#8592; Back</button>
+      <span id="sett-title">Settings</span>
+    </div>
+    <div id="sett-body">
+      <div class="sett-section">
+        <div class="sett-heading">Inverter</div>
+        <div class="sett-row"><label>IP Address</label><input id="s-ip" type="text" placeholder="192.168.x.x"></div>
+        <div class="sett-row"><label>Port</label><input id="s-port" type="number" min="1" max="65535"></div>
+        <div class="sett-row"><label>Batteries</label><input id="s-batt" type="number" min="0" max="10"></div>
+        <div class="sett-row"><label>Poll interval (sec)</label><input id="s-poll" type="number" min="5" max="300"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Power display (Control page)</div>
+        <div class="sett-hint">Show charge/discharge limits in watts instead of %. Set the max values to match the figures shown in the official GivEnergy app.</div>
+        <div class="sett-row">
+          <label>Show in watts</label>
+          <select id="s-powerunits" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="percent">No — show %</option>
+            <option value="watts">Yes — show watts</option>
+          </select>
+        </div>
+        <div class="sett-row"><label>Max charge power (W)</label><input id="s-maxchg" type="number" min="100" max="20000" step="100"></div>
+        <div class="sett-row"><label>Max discharge power (W)</label><input id="s-maxdis" type="number" min="100" max="20000" step="100"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Server</div>
+        <div class="sett-row"><label>Data retention (days)</label><input id="s-retention" type="number" min="30"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Backup &amp; Restore</div>
+        <div class="sett-hint">Daily backups are saved to the <strong>backups</strong> folder and pruned after the chosen number of days. Download a copy to move to another machine.</div>
+        <div class="sett-row">
+          <label>Auto daily backup</label>
+          <select id="s-bkenabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="yes">On</option>
+            <option value="no">Off</option>
+          </select>
+        </div>
+        <div class="sett-row"><label>Keep backups (days)</label><input id="s-bkkeep" type="number" min="1" max="60"></div>
+        <div class="sett-row"><label>Last backup</label><span class="sett-value" id="s-bklast" style="font-size:.8rem;color:var(--muted)">—</span></div>
+        <button class="ctrl-btn ctrl-btn-sm" onclick="downloadBackup()" style="margin-top:6px">&#11015; Download backup</button>
+        <div class="sett-hint" style="margin-top:8px">Restore replaces all current history. The dashboard must be restarted afterwards.</div>
+        <input type="file" id="s-bkfile" accept=".gz,.db" style="font-size:.8rem;color:var(--muted)">
+        <button class="ctrl-btn red ctrl-btn-sm" onclick="restoreBackup()" style="margin-top:4px">&#8635; Restore from file</button>
+        <div id="s-bkmsg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Weather (Met Office)</div>
+        <div class="sett-hint">Leave API key blank to keep current value. Weather badge only shows when both fields are set.</div>
+        <div class="sett-row"><label>API Key</label><input id="s-wxkey" type="password" placeholder="Paste new key to update"></div>
+        <div class="sett-row"><label>Geohash</label><input id="s-wxhash" type="text" placeholder="e.g. gcj9q6"></div>
+        <div class="sett-row"><label>Poll interval (mins)</label><input id="s-wxpoll" type="number" min="5" max="1440"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Admin Password</div>
+        <div class="sett-hint">Leave blank to keep current password</div>
+        <div class="sett-row"><label>New password</label><input id="s-newpw" type="password" placeholder="New password"></div>
+        <div class="sett-row"><label>Confirm</label><input id="s-confirmpw" type="password" placeholder="Confirm password"></div>
+      </div>
+      <button id="sett-save">Save Settings</button>
+      <div id="sett-msg"></div>
+    </div>
+  </div>
+
+  <!-- Control panel -->
+  <div id="ctrl-panel">
+    <div id="ctrl-top-row">
+      <button id="ctrl-back" class="hist-back-style">&#8592; Back</button>
+      <span id="ctrl-title"><svg width="13" height="11" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:5px"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg>Inverter Control</span>
+    </div>
+    <div id="ctrl-body">
+
+      <!-- Mode -->
+      <div class="ctrl-section">
+        <div class="ctrl-heading">Operating Mode</div>
+        <div class="ctrl-actions">
+          <button class="ctrl-btn" id="btn-mode-dynamic" onclick="ctrlCmd('set_mode_dynamic')">
+            &#9728; Dynamic (Eco)
+          </button>
+          <button class="ctrl-btn" id="btn-mode-storage" onclick="ctrlCmd('set_mode_storage')">
+            &#128190; Storage
+          </button>
+        </div>
+        <div class="ctrl-heading" style="margin-top:4px">Export behaviour</div>
+        <div class="ctrl-actions">
+          <button class="ctrl-btn" id="btn-mode-demand" onclick="ctrlCmd('set_discharge_mode',{value:1})">
+            &#127968; Demand only
+          </button>
+          <button class="ctrl-btn" id="btn-mode-export" onclick="ctrlCmd('set_discharge_mode',{value:0})">
+            &#9650; Export excess
+          </button>
+        </div>
+        <div class="ctrl-row" style="margin-top:2px">
+          <span class="ctrl-label">Current</span>
+          <span class="ctrl-value" id="cv-power-mode">—</span>
+        </div>
+      </div>
+
+      <!-- Charge -->
+      <div class="ctrl-section">
+        <div class="ctrl-heading">Charging</div>
+        <div class="ctrl-actions">
+          <button class="ctrl-btn green" onclick="ctrlCmd('enable_charge')">&#9650; Enable Charge</button>
+          <button class="ctrl-btn red"   onclick="ctrlCmd('disable_charge')">&#9660; Disable Charge</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Status</span>
+          <span class="ctrl-value" id="cv-charge-enabled">—</span>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Stop charging at</span>
+          <span class="ctrl-slider-val" id="cv-charge-target">—</span>
+        </div>
+        <div class="ctrl-slider-wrap">
+          <input type="range" class="ctrl-slider" id="sl-charge-target" min="4" max="100" value="50"
+            oninput="$('cv-charge-target').textContent=this.value+'%'">
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlApply('set_charge_target_soc','sl-charge-target')">Set</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Charge power limit</span>
+          <span class="ctrl-slider-val" id="cv-charge-limit">—</span>
+        </div>
+        <div class="ctrl-slider-wrap">
+          <input type="range" class="ctrl-slider" id="sl-charge-limit" min="0" max="50" value="32"
+            oninput="ctrlLimitLabel('charge')">
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('charge')">Set</button>
+        </div>
+        <div class="ctrl-heading" style="margin-top:4px">Charge Slots</div>
+        <div class="slot-grid">
+          <div class="slot-box">
+            <label>Slot 1 start</label>
+            <input class="slot-time" id="cs1-start" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 1 end</label>
+            <input class="slot-time" id="cs1-end" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 2 start</label>
+            <input class="slot-time" id="cs2-start" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 2 end</label>
+            <input class="slot-time" id="cs2-end" type="time">
+          </div>
+        </div>
+        <button class="ctrl-btn amber" onclick="ctrlSaveSlots('charge')" style="margin-top:4px">Save Charge Slots</button>
+      </div>
+
+      <!-- Discharge -->
+      <div class="ctrl-section">
+        <div class="ctrl-heading">Discharging</div>
+        <div class="ctrl-actions">
+          <button class="ctrl-btn green" onclick="ctrlCmd('enable_discharge')">&#9650; Enable Discharge</button>
+          <button class="ctrl-btn red"   onclick="ctrlCmd('disable_discharge')">&#9660; Disable Discharge</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Status</span>
+          <span class="ctrl-value" id="cv-discharge-enabled">—</span>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Don't discharge below</span>
+          <span class="ctrl-slider-val" id="cv-soc-reserve">—</span>
+        </div>
+        <div class="ctrl-slider-wrap">
+          <input type="range" class="ctrl-slider" id="sl-soc-reserve" min="4" max="100" value="15"
+            oninput="$('cv-soc-reserve').textContent=this.value+'%'">
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlApply('set_soc_reserve','sl-soc-reserve')">Set</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Discharge power limit</span>
+          <span class="ctrl-slider-val" id="cv-discharge-limit">—</span>
+        </div>
+        <div class="ctrl-slider-wrap">
+          <input type="range" class="ctrl-slider" id="sl-discharge-limit" min="0" max="50" value="32"
+            oninput="ctrlLimitLabel('discharge')">
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('discharge')">Set</button>
+        </div>
+        <div class="ctrl-heading" style="margin-top:4px">Discharge Slots</div>
+        <div class="slot-grid">
+          <div class="slot-box">
+            <label>Slot 1 start</label>
+            <input class="slot-time" id="ds1-start" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 1 end</label>
+            <input class="slot-time" id="ds1-end" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 2 start</label>
+            <input class="slot-time" id="ds2-start" type="time">
+          </div>
+          <div class="slot-box">
+            <label>Slot 2 end</label>
+            <input class="slot-time" id="ds2-end" type="time">
+          </div>
+        </div>
+        <button class="ctrl-btn amber" onclick="ctrlSaveSlots('discharge')" style="margin-top:4px">Save Discharge Slots</button>
+      </div>
+
+      <div id="ctrl-msg"></div>
+
+      <!-- Activity log -->
+      <div class="ctrl-section">
+        <div class="ctrl-heading">Activity</div>
+        <button class="ctrl-btn" onclick="showView('logs')">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="1.5" width="12" height="13" rx="2" stroke="currentColor" stroke-width="1.4"/><line x1="4.5" y1="5" x2="11.5" y2="5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="4.5" y1="8" x2="11.5" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="4.5" y1="11" x2="9" y2="11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          View Activity Log
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs panel -->
+  <div id="logs-panel">
+    <div id="logs-top-row">
+      <button id="logs-back" class="hist-back-style">&#8592; Back</button>
+      <span id="logs-title"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-1px;margin-right:5px"><rect x="2" y="1.5" width="12" height="13" rx="2" stroke="currentColor" stroke-width="1.4"/><line x1="4.5" y1="5" x2="11.5" y2="5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="4.5" y1="8" x2="11.5" y2="8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><line x1="4.5" y1="11" x2="9" y2="11" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>Activity Log</span>
+    </div>
+    <div id="logs-body">
+      <div id="logs-empty">Loading…</div>
+    </div>
+  </div>
+
+  <!-- History panel -->
+  <div id="hist-panel">
+    <div id="hist-controls">
+      <div id="hist-top-row">
+        <button id="hist-back">&#8592; Back</button>
+        <button class="period-btn active" data-p="day">Day</button>
+        <button class="period-btn" data-p="week">Week</button>
+        <button class="period-btn" data-p="month">Month</button>
+        <button class="period-btn" data-p="year">Year</button>
+      </div>
+      <div id="hist-nav">
+        <button class="hnav-btn" id="hist-prev">&#8249;</button>
+        <span id="hist-nav-label">—</span>
+        <button class="hnav-btn" id="hist-next" disabled>&#8250;</button>
+      </div>
+      <div id="hist-series-row">
+        <button class="sbtn active" data-s="solar_kwh">
+          <span class="sdot" style="background:#f59e0b"></span>Solar
+        </button>
+        <button class="sbtn active" data-s="home_kwh">
+          <span class="sdot" style="background:#38bdf8"></span>Home
+        </button>
+        <button class="sbtn active" data-s="grid_in_kwh">
+          <span class="sdot" style="background:#f87171"></span>Grid In
+        </button>
+        <button class="sbtn active" data-s="grid_out_kwh">
+          <span class="sdot" style="background:#4ade80"></span>Grid Out
+        </button>
+        <button class="sbtn active" data-s="bat_chg_kwh">
+          <span class="sdot" style="background:#818cf8"></span>Bat Chg
+        </button>
+        <button class="sbtn active" data-s="bat_dis_kwh">
+          <span class="sdot" style="background:#c084fc"></span>Bat Dis
+        </button>
+      </div>
+    </div>
+    <div id="hist-chart-wrap"><canvas id="hist-canvas"></canvas></div>
+    <div id="hist-summary"></div>
+  </div>
+
+  <!-- Hourly breakdown panel -->
+  <div id="hourly-panel">
+    <div id="hourly-controls">
+      <div id="hourly-top-row">
+        <button id="hourly-back" class="hist-back-style">&#8592; Back</button>
+        <div id="hourly-nav">
+          <button class="hnav-btn" id="hourly-prev">&#8249;</button>
+          <span id="hourly-nav-label">—</span>
+          <button class="hnav-btn" id="hourly-next">&#8250;</button>
+        </div>
+      </div>
+      <div id="hourly-series-row">
+        <button class="sbtn active" data-hs="solar_kwh"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
+        <button class="sbtn active" data-hs="home_kwh"><span class="sdot" style="background:#38bdf8"></span>Home</button>
+        <button class="sbtn" data-hs="grid_in_kwh"><span class="sdot" style="background:#f87171"></span>Grid In</button>
+        <button class="sbtn" data-hs="grid_out_kwh"><span class="sdot" style="background:#4ade80"></span>Grid Out</button>
+        <button class="sbtn" data-hs="bat_chg_kwh"><span class="sdot" style="background:#818cf8"></span>Bat Chg</button>
+        <button class="sbtn" data-hs="bat_dis_kwh"><span class="sdot" style="background:#c084fc"></span>Bat Dis</button>
+        <button class="sbtn active" id="hourly-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
+      </div>
+    </div>
+    <div id="hourly-chart-wrap">
+      <canvas id="hourly-axis"></canvas>
+      <div id="hourly-scroll"><canvas id="hourly-canvas"></canvas></div>
+    </div>
+  </div>
+
+</div>
+<script>
+const $ = id => document.getElementById(id);
+function fmtW(w)   { return w >= 1000 ? (w/1000).toFixed(2)+' kW' : Math.round(w)+' W'; }
+function fmtKwh(k) { return (k||0).toFixed(1)+' kWh'; }
+
+// ── Canvas ──────────────────────────────────────────────────────────────────
+const canvas = $('cv');
+const ctx    = canvas.getContext('2d');
+let W, H, DPR;
+
+// Node layout positions — calculated in layout()
+// N[name] = {x, y, r}   (pixel centre, node radius)
+// N._cx, N._cy, N._R    (orbit circle params)
+let N = {};
+
+function layout() {
+  const wrap = $('flow-wrap');
+  // Bail out if the container isn't visible/measured yet (e.g. another view is
+  // showing, or the browser hasn't finished settling). A later ResizeObserver
+  // / showView call will re-run layout once real dimensions are available.
+  if (wrap.clientWidth === 0 || wrap.clientHeight === 0) return;
+  W = wrap.clientWidth;
+  H = wrap.clientHeight;
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width  = W * DPR;
+  canvas.height = H * DPR;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
+  // ── Option A: all ring sizes derived from R ─────────────────────────────
+  const RING_K = 0.36;   // outer ring diameter = R × RING_K
+  const HOME_K = 1.25;   // home ring = outer ring × HOME_K
+  const MARGIN = 14;     // px between ring edge and screen edge
+
+  const cx = W / 2;
+
+  // R from horizontal fit: cx − R·0.866 − R·RING_K/2 ≥ MARGIN
+  const R_horiz = (cx - MARGIN) / (0.866 + RING_K / 2);
+  // R from vertical fit: topNeed + botNeed ≤ H − 8
+  //   topNeed  = R + ringPx/2 + textAbove  where textAbove ≈ ringPx·0.34 + 24
+  //   botNeed  = R·0.5 + ringPx/2 + textBelow  where textBelow ≈ ringPx·0.34 + 40
+  //   Combined: R·(1 + 0.5) + R·RING_K·(0.5 + 0.34) + 64 ≤ H
+  //           = R·1.5 + R·RING_K·0.84·2 + 64 ≤ H  → add 16px safety margin
+  const R_vert  = (H - 80) / (1.5 + RING_K * 1.68);
+  const R = Math.max(30, Math.min(R_horiz, R_vert));
+
+  const ringPx     = R * RING_K;
+  const homeRingPx = ringPx * HOME_K;
+
+  const angSolar = -Math.PI / 2;
+  const angGrid  = -Math.PI / 2 + 2 * Math.PI / 3;
+  const angBat   = -Math.PI / 2 + 4 * Math.PI / 3;
+
+  // Estimated text heights for vertical centring
+  const textAbove = ringPx * 0.34 + 24;   // space above solar ring (column-reverse)
+  const textBelow = ringPx * 0.34 + 40;   // space below bat/grid ring
+
+  const topNeed  = R + ringPx / 2 + textAbove;
+  const botNeed  = R * 0.5 + ringPx / 2 + textBelow;
+  const contentH = topNeed + botNeed;
+  const cy = contentH < H ? (H - contentH) / 2 + topNeed : topNeed;
+
+  N = {
+    solar:   { x: cx + R*Math.cos(angSolar), y: cy + R*Math.sin(angSolar), r: ringPx / 2 },
+    grid:    { x: cx + R*Math.cos(angGrid),  y: cy + R*Math.sin(angGrid),  r: ringPx / 2 },
+    battery: { x: cx + R*Math.cos(angBat),   y: cy + R*Math.sin(angBat),   r: ringPx / 2 },
+    home:    { x: cx, y: cy, r: homeRingPx / 2 },
+  };
+
+  // Solar (column-reverse: label above ring): position div so ring centre = orbit point
+  // div top = orbit_y − textAbove − ringPx/2
+  const sEl = $('n-solar');
+  sEl.style.left      = N.solar.x + 'px';
+  sEl.style.top       = (N.solar.y - textAbove - ringPx / 2) + 'px';
+  sEl.style.transform = 'translate(-50%, 0)';
+
+  // Battery / Grid (ring at top, label below): div top = orbit_y − ringPx/2
+  [['n-battery', N.battery], ['n-grid', N.grid]].forEach(([id, nd]) => {
+    const el = $(id);
+    el.style.left      = nd.x + 'px';
+    el.style.top       = (nd.y - ringPx / 2) + 'px';
+    el.style.transform = 'translate(-50%, 0)';
+  });
+
+  // Home: CSS translate(-50%,-50%) centres ring on orbit point
+  const homeEl = $('n-home');
+  homeEl.style.left = N.home.x + 'px';
+  homeEl.style.top  = N.home.y + 'px';
+
+  setRingSize('r-solar',   ringPx);
+  setRingSize('r-home',    homeRingPx);
+  setRingSize('r-battery', ringPx);
+  setRingSize('r-grid',    ringPx);
+
+  const vfs = Math.max(10, Math.round(ringPx     * 0.28)) + 'px';
+  const hfs = Math.max(12, Math.round(homeRingPx * 0.36)) + 'px';
+  ['v-solar','v-battery','v-grid'].forEach(id => $(id).style.fontSize = vfs);
+  $('v-home').style.fontSize = hfs;
+
+  // Snap N[name].{x,y,r} to actual rendered ring centres — edges + particles use these
+  const wr = $('flow-wrap').getBoundingClientRect();
+  ['solar','battery','grid','home'].forEach(name => {
+    const rc = $('r-' + name).getBoundingClientRect();
+    N[name].x = rc.left + rc.width  / 2 - wr.left;
+    N[name].y = rc.top  + rc.height / 2 - wr.top;
+    N[name].r = rc.width / 2;
+  });
+}
+
+function setRingSize(id, px) {
+  const el = $(id);
+  const s  = Math.round(px) + 'px';
+  el.style.width = el.style.height = s;
+}
+
+// ── Flow routing ────────────────────────────────────────────────────────────
+function getFlows(d) {
+  if (!d) return [];
+  const flows = [];
+  const solar = d.solar_w || 0;
+  const home  = d.home_w  || 0;
+  const batW  = d.battery_w || 0;
+  const gridW = d.grid_w || 0;
+
+  // Spokes to/from Home
+  if (solar > 20)
+    flows.push({ from:'solar',   to:'home',    col:'#f59e0b', w: solar });
+  // Battery only flows to home when solar isn't already covering demand
+  if (d.battery_discharging && batW > 20 && solar < home)
+    flows.push({ from:'battery', to:'home',    col:'#c084fc', w: batW  });
+  // Grid only flows to home when solar isn't already covering demand
+  if (d.grid_importing && gridW > 20 && solar < home)
+    flows.push({ from:'grid',    to:'home',    col:'#f87171', w: gridW });
+
+  // Outer ring arcs — energy between sources/sinks
+  if (d.battery_charging && batW > 20) {
+    if (solar > 20)
+      flows.push({ from:'solar', to:'battery', col:'#fbbf24', w: batW });
+    if (d.grid_importing && gridW > 20)
+      flows.push({ from:'grid',  to:'battery', col:'#fb923c', w: batW });
+  }
+  if (d.grid_exporting && gridW > 20) {
+    if (solar > 20)
+      flows.push({ from:'solar', to:'grid',    col:'#4ade80', w: gridW });
+    if (d.battery_discharging && batW > 20)
+      flows.push({ from:'battery', to:'grid',  col:'#a78bfa', w: gridW });
+  }
+
+  return flows;
+}
+
+// ── Particles ───────────────────────────────────────────────────────────────
+const particles = [];
+let frameN = 0, liveData = null, liveFlows = [];
+
+class Particle {
+  constructor(from, to, col) {
+    const a = N[from], b = N[to];
+    this.x1 = a.x; this.y1 = a.y;
+    this.x2 = b.x; this.y2 = b.y;
+    this.t   = Math.random() * 0.3;
+    this.spd = 0.0042 + Math.random() * 0.004;
+    this.r   = 3.5 + Math.random() * 2.5;
+    this.col = col;
+  }
+  tick() { this.t += this.spd; return this.t < 1.12; }
+  draw() {
+    const t = Math.min(1, this.t);
+    const x = this.x1 + (this.x2 - this.x1) * t;
+    const y = this.y1 + (this.y2 - this.y1) * t;
+    const a = t < 0.1 ? t*10 : t > 0.84 ? (1-t)/0.16 : 1;
+    ctx.save();
+    ctx.globalAlpha = a * 0.92;
+    ctx.shadowColor = this.col; ctx.shadowBlur = 14;
+    ctx.fillStyle   = this.col;
+    ctx.beginPath(); ctx.arc(x, y, this.r, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function tickParticles() {
+  frameN++;
+  liveFlows.forEach(fl => {
+    const rate = Math.max(3, Math.round(55 / Math.max(1, fl.w / 400)));
+    if (frameN % rate === 0) particles.push(new Particle(fl.from, fl.to, fl.col));
+  });
+  for (let i = particles.length-1; i >= 0; i--)
+    if (!particles[i].tick()) particles.splice(i, 1);
+}
+
+// ── Canvas render ───────────────────────────────────────────────────────────
+function activeEdgeSet() {
+  const s = new Set();
+  liveFlows.forEach(f => s.add(f.from+'-'+f.to));
+  return s;
+}
+
+function drawEdge(from, to, active) {
+  const a = N[from], b = N[to];
+  if (!a||!b) return;
+  const dx=b.x-a.x, dy=b.y-a.y, len=Math.sqrt(dx*dx+dy*dy);
+  const ux=dx/len, uy=dy/len;
+  const sx=a.x+ux*(a.r+5), sy=a.y+uy*(a.r+5);
+  const ex=b.x-ux*(b.r+5), ey=b.y-uy*(b.r+5);
+  ctx.save();
+  if (active) {
+    ctx.strokeStyle = 'rgba(200,220,255,0.35)';
+    ctx.lineWidth   = 2;
+    ctx.shadowColor = 'rgba(100,160,255,0.5)';
+    ctx.shadowBlur  = 8;
+    ctx.setLineDash([5, 9]);
+    ctx.lineDashOffset = -(frameN * 0.3);
+  } else {
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth   = 1.2;
+    ctx.setLineDash([]);
+  }
+  ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  if (!N.solar) return;
+
+  const edges = activeEdgeSet();
+
+  // All possible edges: 3 spokes + 3 outer chords
+  const allEdges = [
+    ['solar',   'home'],     // spoke
+    ['battery', 'home'],     // spoke
+    ['grid',    'home'],     // spoke
+    ['solar',   'battery'],  // outer arc chord
+    ['solar',   'grid'],     // outer arc chord
+    ['battery', 'grid'],     // outer arc chord
+  ];
+  allEdges.forEach(([a,b]) => {
+    const on = edges.has(a+'-'+b) || edges.has(b+'-'+a);
+    drawEdge(a, b, on);
+  });
+
+  // Particles on top
+  particles.forEach(p => p.draw());
+}
+
+// ── Node styling ────────────────────────────────────────────────────────────
+function styleRing(id, color, active) {
+  const el = $(id);
+  el.style.borderColor = active ? color : color + '40';
+  el.style.boxShadow   = active
+    ? `0 0 24px ${color}55, inset 0 0 12px ${color}18`
+    : 'none';
+  el.querySelectorAll('line,path,rect:not([id])').forEach(s => {
+    if (s.hasAttribute('stroke') && s.getAttribute('stroke') !== 'none')
+      s.setAttribute('stroke', color);
+    const f = s.getAttribute('fill');
+    if (f && f !== 'none' && f !== '#04091a' && f !== '#04091a')
+      s.setAttribute('fill', color);
+  });
+  // Also re-colour standalone filled circles
+  el.querySelectorAll('circle:not([r="2.5"])').forEach(s => {
+    if (s.getAttribute('fill') && s.getAttribute('fill') !== 'none')
+      s.setAttribute('fill', color);
+  });
+}
+
+function updateBatFill(soc) {
+  const f = $('batfill');
+  if (f) f.setAttribute('width', Math.round((soc/100)*28));
+}
+
+// ── Apply live data ─────────────────────────────────────────────────────────
+function applyData(d) {
+  liveData  = d;
+  liveFlows = getFlows(d);
+
+  const solarOn = d.solar_w   > 20;
+  const batOn   = d.battery_w > 20;
+  const gridOn  = d.grid_w    > 20;
+
+  // Solar
+  styleRing('r-solar', '#f59e0b', solarOn);
+  $('v-solar').textContent = fmtW(d.solar_w);
+
+  // Home
+  styleRing('r-home', '#67e8f9', true);
+  $('v-home').textContent = fmtW(d.home_w);
+
+  // Battery
+  const batCol = d.battery_charging ? '#60a5fa' : d.battery_discharging ? '#c084fc' : '#60a5fa';
+  styleRing('r-battery', batCol, batOn);
+  $('v-battery').textContent  = fmtW(d.battery_w);
+  const bsEl = $('v-bat-state');
+  if (d.battery_charging)         { bsEl.textContent='▲ Charging';    bsEl.style.color='#60a5fa'; }
+  else if (d.battery_discharging) { bsEl.textContent='▼ Discharging'; bsEl.style.color='#c084fc'; }
+  else                            { bsEl.textContent='Idle';          bsEl.style.color='#5a7a9e'; }
+  updateBatFill(d.soc);
+
+  // Grid
+  const gridIdle = (d.grid_w || 0) < 10;
+  const gridCol  = (!gridIdle && d.grid_importing) ? '#f87171'
+                 : (!gridIdle && d.grid_exporting) ? '#4ade80' : '#f87171';
+  styleRing('r-grid', gridCol, gridOn && !gridIdle);
+  $('v-grid').textContent = gridIdle ? '0W' : fmtW(d.grid_w);
+  const gdEl = $('v-grid-dir');
+  if (gridIdle)                        { gdEl.textContent='Idle';        gdEl.style.color='#5a7a9e'; }
+  else if (d.grid_importing)           { gdEl.textContent='▼ Importing'; gdEl.style.color='#f87171'; }
+  else if (d.grid_exporting)           { gdEl.textContent='▲ Exporting'; gdEl.style.color='#4ade80'; }
+  else                                 { gdEl.textContent='Idle';        gdEl.style.color='#5a7a9e'; }
+
+  // Battery bar
+  const soc = d.soc || 0;
+  $('bat-pct').textContent = soc + '%';
+  const bar = $('bat-bar');
+  bar.style.width      = soc + '%';
+  bar.style.background = soc<15?'#f87171':soc<30?'#fb923c':soc<60?'#facc15':'#4ade80';
+
+  const batState = d.battery_charging    ? `Charging at ${fmtW(d.battery_w)}`
+                 : d.battery_discharging ? `Discharging at ${fmtW(d.battery_w)}`
+                 : 'Idle';
+  const temp = d.t_battery  != null ? ` · ${d.t_battery.toFixed(0)}°C`  : '';
+  const inv  = d.t_heatsink != null ? ` · Inv ${d.t_heatsink.toFixed(0)}°C` : '';
+  $('bat-detail').textContent = `${batState}${temp}${inv}`;
+
+  // Tiles
+  $('t-solar').textContent  = fmtKwh(d.solar_today);
+  $('t-import').textContent = fmtKwh(d.grid_in_today);
+  $('t-export').textContent = fmtKwh(d.grid_out_today);
+
+  // Status
+  const age = Math.round(Date.now()/1000 - d.ts);
+  $('status-txt').textContent = `${d.status==='NORMAL'?'Online':(d.status||'?')} · ${age}s ago`;
+  $('dot').className = d.ok ? 'on' : 'err';
+}
+
+// ── Loop ────────────────────────────────────────────────────────────────────
+function loop() { tickParticles(); render(); requestAnimationFrame(loop); }
+
+// ── Poll ────────────────────────────────────────────────────────────────────
+async function poll() {
+  try {
+    const r = await fetch('/api/data', { cache:'no-store' });
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    const d = await r.json();
+    if (d.ok) applyData(d);
+    else { $('status-txt').textContent=d.error||'No data'; $('dot').className='err'; }
+  } catch(e) {
+    $('status-txt').textContent='Offline · '+e.message;
+    $('dot').className='err';
+  }
+  setTimeout(poll, 10000);
+}
+
+// ── Weather ──────────────────────────────────────────────────────────────────
+const WX_ICON = {
+  0:'🌙', 1:'☀️', 2:'🌤️', 3:'🌤️', 5:'🌫️', 6:'🌫️',
+  7:'☁️', 8:'☁️', 9:'🌦️', 10:'🌦️', 11:'🌧️', 12:'🌧️',
+  13:'🌧️', 14:'🌧️', 15:'🌧️', 16:'🌨️', 17:'🌨️', 18:'🌨️',
+  19:'🌨️', 20:'🌨️', 21:'🌨️', 22:'❄️', 23:'❄️', 24:'❄️',
+  25:'❄️', 26:'❄️', 27:'❄️', 28:'⛈️', 29:'⛈️', 30:'⛈️'
+};
+
+async function pollWeather() {
+  try {
+    const r = await fetch('/api/weather', { cache:'no-store' });
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    const w = await r.json();
+    if (w.ok) {
+      $('wx-icon').textContent = WX_ICON[w.weather_code] ?? '🌡️';
+      $('wx-temp').textContent = w.temp + '°C';
+      const hum = w.humidity != null ? ' · ' + w.humidity + '%' : '';
+      $('wx-row2').textContent = w.wind_dir + ' ' + w.wind_mph + 'mph' + hum;
+      const obsTime = w.updated
+        ? new Date(w.updated).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'})
+        : '—';
+      $('wx-row3').textContent = 'Obs ' + obsTime;
+    }
+  } catch(e) { /* silently ignore — weather is non-critical */ }
+  setTimeout(pollWeather, 600000);    // refresh badge every 10 mins (server caches Met Office calls)
+}
+
+// ── Inverter Control ─────────────────────────────────────────────────────────
+function _ctrlHeaders() {
+  return { 'Content-Type':'application/json', 'X-Admin-Password': _adminPw };
+}
+
+function _ctrlMsg(txt, ok) {
+  const el = $('ctrl-msg');
+  el.style.color = ok ? '#4ade80' : '#f87171';
+  el.textContent = txt;
+  if (ok) setTimeout(() => { if (el.textContent === txt) el.textContent = ''; }, 4000);
+}
+
+async function loadControlState() {
+  $('ctrl-msg').textContent = 'Reading inverter…';
+  $('ctrl-msg').style.color = 'var(--muted)';
+  try {
+    const r = await fetch('/api/control', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { showView('live'); return; }
+    const d = await r.json();
+    if (!d.ok) { _ctrlMsg('Read failed: ' + d.error, false); return; }
+
+    // Mode buttons
+    const isStorage = d.enable_discharge && d.battery_power_mode === 1;
+    const isDynamic = !d.enable_discharge && d.battery_power_mode === 1;
+    $('btn-mode-dynamic').className = 'ctrl-btn' + (isDynamic ? ' active-mode' : '');
+    $('btn-mode-storage').className = 'ctrl-btn' + (isStorage ? ' active-mode' : '');
+
+    const exportMode = d.battery_power_mode === 0;
+    $('cv-power-mode').textContent        = exportMode ? 'Export excess' : 'Demand only';
+    $('btn-mode-demand').className        = 'ctrl-btn' + (!exportMode ? ' active-mode' : '');
+    $('btn-mode-export').className        = 'ctrl-btn' + ( exportMode ? ' active-mode' : '');
+    $('cv-charge-enabled').textContent    = d.enable_charge    ? '✓ Enabled' : '✗ Disabled';
+    $('cv-discharge-enabled').textContent = d.enable_discharge ? '✓ Enabled' : '✗ Disabled';
+    $('cv-charge-target').textContent     = d.charge_target_soc + '%';
+    $('sl-charge-target').value           = d.charge_target_soc;
+    $('cv-soc-reserve').textContent       = d.soc_reserve       + '%';
+    $('sl-soc-reserve').value             = d.soc_reserve;
+
+    // Power limits — display in % or watts depending on the configured mode
+    _ctrlPower = {
+      units:    d.power_units || 'percent',
+      maxChg:   d.max_charge_w || 2600,
+      maxDis:   d.max_discharge_w || 2600,
+    };
+    _configLimitSlider('charge',    d.charge_limit);
+    _configLimitSlider('discharge', d.discharge_limit);
+
+    // Charge slots
+    $('cs1-start').value = d.charge_slot_1_start;
+    $('cs1-end').value   = d.charge_slot_1_end;
+    $('cs2-start').value = d.charge_slot_2_start;
+    $('cs2-end').value   = d.charge_slot_2_end;
+
+    // Discharge slots
+    $('ds1-start').value = d.discharge_slot_1_start;
+    $('ds1-end').value   = d.discharge_slot_1_end;
+    $('ds2-start').value = d.discharge_slot_2_start;
+    $('ds2-end').value   = d.discharge_slot_2_end;
+
+    $('ctrl-msg').textContent = '';
+  } catch(e) { _ctrlMsg('Error: ' + e.message, false); }
+}
+
+async function ctrlCmd(command, params) {
+  _ctrlMsg('Sending…', true);
+  try {
+    const r   = await fetch('/api/control', {
+      method:'POST', headers:_ctrlHeaders(),
+      body: JSON.stringify({ command, params: params || {} })
+    });
+    if (r.status === 401) { showView('live'); return; }
+    const res = await r.json();
+    _ctrlMsg(res.ok ? '✓ ' + res.message : '✗ ' + res.message, res.ok);
+    if (res.ok) await loadControlState();   // refresh displayed state
+  } catch(e) { _ctrlMsg('Error: ' + e.message, false); }
+}
+
+// Send a command with a single numeric {value} from a slider/input
+async function ctrlApply(command, sliderId) {
+  const val = parseInt($(sliderId).value);
+  await ctrlCmd(command, { value: val });
+}
+
+// ── Charge/discharge power limit: % or watts ──────────────────────────────────
+// The inverter register is 0–50 where 50 = full power. In watts mode the slider
+// runs 0→max watts and we convert to/from the register (limit = W/maxW × 50).
+let _ctrlPower = { units:'percent', maxChg:2600, maxDis:2600 };
+
+function _limitMax(type){ return type === 'charge' ? _ctrlPower.maxChg : _ctrlPower.maxDis; }
+
+function _configLimitSlider(type, registerVal) {
+  const sl = $('sl-' + type + '-limit');
+  const cv = $('cv-' + type + '-limit');
+  if (_ctrlPower.units === 'watts') {
+    const maxW = _limitMax(type);
+    sl.min = 0; sl.max = maxW; sl.step = 100;
+    sl.value = Math.round((registerVal / 50) * maxW / 100) * 100;   // register → W, snapped
+    cv.textContent = sl.value + ' W';
+  } else {
+    sl.min = 0; sl.max = 50; sl.step = 1;
+    sl.value = registerVal;
+    cv.textContent = registerVal + '%';
+  }
+}
+
+function ctrlLimitLabel(type) {
+  const sl = $('sl-' + type + '-limit');
+  $('cv-' + type + '-limit').textContent =
+    _ctrlPower.units === 'watts' ? sl.value + ' W' : sl.value + '%';
+}
+
+async function ctrlSetLimit(type) {
+  const sl  = $('sl-' + type + '-limit');
+  const cmd = type === 'charge' ? 'set_charge_limit' : 'set_discharge_limit';
+  let reg;
+  if (_ctrlPower.units === 'watts') {
+    const maxW = _limitMax(type);
+    reg = Math.round(parseInt(sl.value) / maxW * 50);   // W → register
+  } else {
+    reg = parseInt(sl.value);
+  }
+  reg = Math.max(0, Math.min(50, reg));
+  await ctrlCmd(cmd, { value: reg });
+}
+
+async function ctrlSaveSlots(type) {
+  const prefix = type === 'charge' ? 'c' : 'd';
+  for (const slot of [1, 2]) {
+    const start = $(`${prefix}s${slot}-start`).value;
+    const end   = $(`${prefix}s${slot}-end`).value;
+    if (start && end) {
+      await ctrlCmd(`set_${type}_slot`, { slot, start, end });
+    }
+  }
+}
+
+// Reuse same password modal — ctrl-btn triggers it with 'control' destination
+let _ctrlDest = 'settings';
+$('ctrl-btn').addEventListener('click', () => {
+  if (_adminPw) { showView('control'); return; }   // already unlocked this session
+  _ctrlDest = 'control';
+  $('pw-input').value = '';
+  $('pw-error').textContent = '';
+  $('pw-modal').classList.add('open');
+  setTimeout(() => $('pw-input').focus(), 60);
+});
+
+$('ctrl-back').addEventListener('click', () => showView('live'));
+$('logs-back').addEventListener('click', () => showView('control'));
+
+// ── Activity log ──────────────────────────────────────────────────────────────
+const LOG_ICON = { command:'⚙️', error:'⚠️', fault:'🔴', status:'🔵', info:'ℹ️' };
+
+function _logTime(ts) {
+  const d   = new Date(ts * 1000);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const t = d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+  if (sameDay) return 'Today ' + t;
+  const date = d.toLocaleDateString('en-GB', {day:'numeric', month:'short'});
+  return date + ' ' + t;
+}
+
+async function loadLogs() {
+  const body = $('logs-body');
+  body.innerHTML = '<div id="logs-empty">Loading…</div>';
+  try {
+    const r = await fetch('/api/logs?limit=150', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { showView('live'); return; }
+    const rows = await r.json();
+    if (!rows.length) {
+      body.innerHTML = '<div id="logs-empty">No activity logged yet.<br>Commands and inverter events will appear here.</div>';
+      return;
+    }
+    body.innerHTML = rows.map(e => `
+      <div class="log-row kind-${e.kind}">
+        <div class="log-icon">${LOG_ICON[e.kind] || 'ℹ️'}</div>
+        <div class="log-main">
+          <div class="log-msg">${_esc(e.message)}</div>
+          <div class="log-time">${_logTime(e.ts)}</div>
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    body.innerHTML = '<div id="logs-empty">Could not load logs: ' + _esc(e.message) + '</div>';
+  }
+}
+
+function _esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+// ── Settings + password ───────────────────────────────────────────────────────
+let _weatherConfigured = false;
+let _adminPw = '';   // held in memory for the session only
+
+function _settHeaders() {
+  return { 'Content-Type':'application/json', 'X-Admin-Password': _adminPw };
+}
+
+// ── Backup & restore ──────────────────────────────────────────────────────────
+async function downloadBackup() {
+  const msg = $('s-bkmsg');
+  msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing backup…';
+  try {
+    const r = await fetch('/api/backup/export', { headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { msg.style.color='#f87171'; msg.textContent='Session expired'; return; }
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    const blob = await r.blob();
+    const cd = r.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const name = m ? m[1] : 'givenergy-history.db.gz';
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; document.body.appendChild(a); a.click();
+    a.remove(); URL.revokeObjectURL(url);
+    msg.style.color = '#4ade80'; msg.textContent = '✓ Backup downloaded';
+  } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+}
+
+async function restoreBackup() {
+  const msg = $('s-bkmsg');
+  const file = $('s-bkfile').files[0];
+  if (!file) { msg.style.color='#f87171'; msg.textContent='Choose a backup file first'; return; }
+  if (!confirm('Restore will REPLACE all current history with the chosen file, and the dashboard must be restarted. Continue?')) return;
+  msg.style.color='var(--muted)'; msg.textContent='Uploading…';
+  try {
+    const fd = new FormData(); fd.append('file', file);
+    const r = await fetch('/api/backup/import', { method:'POST', headers:{'X-Admin-Password':_adminPw}, body:fd });
+    const res = await r.json();
+    if (res.ok) { msg.style.color='#4ade80'; msg.textContent='✓ '+res.message; }
+    else { msg.style.color='#f87171'; msg.textContent='✗ '+(res.error||'failed'); }
+  } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+}
+
+// Password modal
+$('bolt').addEventListener('click', () => {
+  if (_adminPw) { showView('settings'); return; }
+  _ctrlDest = 'settings';
+  $('pw-input').value = '';
+  $('pw-error').textContent = '';
+  $('pw-modal').classList.add('open');
+  setTimeout(() => $('pw-input').focus(), 60);
+});
+
+async function _tryUnlock() {
+  const pw = $('pw-input').value;
+  try {
+    const r = await fetch('/api/settings', {
+      cache:'no-store', headers:{'X-Admin-Password': pw}
+    });
+    if (r.status === 401) { $('pw-error').textContent = 'Wrong password'; return; }
+    _adminPw = pw;
+    $('pw-modal').classList.remove('open');
+    showView(_ctrlDest || 'settings');
+  } catch(e) { $('pw-error').textContent = 'Error: ' + e.message; }
+}
+
+$('pw-submit').addEventListener('click', _tryUnlock);
+$('pw-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter')  _tryUnlock();
+  if (e.key === 'Escape') _closePwModal();
+});
+
+function _closePwModal() {
+  $('pw-modal').classList.remove('open');
+  $('pw-input').value = '';
+  $('pw-error').textContent = '';
+}
+$('pw-cancel').addEventListener('click', _closePwModal);
+// Tap outside the box to dismiss
+$('pw-modal').addEventListener('click', e => { if (e.target === $('pw-modal')) _closePwModal(); });
+
+$('sett-back').addEventListener('click', () => { _adminPw = ''; showView('live'); });
+
+async function loadSettings() {
+  try {
+    const r = await fetch('/api/settings', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { showView('live'); return; }
+    const s = await r.json();
+    $('s-ip').value        = s.inverter_ip         || '';
+    $('s-port').value      = s.inverter_port        || 8899;
+    $('s-batt').value      = s.num_batteries        ?? 1;
+    $('s-poll').value      = s.poll_interval        || 10;
+    $('s-powerunits').value= s.power_units          || 'percent';
+    $('s-maxchg').value    = s.max_charge_w         || 2600;
+    $('s-maxdis').value    = s.max_discharge_w      || 2600;
+    $('s-retention').value = s.data_retention_days  || 730;
+    $('s-bkenabled').value = s.backup_enabled ? 'yes' : 'no';
+    $('s-bkkeep').value    = s.backup_keep_days     || 7;
+    $('s-bklast').textContent = s.last_backup || '—';
+    $('s-bkmsg').textContent = '';
+    $('s-wxhash').value    = s.weather_geohash      || '';
+    $('s-wxpoll').value    = s.weather_poll_mins    || 30;
+    $('s-wxkey').value     = '';
+    $('s-wxkey').placeholder = s.weather_configured
+      ? 'Key is set — paste new key to change' : 'Paste API key';
+    $('s-newpw').value = ''; $('s-confirmpw').value = '';
+    $('sett-msg').textContent = '';
+  } catch(e) {}
+}
+
+$('sett-save').addEventListener('click', async () => {
+  // Password change validation
+  const newPw  = $('s-newpw').value.trim();
+  const confPw = $('s-confirmpw').value.trim();
+  if (newPw && newPw !== confPw) {
+    $('sett-msg').style.color = '#f87171';
+    $('sett-msg').textContent = 'Passwords do not match';
+    return;
+  }
+  const body = {
+    inverter_ip:         $('s-ip').value.trim(),
+    inverter_port:       parseInt($('s-port').value),
+    num_batteries:       parseInt($('s-batt').value),
+    poll_interval:       parseInt($('s-poll').value),
+    power_units:         $('s-powerunits').value,
+    max_charge_w:        parseInt($('s-maxchg').value) || 2600,
+    max_discharge_w:     parseInt($('s-maxdis').value) || 2600,
+    data_retention_days: parseInt($('s-retention').value),
+    backup_enabled:      $('s-bkenabled').value === 'yes',
+    backup_keep_days:    parseInt($('s-bkkeep').value) || 7,
+    weather_geohash:     $('s-wxhash').value.trim(),
+    weather_api_key:     $('s-wxkey').value.trim(),
+    weather_poll_mins:   parseInt($('s-wxpoll').value) || 30,
+    new_password:        newPw,
+  };
+  try {
+    const r   = await fetch('/api/settings', {method:'POST', headers:_settHeaders(), body:JSON.stringify(body)});
+    if (r.status === 401) { $('sett-msg').style.color='#f87171'; $('sett-msg').textContent='Session expired — please re-enter password'; return; }
+    const res = await r.json();
+    if (res.ok) {
+      if (newPw) _adminPw = newPw;   // keep session in sync with new password
+      _weatherConfigured = res.weather_configured;
+      $('sett-msg').style.color = '#4ade80';
+      $('sett-msg').textContent = '✓ Saved';
+      $('s-wxkey').value = ''; $('s-newpw').value = ''; $('s-confirmpw').value = '';
+      $('s-wxkey').placeholder = _weatherConfigured ? 'Key is set — paste new key to change' : 'Paste API key';
+      if (_weatherConfigured) pollWeather();
+    } else {
+      $('sett-msg').style.color = '#f87171';
+      $('sett-msg').textContent = 'Error: ' + (res.error || 'unknown');
+    }
+  } catch(e) {
+    $('sett-msg').style.color = '#f87171';
+    $('sett-msg').textContent = 'Save failed';
+  }
+});
+
+async function initApp() {
+  // Probe weather without needing auth — if it responds OK weather is configured
+  try {
+    const r = await fetch('/api/weather', { cache:'no-store' });
+    _weatherConfigured = r.ok;
+  } catch(e) { _weatherConfigured = false; }
+  $('weather-badge').style.display = _weatherConfigured ? '' : 'none';
+  if (_weatherConfigured) pollWeather();
+}
+
+// ── Init ────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => { layout(); particles.length = 0; });
+
+// Re-run layout whenever the flow container actually changes size. This catches
+// the page still settling on load (mobile URL bar, font loading, PWA chrome),
+// which was causing the rings to occasionally bunch up. Guarded layout() ignores
+// zero-size firings (when another view is showing).
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => {
+    if (currentView === 'live') { layout(); particles.length = 0; }
+  });
+  ro.observe($('flow-wrap'));
+}
+
+// Re-layout when fonts finish loading (text-height estimates depend on them)
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => { if (currentView === 'live') layout(); });
+}
+
+// Re-layout when returning to the tab / resuming the PWA
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && currentView === 'live') { layout(); particles.length = 0; }
+});
+
+layout();
+loop();
+poll();
+initApp();
+
+// ── History ───────────────────────────────────────────────────────────────────
+const SERIES_DEF = [
+  { key:'solar_kwh',    label:'Solar',    color:'#f59e0b' },
+  { key:'home_kwh',     label:'Home',     color:'#38bdf8' },
+  { key:'grid_in_kwh',  label:'Grid In',  color:'#f87171' },
+  { key:'grid_out_kwh', label:'Grid Out', color:'#4ade80' },
+  { key:'bat_chg_kwh',  label:'Bat Chg',  color:'#818cf8' },
+  { key:'bat_dis_kwh',  label:'Bat Dis',  color:'#c084fc' },
+];
+
+let histPeriod   = 'day';
+let histOffset   = 0;
+let histData     = [];
+let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh','bat_chg_kwh','bat_dis_kwh']);
+let currentView  = 'live';
+
+function showView(v) {
+  currentView = v;
+  const live = v === 'live';
+  $('flow-wrap').style.display      = live         ? '' : 'none';
+  $('bat-section').style.display    = live         ? '' : 'none';
+  $('tiles').style.display          = live         ? '' : 'none';
+  $('hist-panel').style.display     = v==='history'? 'flex' : 'none';
+  $('settings-panel').style.display = v==='settings'? 'flex' : 'none';
+  $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
+  $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
+  $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
+  $('weather-badge').style.display  = (live && _weatherConfigured) ? '' : 'none';
+  $('ver-bar').style.display        = live         ? '' : 'none';
+  if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
+  if (v==='history') loadHistory();
+  if (v==='settings') loadSettings();
+  if (v==='control')  loadControlState();
+  if (v==='logs')     loadLogs();
+  if (v==='hourly')   requestAnimationFrame(drawHourlyChart);
+}
+
+function setPeriod(p) {
+  histPeriod = p;
+  histOffset = 0;
+  document.querySelectorAll('.period-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.p === p));
+  loadHistory();
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/history?period='+histPeriod+'&offset='+histOffset, {cache:'no-store'});
+    histData = await r.json();
+  } catch(e) { histData = []; }
+  renderHistory();
+}
+
+function renderHistory() {
+  const limit  = histPeriod === 'year' ? 999 : histPeriod === 'month' || histPeriod === 'week' ? 12 : histPeriod === 'day' ? 1 : 30;
+  const isYear = histPeriod === 'year';
+
+  if (histData.length) {
+    const newest = pKey(histData[0]);
+    const oldest = pKey(histData[histData.length-1]);
+    let navLabel;
+    if (isYear)                  navLabel = 'All years';
+    else if (histPeriod === 'day') navLabel = fmtPLabel(newest);
+    else if (oldest === newest)   navLabel = newest;
+    else                          navLabel = oldest + ' – ' + newest;
+    $('hist-nav-label').textContent = navLabel;
+  } else {
+    $('hist-nav-label').textContent = 'No data yet';
+  }
+
+  $('hist-prev').disabled = isYear || histData.length < limit;
+  $('hist-next').disabled = isYear || histOffset === 0;
+
+  // In Day view the chart is tappable to drill into an hourly breakdown
+  const dayMode = histPeriod === 'day' && histData.length;
+  $('hist-canvas').style.cursor = dayMode ? 'pointer' : 'default';
+
+  drawHistChart();
+  updateHistSummary();
+
+  if (dayMode) {
+    $('hist-summary').innerHTML =
+      '<div style="flex:1;display:flex;align-items:center;justify-content:center;gap:6px;'
+      + 'font-size:.74rem;color:var(--muted);opacity:.85">'
+      + '<svg width="13" height="12" viewBox="0 0 16 14" fill="none" xmlns="http://www.w3.org/2000/svg">'
+      + '<rect x="1" y="7" width="3" height="6" rx="1" fill="currentColor"/>'
+      + '<rect x="6.5" y="3" width="3" height="10" rx="1" fill="currentColor"/>'
+      + '<rect x="12" y="9" width="3" height="4" rx="1" fill="currentColor"/></svg>'
+      + 'Tap the chart for an hour-by-hour breakdown</div>';
+  }
+}
+
+function niceMax(v) {
+  if (v <= 0) return 10;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  const n   = v / mag;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * mag;
+}
+
+function pKey(d) { return d.period || d.day || d.mon || d.yr || ''; }
+
+function fmtPLabel(p) {
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  if (!p) return '';
+  if (histPeriod === 'year')  return p;
+  if (histPeriod === 'month') { const [y,m]=p.split('-'); return MON[+m-1]+' '+y.slice(2); }
+  if (histPeriod === 'week') {
+    if (!p) return '';
+    // Graceful fallback for old W%W format before server restart
+    if (/^\d{4}-W\d+$/.test(p)) return p;
+    const [y,m,d] = p.split('-').map(Number);
+    if (!y || !m || !d || isNaN(d)) return p;
+    const mon = new Date(y, m-1, d);
+    const sun = new Date(y, m-1, d+6);
+    if (mon.getMonth() === sun.getMonth())
+      return mon.getDate()+'–'+sun.getDate()+' '+MON[mon.getMonth()];
+    return mon.getDate()+' '+MON[mon.getMonth()]+'–'+sun.getDate()+' '+MON[sun.getMonth()];
+  }
+  const [,mm,dd] = p.split('-'); return dd+' '+MON[+mm-1];
+}
+
+function drawHistChart() {
+  const canv = $('hist-canvas');
+  const c    = canv.getContext('2d');
+  const dpr  = Math.min(window.devicePixelRatio||1, 2);
+  const W = canv.clientWidth, H = canv.clientHeight;
+  if (!W || !H) return;
+  canv.width = W*dpr; canv.height = H*dpr;
+  c.setTransform(dpr,0,0,dpr,0,0);
+
+  const active = SERIES_DEF.filter(s => activeSeries.has(s.key));
+
+  if (!histData.length || !active.length) {
+    c.fillStyle = 'rgba(150,180,220,0.4)';
+    c.font = '13px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(histData.length ? 'Select a series' : 'No data yet — collecting soon!', W/2, H/2);
+    return;
+  }
+
+  const display = [...histData].reverse();
+  const n = display.length;
+  const PL=40, PR=8, PT=52, PB=32;
+  const cW=W-PL-PR, cH=H-PT-PB;
+
+  let maxV = 0;
+  display.forEach(d => active.forEach(s => { if ((d[s.key]||0) > maxV) maxV = d[s.key]||0; }));
+  const yMax = niceMax(maxV||1);
+
+  const fs = Math.max(9, Math.min(11, Math.round(H/35)));
+
+  // Grid lines + Y labels
+  for (let i=0; i<=4; i++) {
+    const y = PT + cH - (i/4)*cH;
+    const v = (i/4)*yMax;
+    c.strokeStyle = 'rgba(255,255,255,0.07)';
+    c.lineWidth = 1; c.setLineDash([]);
+    c.beginPath(); c.moveTo(PL,y); c.lineTo(PL+cW,y); c.stroke();
+    c.fillStyle = 'rgba(150,180,220,0.55)';
+    c.font = fs+'px sans-serif';
+    c.textAlign = 'right'; c.textBaseline = 'middle';
+    c.fillText(v>=100 ? Math.round(v) : v.toFixed(1), PL-3, y);
+  }
+
+  // Bars
+  const ns      = active.length;
+  const gW      = cW / n;
+  const barGap  = ns > 1 ? Math.min(4, Math.max(1, Math.round(gW * 0.02))) : 0;
+  const barW    = Math.max(1, (gW * 0.85 - barGap * (ns - 1)) / ns);
+  const gPad    = (gW - (barW * ns + barGap * (ns - 1))) / 2;
+  const skip = Math.max(1, Math.ceil(n / Math.floor(cW/28)));
+
+  display.forEach((d, gi) => {
+    const gx = PL + gi*gW;
+    active.forEach((s, si) => {
+      const v  = d[s.key] || 0;
+      const bh = (v/yMax)*cH;
+      if (bh < 0.5) return;
+      const bx = gx + gPad + si * (barW + barGap);
+      const by = PT + cH - bh;
+      const r  = Math.min(3, barW/2, bh/2);
+      const grad = c.createLinearGradient(0, by, 0, by+bh);
+      grad.addColorStop(0, s.color+'ee');
+      grad.addColorStop(1, s.color+'55');
+      c.fillStyle = grad;
+      c.beginPath();
+      c.moveTo(bx+r, by);
+      c.lineTo(bx+barW-r, by); c.quadraticCurveTo(bx+barW, by, bx+barW, by+r);
+      c.lineTo(bx+barW, by+bh); c.lineTo(bx, by+bh);
+      c.lineTo(bx, by+r);       c.quadraticCurveTo(bx, by, bx+r, by);
+      c.closePath(); c.fill();
+
+      // Value box floats above bar, same width as bar, text scales to fit
+      if (v > 0 && barW >= 14) {
+        const valStr = v < 100 ? v.toFixed(1) : Math.round(v).toString();
+        const lblStr = s.label + ' kWh';
+        const valFs = Math.max(8,  Math.min(18, Math.round(barW * 0.28)));
+        const lblFs = Math.max(6,  Math.min(12, Math.round(valFs * 0.65)));
+        const pV = 4, gap = 2;
+        const boxW = barW;
+        const boxH = valFs + lblFs + gap + pV * 2;
+        const boxX = bx;
+        const boxY = by - boxH - 4;
+        const rr   = Math.min(5, barW / 5);
+
+        const rrPath = () => {
+          c.beginPath();
+          c.moveTo(boxX+rr, boxY);
+          c.lineTo(boxX+boxW-rr, boxY); c.quadraticCurveTo(boxX+boxW, boxY, boxX+boxW, boxY+rr);
+          c.lineTo(boxX+boxW, boxY+boxH-rr); c.quadraticCurveTo(boxX+boxW, boxY+boxH, boxX+boxW-rr, boxY+boxH);
+          c.lineTo(boxX+rr, boxY+boxH); c.quadraticCurveTo(boxX, boxY+boxH, boxX, boxY+boxH-rr);
+          c.lineTo(boxX, boxY+rr); c.quadraticCurveTo(boxX, boxY, boxX+rr, boxY);
+          c.closePath();
+        };
+
+        c.fillStyle = 'rgba(8,14,28,0.82)'; rrPath(); c.fill();
+        c.strokeStyle = s.color + 'aa'; c.lineWidth = 1.5; rrPath(); c.stroke();
+
+        c.save(); rrPath(); c.clip();
+        c.textAlign = 'center'; c.textBaseline = 'top';
+        c.font = `bold ${valFs}px sans-serif`;
+        c.fillStyle = s.color;
+        c.fillText(valStr, boxX + boxW/2, boxY + pV);
+        c.font = `${lblFs}px sans-serif`;
+        c.fillStyle = 'rgba(140,170,200,0.85)';
+        c.fillText(lblStr, boxX + boxW/2, boxY + pV + valFs + gap);
+        c.restore();
+      }
+    });
+
+    if (gi % skip === 0 || gi === n-1) {
+      c.fillStyle = 'rgba(150,180,220,0.6)';
+      c.font = fs+'px sans-serif';
+      c.textAlign = 'center'; c.textBaseline = 'top';
+      c.fillText(fmtPLabel(pKey(d)), gx+gW/2, PT+cH+5);
+    }
+  });
+}
+
+function updateHistSummary() {
+  $('hist-summary').innerHTML = '';
+}
+
+// Tap any bottom tile to open history with all series showing
+document.querySelectorAll('#tiles .tile').forEach(tile =>
+  tile.addEventListener('click', () => {
+    activeSeries = new Set(SERIES_DEF.map(s => s.key));
+    document.querySelectorAll('#hist-series-row .sbtn').forEach(b => b.classList.add('active'));
+    showView('history');
+  })
+);
+
+$('hist-back').addEventListener('click', () => showView('live'));
+
+document.querySelectorAll('.period-btn').forEach(b =>
+  b.addEventListener('click', () => setPeriod(b.dataset.p)));
+
+function _navStep() {
+  return histPeriod === 'day' ? 1 : (histPeriod === 'month' || histPeriod === 'week') ? 12 : 30;
+}
+$('hist-prev').addEventListener('click', () => { histOffset += _navStep(); loadHistory(); });
+$('hist-next').addEventListener('click', () => { histOffset = Math.max(0, histOffset - _navStep()); loadHistory(); });
+
+document.querySelectorAll('#hist-series-row .sbtn').forEach(b =>
+  b.addEventListener('click', () => {
+    const k = b.dataset.s;
+    if (activeSeries.has(k)) activeSeries.delete(k); else activeSeries.add(k);
+    b.classList.toggle('active', activeSeries.has(k));
+    drawHistChart();
+    updateHistSummary();
+  }));
+
+// Tap the chart in Day view → hourly breakdown for that day
+$('hist-canvas').addEventListener('click', () => {
+  if (histPeriod === 'day' && histData.length) openHourly(pKey(histData[0]));
+});
+
+window.addEventListener('resize', () => {
+  if (currentView==='history') drawHistChart();
+  if (currentView==='hourly')  drawHourlyChart();
+});
+
+// ── Hourly breakdown ──────────────────────────────────────────────────────────
+let hourlyDay    = '';        // 'YYYY-MM-DD'
+let hourlyData   = [];        // 24 hour objects
+let hourlyActive = new Set(['solar_kwh','home_kwh']);
+let hourlyShowSoc = true;
+let _hourlyScrolledDay = '';  // auto-scroll the view once per day shown
+
+function openHourly(day) {
+  hourlyDay = day;
+  showView('hourly');
+  loadHourly();
+}
+
+async function loadHourly() {
+  try {
+    const r = await fetch('/api/hourly?day=' + encodeURIComponent(hourlyDay), {cache:'no-store'});
+    const d = await r.json();
+    hourlyData = d.ok ? d.hours : [];
+  } catch(e) { hourlyData = []; }
+  $('hourly-nav-label').textContent = _hourlyDateLabel(hourlyDay);
+  // Disable "next" if we're already on (or past) today
+  const today = new Date(); today.setHours(0,0,0,0);
+  const shown = new Date(hourlyDay + 'T00:00:00');
+  $('hourly-next').disabled = shown >= today;
+  drawHourlyChart();
+}
+
+function _hourlyDateLabel(day) {
+  const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  if (!day) return '';
+  const [y,m,d] = day.split('-').map(Number);
+  const dt = new Date(y, m-1, d);
+  return DOW[dt.getDay()] + ' ' + d + ' ' + MON[m-1] + ' ' + y;
+}
+
+function _shiftHourlyDay(deltaDays) {
+  const dt = new Date(hourlyDay + 'T00:00:00');
+  dt.setDate(dt.getDate() + deltaDays);
+  const y = dt.getFullYear();
+  const m = String(dt.getMonth()+1).padStart(2,'0');
+  const d = String(dt.getDate()).padStart(2,'0');
+  hourlyDay = `${y}-${m}-${d}`;
+  loadHourly();
+}
+
+$('hourly-back').addEventListener('click', () => showView('history'));
+$('hourly-prev').addEventListener('click', () => _shiftHourlyDay(-1));
+$('hourly-next').addEventListener('click', () => { if (!$('hourly-next').disabled) _shiftHourlyDay(1); });
+
+document.querySelectorAll('#hourly-series-row .sbtn[data-hs]').forEach(b =>
+  b.addEventListener('click', () => {
+    const k = b.dataset.hs;
+    if (hourlyActive.has(k)) hourlyActive.delete(k); else hourlyActive.add(k);
+    b.classList.toggle('active', hourlyActive.has(k));
+    drawHourlyChart();
+  }));
+
+$('hourly-soc-btn').addEventListener('click', () => {
+  hourlyShowSoc = !hourlyShowSoc;
+  $('hourly-soc-btn').classList.toggle('active', hourlyShowSoc);
+  drawHourlyChart();
+});
+
+function drawHourlyChart() {
+  const canv    = $('hourly-canvas');
+  const axisCv  = $('hourly-axis');
+  const scrollEl= $('hourly-scroll');
+  if (!canv || !axisCv || !scrollEl) return;
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const H   = scrollEl.clientHeight;
+  if (!H) return;
+
+  const n   = 24;
+  const PT=18, PB=26;            // top / bottom padding (x-labels in PB)
+  const cH  = H - PT - PB;
+  const active = SERIES_DEF.filter(s => hourlyActive.has(s.key));
+
+  // Y scale (kWh) shared by both canvases
+  let maxV = 0;
+  hourlyData.forEach(h => active.forEach(s => { if ((h[s.key]||0) > maxV) maxV = h[s.key]||0; }));
+  const yMax = niceMax(maxV||1);
+  const fs = Math.max(9, Math.min(11, Math.round(H/40)));
+
+  // ── Pinned left axis (kWh) ────────────────────────────────────────────────
+  {
+    const AW = axisCv.clientWidth || 34;
+    axisCv.width = AW*dpr; axisCv.height = H*dpr;
+    const a = axisCv.getContext('2d');
+    a.setTransform(dpr,0,0,dpr,0,0);
+    a.clearRect(0,0,AW,H);
+    a.fillStyle='rgba(150,180,220,0.6)'; a.font=fs+'px sans-serif';
+    a.textAlign='right'; a.textBaseline='middle';
+    for (let i=0;i<=4;i++){
+      const y = PT + cH - (i/4)*cH;
+      a.fillText(((i/4)*yMax).toFixed(1), AW-3, y);
+    }
+  }
+
+  // ── Scrollable bars canvas ────────────────────────────────────────────────
+  const PXH = 46;                                 // pixels per hour
+  const LPAD = 6, RPAD = 8;
+  const contentW = Math.max(scrollEl.clientWidth, n*PXH + LPAD + RPAD);
+  canv.style.width = contentW + 'px';
+  canv.width = contentW*dpr; canv.height = H*dpr;
+  const c = canv.getContext('2d');
+  c.setTransform(dpr,0,0,dpr,0,0);
+  c.clearRect(0,0,contentW,H);
+
+  if (!hourlyData.length) {
+    c.fillStyle='rgba(150,180,220,0.4)'; c.font='13px sans-serif';
+    c.textAlign='center'; c.textBaseline='middle';
+    c.fillText('No data for this day', contentW/2, H/2);
+    return;
+  }
+
+  const plotW = contentW - LPAD - RPAD;
+  const gW = plotW / n;
+
+  // Grid lines (full width)
+  c.strokeStyle='rgba(255,255,255,0.07)'; c.lineWidth=1; c.setLineDash([]);
+  for (let i=0;i<=4;i++){
+    const y = PT + cH - (i/4)*cH;
+    c.beginPath(); c.moveTo(LPAD,y); c.lineTo(LPAD+plotW,y); c.stroke();
+  }
+
+  // Bars
+  const ns = active.length;
+  const barGap = ns>1 ? 2 : 0;
+  const barW = Math.max(2, (gW*0.74 - barGap*(ns-1)) / Math.max(1,ns));
+  const gPad = (gW - (barW*ns + barGap*(ns-1))) / 2;
+
+  hourlyData.forEach((h, gi) => {
+    const gx = LPAD + gi*gW;
+    active.forEach((s, si) => {
+      const v = h[s.key] || 0;
+      const bh = (v/yMax)*cH;
+      if (bh < 0.5) return;
+      const bx = gx + gPad + si*(barW+barGap);
+      const by = PT + cH - bh;
+      const r  = Math.min(3, barW/2, bh/2);
+      const grad = c.createLinearGradient(0, by, 0, by+bh);
+      grad.addColorStop(0, s.color+'ee'); grad.addColorStop(1, s.color+'55');
+      c.fillStyle = grad;
+      c.beginPath();
+      c.moveTo(bx+r,by);
+      c.lineTo(bx+barW-r,by); c.quadraticCurveTo(bx+barW,by,bx+barW,by+r);
+      c.lineTo(bx+barW,by+bh); c.lineTo(bx,by+bh);
+      c.lineTo(bx,by+r); c.quadraticCurveTo(bx,by,bx+r,by);
+      c.closePath(); c.fill();
+    });
+    // X label every hour (room to breathe now)
+    c.fillStyle='rgba(150,180,220,0.65)'; c.font=fs+'px sans-serif';
+    c.textAlign='center'; c.textBaseline='top';
+    c.fillText(String(h.hour).padStart(2,'0'), gx+gW/2, PT+cH+6);
+  });
+
+  // SOC line (0–100% mapped over full height) with inline % labels
+  if (hourlyShowSoc) {
+    const pts = [];
+    hourlyData.forEach((h, gi) => {
+      if (h.soc == null) return;
+      pts.push({ x: LPAD + gi*gW + gW/2, y: PT + cH - (h.soc/100)*cH, soc: h.soc, gi });
+    });
+    if (pts.length > 1) {
+      c.strokeStyle = '#fbbf24'; c.lineWidth = 2; c.setLineDash([]);
+      c.beginPath();
+      pts.forEach((p,i) => i===0 ? c.moveTo(p.x,p.y) : c.lineTo(p.x,p.y));
+      c.stroke();
+      c.fillStyle = '#fbbf24';
+      pts.forEach(p => { c.beginPath(); c.arc(p.x,p.y,2.4,0,Math.PI*2); c.fill(); });
+      // Inline % labels every 3 hours so the SOC is readable without an axis
+      c.font = 'bold '+fs+'px sans-serif'; c.textAlign='center'; c.textBaseline='bottom';
+      pts.forEach(p => {
+        if (p.gi % 3 === 0) {
+          c.fillStyle='rgba(8,14,28,0.7)';
+          const t = p.soc+'%'; const w = c.measureText(t).width+4;
+          c.fillRect(p.x-w/2, p.y-fs-6, w, fs+3);
+          c.fillStyle='#fbbf24';
+          c.fillText(t, p.x, p.y-4);
+        }
+      });
+    }
+  }
+
+  // Auto-scroll once per day to the most interesting part (peak solar+home)
+  if (hourlyDay !== _hourlyScrolledDay) {
+    _hourlyScrolledDay = hourlyDay;
+    let peak = 0, peakHr = 12;
+    hourlyData.forEach((h, gi) => {
+      const t = (h.solar_kwh||0) + (h.home_kwh||0);
+      if (t > peak) { peak = t; peakHr = gi; }
+    });
+    const target = LPAD + peakHr*gW + gW/2 - scrollEl.clientWidth/2;
+    scrollEl.scrollLeft = Math.max(0, target);
+  }
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
+}
+</script>
+</body>
+</html>

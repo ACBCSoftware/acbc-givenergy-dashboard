@@ -1,0 +1,11 @@
+# Normalise line endings. Let Git decide for text files...
+* text=auto
+
+# ...but shell scripts MUST stay LF or they break on Linux / Raspberry Pi.
+*.sh text eol=lf
+
+# Treat these as binary (no line-ending munging, no diff noise).
+*.png binary
+*.ico binary
+*.gz  binary
+*.db  binary

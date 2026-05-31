@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contact — ACBC GivEnergy Dashboard</title>
+<meta name="description" content="Get in touch about the ACBC GivEnergy Dashboard.">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d1b35'/><path d='M18 2L9 18h6l-3 12 11-16h-6z' fill='%23f59e0b'/></svg>">
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <span class="bolt">&#9889;</span> ACBC GivEnergy
+  </a>
+  <div class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="install-windows.html">Windows</a>
+    <a href="install-linux.html">Linux</a>
+    <a href="release-notes.html">Releases</a>
+    <a href="contact.html" class="active">Contact</a>
+    <a href="licence.html">Licence</a>
+  </div>
+</nav>
+
+<div class="page" style="max-width:680px">
+
+  <div class="install-hero">
+    <div class="platform-badge">&#9993;&#65039; Get in touch</div>
+    <h1>Contact</h1>
+    <p>Found a bug, got a feature idea, or just want to say hello? Drop a message below.</p>
+  </div>
+
+  <div class="contact-card">
+    <form id="contact-form" autocomplete="off">
+      <div class="form-row">
+        <label for="cf-name">Your name</label>
+        <input type="text" id="cf-name" placeholder="Jane Smith" required>
+      </div>
+      <div class="form-row">
+        <label for="cf-subject">Subject</label>
+        <input type="text" id="cf-subject" placeholder="What's it about?" required>
+      </div>
+      <div class="form-row">
+        <label for="cf-message">Message</label>
+        <textarea id="cf-message" placeholder="Tell me more…" required></textarea>
+      </div>
+
+      <!-- Honeypot: hidden from humans, bots tend to fill it -->
+      <div class="hp-field" aria-hidden="true">
+        <label for="cf-website">Leave this field empty</label>
+        <input type="text" id="cf-website" tabindex="-1" autocomplete="off">
+      </div>
+
+      <button type="submit" class="btn btn-primary" style="width:100%">&#9993;&#65039; Open email to send</button>
+      <div id="cf-status" style="min-height:20px;margin-top:12px;font-size:.85rem;text-align:center"></div>
+    </form>
+
+    <p class="contact-note">
+      This opens your own email app with the message ready to send — your email address stays private and nothing is submitted to a server.
+    </p>
+  </div>
+
+  <!-- Support -->
+  <section style="margin-top:48px">
+    <div class="donate-card">
+      <div class="donate-icon">&#9889;</div>
+      <h3>Enjoying the free software?</h3>
+      <p>Buy me a RedBull and help keep the late-night coding alive. Thank you!</p>
+      <form action="https://www.paypal.com/donate" method="post" target="_top">
+        <input type="hidden" name="business" value="ZAN6CZ32GF3HW" />
+        <input type="hidden" name="no_recurring" value="1" />
+        <input type="hidden" name="item_name" value="Enjoying the free software? Buy me a RedBull and help keep the late-night coding alive. Thank you!" />
+        <input type="hidden" name="currency_code" value="GBP" />
+        <button type="submit" class="btn-donate">&#128156; Donate with PayPal</button>
+      </form>
+    </div>
+  </section>
+
+</div><!-- /page -->
+
+<footer>
+  <p>ACBC GivEnergy Dashboard &nbsp;&middot;&nbsp; V1.5 Public Beta &nbsp;&middot;&nbsp; &copy; ACBC Software</p>
+  <p style="margin-top:6px">
+    <a href="index.html">Home</a> &nbsp;&middot;&nbsp;
+    <a href="release-notes.html">Release notes</a> &nbsp;&middot;&nbsp;
+    <a href="licence.html">Licence</a>
+  </p>
+</footer>
+
+<script>
+  // Email address assembled at runtime so it never appears in the page source
+  // (defends against automated address harvesters / spam bots).
+  function _recipient() {
+    const user = ['andrew','j','campbell','75'].join('');
+    const dom  = ['gmail', 'com'].join('.');
+    return user + String.fromCharCode(64) + dom;
+  }
+
+  const form = document.getElementById('contact-form');
+  const status = document.getElementById('cf-status');
+
+  // Record load time — instant submissions are almost always bots
+  const _loadedAt = Date.now();
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+
+    // 1. Honeypot check
+    if (document.getElementById('cf-website').value.trim() !== '') {
+      status.style.color = '#f87171';
+      status.textContent = 'Submission blocked.';
+      return;
+    }
+
+    // 2. Time-trap: reject submissions faster than 3 seconds
+    if (Date.now() - _loadedAt < 3000) {
+      status.style.color = '#f87171';
+      status.textContent = 'Please take a moment before sending.';
+      return;
+    }
+
+    const name    = document.getElementById('cf-name').value.trim();
+    const subject = document.getElementById('cf-subject').value.trim();
+    const message = document.getElementById('cf-message').value.trim();
+
+    if (!name || !subject || !message) {
+      status.style.color = '#f87171';
+      status.textContent = 'Please fill in all fields.';
+      return;
+    }
+
+    const body = message + '\n\n— ' + name;
+    const href = 'mailto:' + _recipient()
+               + '?subject=' + encodeURIComponent('[GivEnergy] ' + subject)
+               + '&body='    + encodeURIComponent(body);
+
+    window.location.href = href;
+
+    status.style.color = '#4ade80';
+    status.textContent = 'Opening your email app…';
+  });
+</script>
+
+</body>
+</html>

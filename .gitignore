@@ -1,0 +1,53 @@
+# ─── Secrets & private data (NEVER commit) ────────────────────────────
+config.ini
+*.pem
+cert.pem
+key.pem
+history.db
+history.db-shm
+history.db-wal
+backups/
+
+# ─── Python / virtualenv / build artefacts ────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ─── Installer / packaging output ─────────────────────────────────────
+Output/
+dist/
+build/
+*.exe
+*.zip
+
+# ─── gen3-capture diagnostic: build output & captured data ────────────
+gen3-capture/build/
+gen3-capture/dist/
+gen3-capture/Gen3 Capture/
+gen3-capture/capture_*.bin
+gen3-capture/capture_*.log
+gen3-capture/gen3_config.ini
+
+# ─── Big release binaries (publish these as GitHub Releases instead) ──
+website/downloads/*.exe
+website/downloads/*.zip
+
+# ─── GivEnergy API Catalogue reference tooling (separate project) ─────
+serve.py
+index.html
+catalogue.json
+build_catalogue.py
+build_local_docs.py
+givenergy-api-docs.html
+givenergy-api-v1.openapi.yaml
+givenergy-local-modbus.json
+
+# ─── Editor / OS / local agent ────────────────────────────────────────
+.claude/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

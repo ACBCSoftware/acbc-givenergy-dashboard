@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Windows Install — ACBC GivEnergy Dashboard</title>
+<meta name="description" content="Install the ACBC GivEnergy Dashboard on Windows 10 or 11 using the one-click installer.">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230d1b35'/><path d='M18 2L9 18h6l-3 12 11-16h-6z' fill='%23f59e0b'/></svg>">
+</head>
+<body>
+
+<nav>
+  <a class="nav-brand" href="index.html">
+    <span class="bolt">&#9889;</span> ACBC GivEnergy
+  </a>
+  <div class="nav-links">
+    <a href="index.html">Home</a>
+    <a href="install-windows.html" class="active">Windows</a>
+    <a href="install-linux.html">Linux</a>
+    <a href="release-notes.html">Releases</a>
+    <a href="contact.html">Contact</a>
+    <a href="licence.html">Licence</a>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="install-hero">
+    <div class="platform-badge">&#128187; Windows 10 / 11</div>
+    <h1>Windows Installation</h1>
+    <p>A one-click installer handles everything — Python packages, icons and shortcuts are all set up automatically.</p>
+  </div>
+
+  <!-- Download card -->
+  <div class="download-card">
+    <div>
+      <h3>&#128229; ACBC-GivEnergy-Dashboard-Setup-v1.5.exe</h3>
+      <p>Windows 10 / 11 &nbsp;&middot;&nbsp; ~15 MB &nbsp;&middot;&nbsp; Requires Python 3.9+ (see Step 1)</p>
+    </div>
+    <a href="downloads/ACBC-GivEnergy-Dashboard-Setup-v1.5.exe" class="btn btn-win">Download installer</a>
+  </div>
+
+  <div class="steps">
+
+    <!-- Step 1 -->
+    <div class="step">
+      <div class="step-num">1</div>
+      <div class="step-body">
+        <h3>Install Python (if you don't have it)</h3>
+        <p>The dashboard is built on Python. If you've never installed it, grab the latest version from <a href="https://python.org/downloads" target="_blank">python.org/downloads</a>.</p>
+        <div class="info-box">
+          <strong>Important:</strong> during the Python installer, tick <strong>"Add Python to PATH"</strong> before clicking Install. The dashboard installer needs to find Python from the command line.
+        </div>
+        <p style="margin-top:8px">If Python is already installed, you can skip this step.</p>
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step">
+      <div class="step-num">2</div>
+      <div class="step-body">
+        <h3>Run the installer</h3>
+        <p>Download and run <strong>ACBC-GivEnergy-Dashboard-Setup-v1.5.exe</strong> from the button above.</p>
+        <p style="margin-top:8px">The installer will:</p>
+        <ul>
+          <li>Create a Python virtual environment</li>
+          <li>Download and install all required packages (needs internet access)</li>
+          <li>Generate the app icons</li>
+          <li>Create Start Menu shortcuts</li>
+          <li>Optionally create a Desktop shortcut</li>
+          <li>Optionally start the dashboard at Windows login</li>
+        </ul>
+        <div class="info-box" style="margin-top:12px">
+          <strong>Note:</strong> Windows may show a SmartScreen warning because the installer isn't code-signed. Click <strong>More info → Run anyway</strong> to proceed.
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step">
+      <div class="step-num">3</div>
+      <div class="step-body">
+        <h3>Edit the configuration file</h3>
+        <p>At the end of installation you'll be offered the option to open <span class="inline-code">config.ini</span> in Notepad. You can also find it at any time via <strong>Start Menu → ACBC GivEnergy Dashboard → Edit Configuration</strong>.</p>
+        <p style="margin-top:8px">The only value you <em>must</em> change is your inverter's IP address:</p>
+        <pre><code>[inverter]
+ip = 192.168.1.100   ; &lt;-- change this to your inverter's LAN IP</code></pre>
+        <p>Find your inverter's IP in your router's connected-devices or DHCP list. It is usually labelled <em>GivEnergy</em> or <em>SA-xxxx</em>.</p>
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step">
+      <div class="step-num">4</div>
+      <div class="step-body">
+        <h3>Start the dashboard</h3>
+        <p>Use <strong>Start Menu → ACBC GivEnergy Dashboard → Start Dashboard</strong>, or the Desktop shortcut if you created one.</p>
+        <p style="margin-top:8px">A console window will appear while the dashboard runs. Once you see <em>"Dashboard ready"</em> open your browser and go to:</p>
+        <pre><code>http://localhost:7890</code></pre>
+        <p>From another device on the same network (your phone, tablet), use your PC's IP address instead of <span class="inline-code">localhost</span>.</p>
+      </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="step">
+      <div class="step-num">5</div>
+      <div class="step-body">
+        <h3>Change the admin password</h3>
+        <p>The settings screen is protected by a password. The default is <span class="inline-code">password</span> — change it on first use.</p>
+        <p style="margin-top:8px">Tap the <strong>&#9889;</strong> lightning bolt icon in the top-left of the dashboard to open Settings.</p>
+      </div>
+    </div>
+
+    <!-- Step 6 — phone -->
+    <div class="step">
+      <div class="step-num">6</div>
+      <div class="step-body">
+        <h3>Add to your phone (optional)</h3>
+        <p>Open <span class="inline-code">http://&lt;your-pc-ip&gt;:7890</span> in your phone's browser.</p>
+        <p style="margin-top:10px"><strong>iPhone (Safari)</strong> — works over HTTP:</p>
+        <ul>
+          <li>Tap Share &#8594; <strong>Add to Home Screen</strong> &#8594; opens full-screen with no browser chrome &#10003;</li>
+        </ul>
+        <p style="margin-top:10px"><strong>Android (Chrome)</strong> — requires HTTPS for full-screen:</p>
+        <ul>
+          <li>Over plain HTTP, Chrome adds a shortcut that still opens inside the browser with the address bar visible.</li>
+          <li>For a true full-screen app on Android, serve the dashboard over HTTPS — the easiest option is <strong>Cloudflare Tunnel</strong> (free, no port forwarding). See the <a href="install-linux.html">Linux / Pi guide</a> for setup steps.</li>
+        </ul>
+      </div>
+    </div>
+
+  </div><!-- /steps -->
+
+  <!-- Stopping / uninstalling -->
+  <section style="margin-top:56px">
+    <div class="section-label">Management</div>
+    <div class="section-title" style="font-size:1.3rem">Stopping &amp; uninstalling</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">&#9209;&#65039;</div>
+        <div class="step-body">
+          <h3>Stop the dashboard</h3>
+          <p>Close the console window, or use <strong>Start Menu → Stop Dashboard</strong>.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">&#128465;&#65039;</div>
+        <div class="step-body">
+          <h3>Uninstall</h3>
+          <p>Use <strong>Settings → Apps → ACBC GivEnergy Dashboard → Uninstall</strong>, or <strong>Start Menu → Uninstall</strong>. Your <span class="inline-code">config.ini</span> and <span class="inline-code">history.db</span> are left in place so you don't lose your settings or history data.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Upgrading -->
+  <section style="margin-top:56px">
+    <div class="section-label">Upgrading</div>
+    <div class="section-title" style="font-size:1.3rem">Updating to a new version</div>
+    <div class="info-box" style="margin-bottom:16px">
+      Upgrades <strong>never touch your settings or history</strong>. Your <span class="inline-code">config.ini</span> and <span class="inline-code">history.db</span> are always preserved.
+    </div>
+    <p style="color:var(--muted)">Just download and run the newer installer. It detects the existing installation, upgrades it in place, and keeps your settings and history. It will stop the dashboard first if it's running — start it again from the Start Menu afterwards. Any new database columns are added automatically on first run.</p>
+  </section>
+
+  <!-- Troubleshooting -->
+  <section style="margin-top:56px">
+    <div class="section-label">Troubleshooting</div>
+    <div class="section-title" style="font-size:1.3rem">Common issues</div>
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <h3>"Python was not found" during install</h3>
+          <p>Install Python from <a href="https://python.org/downloads" target="_blank">python.org</a> and make sure to tick <strong>Add Python to PATH</strong>. Then re-run the installer.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <h3>Dashboard shows "Connecting…" and never loads</h3>
+          <p>Check the inverter IP in <span class="inline-code">config.ini</span>. The dashboard PC and inverter must be on the same LAN. Try pinging the inverter IP from a command prompt to confirm connectivity.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div class="step-num">?</div>
+        <div class="step-body">
+          <h3>Page not found / can't reach from phone</h3>
+          <p>Make sure Windows Firewall allows connections on port 7890. You may need to add an inbound rule for that port, or temporarily disable the firewall to test.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</div><!-- /page -->
+
+<footer>
+  <p>ACBC GivEnergy Dashboard &nbsp;&middot;&nbsp; V1.5 Public Beta &nbsp;&middot;&nbsp; &copy; ACBC Software</p>
+  <p style="margin-top:6px"><a href="licence.html">Licence</a> &nbsp;&middot;&nbsp; <a href="index.html">Home</a></p>
+</footer>
+
+</body>
+</html>

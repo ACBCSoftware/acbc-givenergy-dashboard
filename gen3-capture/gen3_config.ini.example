@@ -1,0 +1,6 @@
+[inverter]
+; IP address of the inverter on your local network.
+; Find it in your router's device list or the GivEnergy app.
+; (If you leave this blank, the tool will ask for it when it starts.)
+ip   =
+port = 8899
