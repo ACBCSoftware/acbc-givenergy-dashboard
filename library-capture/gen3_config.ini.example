@@ -1,0 +1,5 @@
+[inverter]
+; IP address of the inverter on your local network.
+; Copy this file to gen3_config.ini and set your inverter's IP.
+ip   =
+port = 8899
