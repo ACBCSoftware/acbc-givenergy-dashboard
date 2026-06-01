@@ -445,9 +445,33 @@ def _status_label(raw):
 # cycle; the inverter ignores the one that isn't addressed to it. (The CRC is the
 # same for both because GivEnergy computes it over the function + base + count,
 # not the slave byte.)
+def _crc16(data: bytes) -> bytes:
+    """CRC16-Modbus over the full inner frame (slave+func+base+count), LSB first.
+    GivTCP analysis confirmed the dongle validates CRC including the slave byte.
+    Gen3/AIO silently drops requests with incorrect CRC — Gen2 is lenient."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
+
+def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> bytes:
+    """Build a correctly CRC-signed GivEnergy transparent request frame."""
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, func]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
+    crc     = _crc16(inner)           # CRC includes slave byte — required by Gen3/AIO
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    return b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+
+# Input-register read requests.  Both slave addresses so Gen2 (0x32) and
+# Gen3/AIO (0x11) are triggered.  CRC now includes the slave byte — required
+# for Gen3/AIO to respond; Gen2 is lenient and accepts either CRC.
 _POKE_REQUESTS = [
-    bytes.fromhex("59590001001c010241423132333447353637000000000000000832040000003cd1d5"),  # Gen2 (slave 0x32)
-    bytes.fromhex("59590001001c010241423132333447353637000000000000000811040000003cd1d5"),  # Gen3 (slave 0x11)
+    _make_poke(0x32, 0x04, 0, 60),   # Gen2 inverter
+    _make_poke(0x11, 0x04, 0, 60),   # Gen3 / AIO / HV hybrid
 ]
 
 def _pop_data_frames(buf: bytearray):
