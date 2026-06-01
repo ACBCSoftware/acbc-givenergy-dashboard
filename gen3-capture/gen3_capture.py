@@ -7,8 +7,11 @@ Flags:
   --handshake     Send HR reads alongside IR pokes (previous test)
   --sequential    Proper Modbus client: wait for heartbeat, extract real
                   adapter serial, then test A-F with that serial.
-                  This is the definitive test for whether the serial is
-                  what makes the Gen3 respond.
+  --givtcp        Mirror GivTCP's EXACT burst — sends all five frames that
+                  GivTCP's fork sends for Gen3 (IR(0,60), IR(180,60),
+                  HR(0,60), HR(60,60), HR(120,60) all at slave 0x11)
+                  in rapid succession, waits 30s for any response.
+                  This is the key test — GivTCP's approach is KNOWN to work.
 """
 import socket
 import sys
@@ -22,6 +25,7 @@ from datetime import datetime
 ACK_HEARTBEATS  = "--no-ack"      not in sys.argv
 HANDSHAKE_MODE  = "--handshake"   in sys.argv
 SEQUENTIAL_MODE = "--sequential"  in sys.argv
+GIVTCP_MODE     = "--givtcp"      in sys.argv
 
 POKE_INTERVAL   = 10.0
 HB_WAIT_TIMEOUT = 240.0   # 4 minutes to wait for first heartbeat
@@ -65,6 +69,18 @@ assert _IR_POKES[0] == bytes.fromhex(
 assert _IR_POKES[1] == bytes.fromhex(
     "59590001001c010241423132333447353637000000000000000811040000003cd1d5"), \
     "0x11 IR poke CRC mismatch"
+
+# GivTCP's five-frame burst for Gen3 — all slave 0x11, all dummy serial.
+# Source: britkat1980/giv_tcp → GivTCP/givenergy_modbus_async/client/commands.py
+# refresh_plant_data() always sends these for a Gen3 with slave_addr=0x11.
+# HR(60,60) and HR(120,60) are frames we had NEVER tried before.
+_GIVTCP_BURST = [
+    _make_request(0x11, 0x04,   0, 60),  # IR(0,60)   live inverter data
+    _make_request(0x11, 0x04, 180, 60),  # IR(180,60) extended input regs
+    _make_request(0x11, 0x03,   0, 60),  # HR(0,60)   config block 1
+    _make_request(0x11, 0x03,  60, 60),  # HR(60,60)  config block 2  ← NEW
+    _make_request(0x11, 0x03, 120, 60),  # HR(120,60) config block 3  ← NEW
+]
 
 HERE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 
@@ -328,6 +344,135 @@ def _run_sequential(s, st, log, logf, binf):
         recv_for(30.0, pending_req=None)
 
 
+# ── GivTCP mode ────────────────────────────────────────────────────────────────
+
+def _run_givtcp(s, st, log, logf, binf):
+    """
+    Mirror GivTCP's exact Gen3 polling behaviour:
+
+    1. Send all five frames in rapid succession (0.25s apart — matching
+       GivTCP's tx_message_wait).
+    2. Wait up to 30 seconds for any matching response.
+    3. Log each received frame as MATCHED_REQUEST or UNSOLICITED_BACKGROUND.
+    4. Repeat every 10 seconds.
+    5. Never reconnect on timeout — only on socket error.
+
+    If this gets fast responses where our earlier tests got nothing, one of
+    the two new frames (HR(60,60) or HR(120,60)) or the burst pattern itself
+    is what GivTCP does that we were missing.
+    """
+    buf = bytearray()
+
+    GIVTCP_WAIT   = 30.0   # total seconds to wait for responses per burst
+    GIVTCP_CYCLE  = 10.0   # seconds between bursts (GivTCP default poll period)
+    TX_PACE       = 0.25   # delay between frames (matches GivTCP tx_message_wait)
+
+    # Map of pending requests: (slave, func, base) -> description
+    PENDING = {
+        (0x11, 0x04,   0): "IR(0,60)   slave=0x11",
+        (0x11, 0x04, 180): "IR(180,60) slave=0x11",
+        (0x11, 0x03,   0): "HR(0,60)   slave=0x11",
+        (0x11, 0x03,  60): "HR(60,60)  slave=0x11  ← NEW",
+        (0x11, 0x03, 120): "HR(120,60) slave=0x11  ← NEW",
+    }
+
+    log("=" * 64)
+    log("GIVTCP MODE — mirroring GivTCP's exact Gen3 burst")
+    log("=" * 64)
+    log("")
+    log("Five frames sent in rapid burst every 10s, wait 30s for response.")
+    log("New frames never previously tested: HR(60,60) and HR(120,60).")
+    log("")
+
+    cycle = 0
+    while True:
+        cycle += 1
+        log(f"─── Burst #{cycle} ───")
+
+        # Send all five frames with GivTCP-style pacing
+        matched_this_cycle = set()
+        t_burst = time.time()
+
+        for req in _GIVTCP_BURST:
+            slave = req[26]; func = req[27]
+            base  = (req[38] << 8) | req[39]
+            desc  = PENDING.get((slave, func, base), f"0x{slave:02x}/f{func:02x}/b{base}")
+            log(f"TX  {desc}  hex={req.hex()}")
+            logf.write(f"[{_ts()}] TX HEX: {req.hex()}\n"); logf.flush()
+            try:
+                s.sendall(req)
+            except Exception as exc:
+                raise ConnectionError(f"send failed: {exc}")
+            time.sleep(TX_PACE)
+
+        print(f"  > burst sent — waiting {GIVTCP_WAIT:.0f}s for responses ...", flush=True)
+
+        # Receive for GIVTCP_WAIT seconds, labelling every frame
+        t0 = time.time()
+        while time.time() - t0 < GIVTCP_WAIT:
+            remaining = GIVTCP_WAIT - (time.time() - t0)
+            s.settimeout(min(remaining, 0.5))
+            try:
+                data = s.recv(8192)
+            except socket.timeout:
+                continue
+            if not data:
+                raise ConnectionError("socket closed")
+            binf.write(data); binf.flush()
+            st["bytes"] += len(data)
+            buf.extend(data)
+
+            for frame in _pop_frames(buf):
+                elapsed = time.time() - t_burst
+                st["frames"] += 1
+                outer_func = frame[7] if len(frame) > 7 else 0
+                logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} "
+                           f"func={outer_func:02x}\n")
+                logf.write(hexdump(frame) + "\n"); logf.flush()
+
+                if outer_func == 0x01:
+                    _ack_heartbeat(s, frame, st, log)
+                    continue
+
+                if len(frame) < 44 or outer_func != 0x02:
+                    continue
+
+                rx_slave = frame[26]; rx_func = frame[27]
+                rx_base  = (frame[38] << 8) | frame[39]
+                rx_count = (frame[40] << 8) | frame[41]
+                key = (rx_slave, rx_func, rx_base)
+
+                is_match = key in PENDING
+                label    = "MATCHED_REQUEST" if is_match else "UNSOLICITED_BACKGROUND"
+                desc     = PENDING.get(key, f"slave=0x{rx_slave:02x} "
+                                       f"func=0x{rx_func:02x} base={rx_base}")
+                log(f"RX  {desc}  count={rx_count}  {label}  ({elapsed:.3f}s after burst)")
+
+                if is_match and key not in matched_this_cycle:
+                    matched_this_cycle.add(key)
+                    st["replies"] += 1; st["slaves"].add(rx_slave)
+                    d = decode_input_frame(frame)
+                    if d:
+                        log(f"  → SOC={d['soc']}% solar={d['solar']}W home={d['home']}W")
+                    if elapsed < 5.0:
+                        log(f"  *** FAST RESPONSE in {elapsed:.3f}s — "
+                            f"GivTCP burst IS working! ***")
+
+        # Summary for this cycle
+        if matched_this_cycle:
+            descs = [PENDING.get(k, str(k)) for k in matched_this_cycle]
+            log(f"Cycle #{cycle} result: {len(matched_this_cycle)} matched — "
+                f"{', '.join(descs)}")
+        else:
+            log(f"Cycle #{cycle} result: no matching responses in {GIVTCP_WAIT:.0f}s")
+
+        # Sleep remainder of the 10-second cycle
+        cycle_elapsed = time.time() - t_burst
+        sleep_time = max(0, GIVTCP_CYCLE - cycle_elapsed)
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     ip, port = load_config()
@@ -342,7 +487,8 @@ def main():
         if to_console: print(line, flush=True)
         logf.write(line + "\n"); logf.flush()
 
-    mode_str = ("SEQUENTIAL (real serial + A-F test)" if SEQUENTIAL_MODE else
+    mode_str = ("GIVTCP (5-frame burst at 0x11)"       if GIVTCP_MODE     else
+                "SEQUENTIAL (real serial + A-F test)" if SEQUENTIAL_MODE else
                 "HANDSHAKE (IR+HR poke-and-listen)"   if HANDSHAKE_MODE  else
                 "NORMAL (poke-and-listen)")
 
@@ -407,7 +553,9 @@ def main():
                 st["sock"] = s
                 log("Connected.")
 
-                if SEQUENTIAL_MODE:
+                if GIVTCP_MODE:
+                    _run_givtcp(s, st, log, logf, binf)
+                elif SEQUENTIAL_MODE:
                     _run_sequential(s, st, log, logf, binf)
 
                 else:
