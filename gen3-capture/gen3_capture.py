@@ -395,7 +395,8 @@ def _run_givtcp(s, st, log, logf, binf):
 
         for req in _GIVTCP_BURST:
             slave = req[26]; func = req[27]
-            base  = (req[38] << 8) | req[39]
+            # Request frames are 34 bytes; base is at [28:30], not [38:40]
+            base  = (req[28] << 8) | req[29]
             desc  = PENDING.get((slave, func, base), f"0x{slave:02x}/f{func:02x}/b{base}")
             log(f"TX  {desc}  hex={req.hex()}")
             logf.write(f"[{_ts()}] TX HEX: {req.hex()}\n"); logf.flush()
