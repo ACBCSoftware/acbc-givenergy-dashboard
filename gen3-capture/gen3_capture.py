@@ -36,12 +36,15 @@ _HB_RESPONSE_PREFIX = bytes.fromhex("59590001000d010141423132333447353637")
 
 
 def _crc16(data: bytes) -> bytes:
+    """CRC16-Modbus over the full inner frame (slave+func+base+count), LSB first.
+    Gen3/AIO validates CRC including the slave byte — omitting it causes the
+    dongle to silently discard requests (confirmed from GivTCP wire capture)."""
     crc = 0xFFFF
     for b in data:
         crc ^= b
         for _ in range(8):
             crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
-    return bytes([(crc >> 8) & 0xFF, crc & 0xFF])
+    return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 
 def _make_request(slave: int, func: int, base: int = 0, count: int = 60,
@@ -52,7 +55,7 @@ def _make_request(slave: int, func: int, base: int = 0, count: int = 60,
     """
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, func]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
-    crc     = _crc16(inner[1:])
+    crc     = _crc16(inner)   # includes slave byte — required for Gen3/AIO
     payload = serial + padding + inner + crc
     length  = len(payload) + 2
     return b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
@@ -62,13 +65,13 @@ def _make_request(slave: int, func: int, base: int = 0, count: int = 60,
 _IR_POKES     = [_make_request(0x32, 0x04), _make_request(0x11, 0x04)]
 _HR_HANDSHAKE = [_make_request(0x11, 0x03), _make_request(0x32, 0x03)]
 
-# Sanity-check IR pokes against known-good captured frames
+# Sanity-check IR pokes — CRC now includes slave byte (confirmed from GivTCP capture)
 assert _IR_POKES[0] == bytes.fromhex(
-    "59590001001c010241423132333447353637000000000000000832040000003cd1d5"), \
+    "59590001001c010241423132333447353637000000000000000832040000003cf5d8"), \
     "0x32 IR poke CRC mismatch"
 assert _IR_POKES[1] == bytes.fromhex(
-    "59590001001c010241423132333447353637000000000000000811040000003cd1d5"), \
-    "0x11 IR poke CRC mismatch"
+    "59590001001c010241423132333447353637000000000000000811040000003cf28b"), \
+    "0x11 IR poke CRC mismatch — must match GivTCP's frame exactly"
 
 # GivTCP's five-frame burst for Gen3 — all slave 0x11, all dummy serial.
 # Source: britkat1980/giv_tcp → GivTCP/givenergy_modbus_async/client/commands.py
