@@ -1,14 +1,13 @@
 GivEnergy Connection Diagnostic
 ================================
 
-Thanks again — we need two quick tests to pin down exactly what the Gen3
-needs. Both take about 10 minutes each. The results will tell us definitively
-how to fix the dashboard for Gen3/AIO.
+Thanks again — one more test. This one is the most important yet.
 
-Background: your last captures showed data arriving every ~5 minutes (cloud
-sync cadence). The official library gets data every 10 seconds. We need to
-find out what it does differently. The answer is probably a "handshake" step
-we're missing — that's what Test 2 checks.
+Previous tests showed data arriving every ~5 minutes (cloud sync cadence).
+The official library gets data every 10 seconds. The difference is HOW it
+asks: the library sends ONE request and waits for that exact response. Our
+tool was sending bursts of requests and listening for anything. This new
+"sequential" mode tests whether that difference is what matters.
 
 
 SETUP
@@ -16,57 +15,45 @@ SETUP
 1. Open gen3_config.ini in Notepad.
 2. Set "ip" to your inverter's IP address. Save and close.
 
-As before: CLOSE the official GivEnergy app and STOP GivTCP / Home Assistant
-while running these tests.
+CLOSE the official GivEnergy app and STOP GivTCP / Home Assistant first.
 
 
-TEST 1 — normal mode (~10 minutes)
-------------------------------------
-This is our current approach, as a fresh baseline.
+THE TEST — run-sequential.bat  (~10-15 minutes)
+------------------------------------------------
+This is the only test you need to run this time.
 
-1. Double-click gen3-capture.exe
-2. Leave it running for about 10 minutes.
-3. You should see data replies arriving roughly every 5 minutes (that's the
-   problem we're trying to fix).
-4. Stop with Ctrl+C.
+1. Double-click  run-sequential.bat
+2. You'll see:  SEQUENTIAL MODE — behaving like a proper Modbus client
+3. First it tries to detect the device (HR read). You'll see either:
+     DETECTION OK (x.xxs): HYBRID_GEN3  DTC=0x2003  ARM_fw=312
+   or "no HR response" — either is fine, it continues to the IR test.
+4. Then it starts sending IR requests one at a time and timing the replies:
+     > IR request sent to 0x11 ... REPLY in 0.347s  ← FAST — sequential polling IS working!
+   OR
+     > IR request sent to 0x11 ... NO RESPONSE (>2s timeout)
+5. Run it for 10-15 minutes.
+6. Stop with Ctrl+C.
 
-What we're looking for:
-  REPLY lines arriving every ~300 seconds = cloud cadence (the problem)
-
-
-TEST 2 — handshake mode (~10 minutes)  [this is the key test]
---------------------------------------------------------------
-This adds a "Holding Register" read before the normal data pokes — exactly
-what the official library does when it first connects. If this fixes the
-5-minute cadence you should see data arriving every 10 seconds instead.
-
-1. Double-click run-handshake.bat  (NOT gen3-capture.exe directly)
-2. You'll see:  Handshake: ON — sending HR reads to trigger poll-response mode
-3. Leave it running for about 10 minutes.
-4. Stop with Ctrl+C.
-
-What we're looking for:
-  REPLY lines arriving every ~10 seconds = poll-response mode (the fix!)
-  OR still every ~5 minutes = handshake isn't the answer
+WHAT WE'RE LOOKING FOR:
+  Fast replies (<2s) every 10s  = sequential polling is the fix — great news!
+  Timeouts or still ~5 min gaps = the dongle won't respond regardless of approach
 
 
 WHAT TO SEND BACK
 -----------------
-Each run creates two files named like:
-    capture_20260601_140000.bin
-    capture_20260601_140000.log
+Two files are created each run:
+    capture_<timestamp>.bin
+    capture_<timestamp>.log
 
-Please send BOTH files from EACH test — 4 files total.
-
-Also handy: a one-liner note of what you saw (data every 10s, or still 5min).
+Please send both. A one-line note of what you saw (fast/slow/timeouts) helps.
 
 
 TROUBLESHOOTING
 ---------------
-- Windows SmartScreen warning: click "More info" then "Run anyway".
-- No REPLY lines at all: check the IP in gen3_config.ini.
+- Windows SmartScreen: click "More info" then "Run anyway".
+- No output at all: check the IP in gen3_config.ini.
 
-The run-no-ack.bat launcher is also included if needed (disables heartbeat
-response — only useful if asked for specifically).
+The other launchers (run-handshake.bat, run-no-ack.bat) are only needed
+if asked for specifically.
 
-Cheers — this test will crack it.
+This is the last piece of the puzzle — appreciate your patience!
