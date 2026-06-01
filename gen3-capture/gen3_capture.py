@@ -36,10 +36,12 @@ POKES = [
 POKE_INTERVAL = 10        # seconds between pokes (matches the dashboard default)
 
 # The dongle emits a 1/Heartbeat frame (outer function 0x01) roughly every 3
-# minutes and expects the client to echo it back within ~5s, or it stops
-# answering register reads. We acknowledge it by default; pass --no-ack to
-# reproduce the old "goes dead after a while" behaviour for comparison.
+# minutes. The correct response uses a dummy serial (AB1234G567) — NOT the
+# dongle's real serial echoed back. Echoing the real serial causes the dongle
+# to disrupt its data stream. This matches what givenergy-modbus does.
+# Pass --no-ack to disable the response (for comparison testing).
 ACK_HEARTBEATS = "--no-ack" not in sys.argv
+_HB_RESPONSE_PREFIX = bytes.fromhex("59590001000d010141423132333447353637")
 
 if getattr(sys, "frozen", False):
     HERE = Path(sys.executable).parent
@@ -138,13 +140,14 @@ def main():
                    f"FRAME #{st['frames']} len={len(frame)} func={func:02x}\n")
         logf.write(hexdump(frame) + "\n"); logf.flush()
 
-        # 1/Heartbeat from the dongle — echo it straight back to keep the session
-        # alive (a HeartbeatResponse is the same bytes as the request).
+        # 1/Heartbeat from the dongle. Respond with dummy serial AB1234G567 —
+        # NOT the real serial echoed back (that disrupts the data stream).
         if func == 0x01:
             st["heartbeats"] += 1
             if ACK_HEARTBEATS and st.get("sock") is not None:
                 try:
-                    st["sock"].sendall(frame)
+                    type_byte = frame[18:19] if len(frame) > 18 else b"\x01"
+                    st["sock"].sendall(_HB_RESPONSE_PREFIX + type_byte)
                     log(f"HEARTBEAT received  ->  ACK sent (#{st['heartbeats']})")
                 except Exception as exc:
                     log(f"HEARTBEAT received  ->  ACK FAILED: {exc}")
