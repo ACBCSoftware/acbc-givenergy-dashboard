@@ -498,13 +498,28 @@ def _is_heartbeat_frame(frame: bytes) -> bool:
     """True if this is a 1/Heartbeat frame from the dongle (outer function 0x01)."""
     return len(frame) >= 8 and frame[7] == 0x01
 
-def _is_heartbeat_alive() -> float:
-    """Return current time — used to reset the watchdog when a heartbeat arrives.
-    The GivEnergy dongle emits a 1/Heartbeat frame (~every 3 minutes).
-    We do NOT echo anything back: on Gen2 the dongle broadcasts continuously and
-    sending a response disrupts the stream. Instead, receiving a heartbeat is
-    treated as proof the connection is alive, resetting the 75s watchdog."""
-    return time.time()
+# Pre-built heartbeat response: header + dummy serial 'AB1234G567' (what the
+# givenergy-modbus library sends). The type byte (last byte) is patched per-frame.
+# Must NOT echo the dongle's real serial back — that causes the dongle to treat the
+# session as looped and reset, producing far more 75s drops than no response at all.
+_HB_RESPONSE_PREFIX = bytes.fromhex("59590001000d010141423132333447353637")
+
+def _ack_heartbeat(s, frame: bytes) -> None:
+    """Respond to the dongle's 1/Heartbeat with the correct dummy-serial response.
+
+    The GivEnergy dongle sends a heartbeat every ~3 minutes. After 3 missed
+    responses (~9 min) it closes the TCP socket. We must reply, but with a
+    dummy serial (AB1234G567) — not the dongle's own serial echoed back.
+    Echoing the real serial causes the dongle to reset the session (confirmed:
+    40× more drops vs not responding at all). This matches what the
+    givenergy-modbus library does exactly (BasePDU.data_adapter_serial_number
+    default + type byte from the request).
+    """
+    try:
+        type_byte = frame[18:19] if len(frame) > 18 else b"\x01"
+        s.sendall(_HB_RESPONSE_PREFIX + type_byte)
+    except Exception:
+        pass
 
 # ── Shared loop housekeeping ─────────────────────────────────────────────────────
 def _handle_reading(data: dict, st: dict):
@@ -610,9 +625,10 @@ def _run_listen(st: dict):
                     buf.extend(chunk)
                     for frame in _pop_data_frames(buf):
                         if _is_heartbeat_frame(frame):
-                            last_frame = _is_heartbeat_alive()  # reset watchdog
+                            _ack_heartbeat(s, frame)    # respond with dummy serial
+                            last_frame = time.time()    # reset watchdog
                             if not st.get("hb_seen"):
-                                log.info("Heartbeat received — connection alive")
+                                log.info("Heartbeat received and acknowledged")
                                 st["hb_seen"] = True
                             continue
                         d = _decode_listen_frame(frame)
@@ -660,7 +676,8 @@ def _probe_listen() -> bool:
             buf.extend(chunk)
             for frame in _pop_data_frames(buf):
                 if _is_heartbeat_frame(frame):
-                    continue  # ignore heartbeats during probe
+                    _ack_heartbeat(s, frame)
+                    continue
                 if _decode_listen_frame(frame) is not None:
                     s.close()
                     return True
