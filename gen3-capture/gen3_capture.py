@@ -35,6 +35,12 @@ POKES = [
 ]
 POKE_INTERVAL = 10        # seconds between pokes (matches the dashboard default)
 
+# The dongle emits a 1/Heartbeat frame (outer function 0x01) roughly every 3
+# minutes and expects the client to echo it back within ~5s, or it stops
+# answering register reads. We acknowledge it by default; pass --no-ack to
+# reproduce the old "goes dead after a while" behaviour for comparison.
+ACK_HEARTBEATS = "--no-ack" not in sys.argv
+
 if getattr(sys, "frozen", False):
     HERE = Path(sys.executable).parent
 else:
@@ -118,10 +124,10 @@ def main():
     threading.Thread(target=note_reader, daemon=True).start()
 
     st = {
-        "frames": 0, "bytes": 0, "replies": 0,
+        "frames": 0, "bytes": 0, "replies": 0, "heartbeats": 0,
         "last_reply": 0.0, "last_poke": 0.0,
         "max_gap": 0.0, "gaps_over_30s": 0,
-        "slaves": set(), "last_report": time.time(),
+        "slaves": set(), "last_report": time.time(), "sock": None,
     }
 
     def handle_frame(frame):
@@ -131,6 +137,20 @@ def main():
         logf.write(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] "
                    f"FRAME #{st['frames']} len={len(frame)} func={func:02x}\n")
         logf.write(hexdump(frame) + "\n"); logf.flush()
+
+        # 1/Heartbeat from the dongle — echo it straight back to keep the session
+        # alive (a HeartbeatResponse is the same bytes as the request).
+        if func == 0x01:
+            st["heartbeats"] += 1
+            if ACK_HEARTBEATS and st.get("sock") is not None:
+                try:
+                    st["sock"].sendall(frame)
+                    log(f"HEARTBEAT received  ->  ACK sent (#{st['heartbeats']})")
+                except Exception as exc:
+                    log(f"HEARTBEAT received  ->  ACK FAILED: {exc}")
+            else:
+                log(f"HEARTBEAT received  (not acknowledged; #{st['heartbeats']})")
+            return
 
         d = decode_input_frame(frame)
         if not d:
@@ -179,7 +199,9 @@ def main():
                 log(f"Connecting to {ip}:{port} ...")
                 s = socket.create_connection((ip, port), timeout=15)
                 s.settimeout(2)
+                st["sock"] = s
                 log("Connected. Sending pokes and listening...")
+                log(f"Heartbeat acknowledgement: {'ON' if ACK_HEARTBEATS else 'OFF (--no-ack)'}")
                 while True:
                     now = time.time()
                     if now - st["last_poke"] >= POKE_INTERVAL:
@@ -231,6 +253,7 @@ def main():
         log(f"  Slave address(es):    {slaves}")
         log(f"  Longest gap:          {st['max_gap']:.0f}s")
         log(f"  Gaps over 30s:        {st['gaps_over_30s']}")
+        log(f"  Heartbeats / acked:   {st['heartbeats']} / {'yes' if ACK_HEARTBEATS else 'no (--no-ack)'}")
         log(f"  Total frames / bytes: {st['frames']} / {st['bytes']}")
         log(f"Please send back:  {bin_path.name}  and  {log_path.name}")
         binf.close()

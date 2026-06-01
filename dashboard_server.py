@@ -494,6 +494,24 @@ def _decode_listen_frame(frame: bytes):
         return (frame[o] << 8) | frame[o + 1]
     return _build_from_input_page(g)
 
+def _is_heartbeat_frame(frame: bytes) -> bool:
+    """True if this is a 1/Heartbeat frame from the dongle (outer function 0x01)."""
+    return len(frame) >= 8 and frame[7] == 0x01
+
+def _ack_heartbeat(s, frame: bytes) -> None:
+    """The GivEnergy data dongle emits a 1/Heartbeat frame roughly every 3 minutes
+    and expects the client to echo a HeartbeatResponse within ~5s. If we don't, the
+    dongle marks our session stale and stops answering our register reads — the root
+    cause of the recurring 'no inverter data for 75s' drops on both Gen2 and Gen3.
+
+    A HeartbeatResponse encodes to the same bytes as the request (uid + function +
+    data-adapter serial + type), and the dongle ignores the serial on inbound
+    frames, so the correct acknowledgement is simply to echo the frame back."""
+    try:
+        s.sendall(frame)
+    except Exception:
+        pass
+
 # ── Shared loop housekeeping ─────────────────────────────────────────────────────
 def _handle_reading(data: dict, st: dict):
     """Process one fresh reading (from either mode): log to DB, smooth, publish
@@ -597,6 +615,12 @@ def _run_listen(st: dict):
                 if chunk:
                     buf.extend(chunk)
                     for frame in _pop_data_frames(buf):
+                        if _is_heartbeat_frame(frame):
+                            _ack_heartbeat(s, frame)   # keep the session serviced
+                            if not st.get("hb_seen"):
+                                log.info("Heartbeat acknowledged — holding inverter session open")
+                                st["hb_seen"] = True
+                            continue
                         d = _decode_listen_frame(frame)
                         if d:
                             latest = d
@@ -641,6 +665,9 @@ def _probe_listen() -> bool:
                 break
             buf.extend(chunk)
             for frame in _pop_data_frames(buf):
+                if _is_heartbeat_frame(frame):
+                    _ack_heartbeat(s, frame)
+                    continue
                 if _decode_listen_frame(frame) is not None:
                     s.close()
                     return True
