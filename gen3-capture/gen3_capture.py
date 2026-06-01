@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
 GivEnergy inverter — connection diagnostic & capture tool
-=========================================================
-Flags:
-  --no-ack        Don't respond to heartbeats (comparison test)
-  --handshake     Send HR reads alongside IR pokes (previous test — inconclusive)
-  --sequential    THE KEY TEST: behave like a proper Modbus client —
-                  detect the device first (HR read), then poll one IR request
-                  at a time and wait for the exact matching response.
-                  If Gen3 replies in <2s instead of ~5 minutes, this is the fix.
 
-Output:  capture_<timestamp>.bin + .log  (next to the exe)
-Notes:   type a note + Enter at any time to timestamp it in the log.
-         Ctrl+C to stop.
+Flags:
+  --no-ack        Don't respond to heartbeats
+  --handshake     Send HR reads alongside IR pokes (previous test)
+  --sequential    Proper Modbus client: wait for heartbeat, extract real
+                  adapter serial, then test A-F with that serial.
+                  This is the definitive test for whether the serial is
+                  what makes the Gen3 respond.
 """
 import socket
 import sys
@@ -27,9 +23,8 @@ ACK_HEARTBEATS  = "--no-ack"      not in sys.argv
 HANDSHAKE_MODE  = "--handshake"   in sys.argv
 SEQUENTIAL_MODE = "--sequential"  in sys.argv
 
-POKE_INTERVAL   = 10.0   # seconds between poke sets (normal/handshake modes)
-SEQ_TIMEOUT     = 2.0    # seconds to wait for a response (sequential mode)
-SEQ_PACE        = 10.0   # seconds between sequential requests
+POKE_INTERVAL   = 10.0
+HB_WAIT_TIMEOUT = 240.0   # 4 minutes to wait for first heartbeat
 
 # ── Frame construction ─────────────────────────────────────────────────────────
 _DUMMY_SERIAL       = b"AB1234G567"
@@ -37,7 +32,6 @@ _HB_RESPONSE_PREFIX = bytes.fromhex("59590001000d010141423132333447353637")
 
 
 def _crc16(data: bytes) -> bytes:
-    """CRC16-Modbus (covers func+base+count only, not the slave byte)."""
     crc = 0xFFFF
     for b in data:
         crc ^= b
@@ -46,27 +40,31 @@ def _crc16(data: bytes) -> bytes:
     return bytes([(crc >> 8) & 0xFF, crc & 0xFF])
 
 
-def _make_request(slave: int, func: int, base: int = 0, count: int = 60) -> bytes:
-    """Build a properly-framed GivEnergy transparent request (matches library wire format)."""
+def _make_request(slave: int, func: int, base: int = 0, count: int = 60,
+                  serial: bytes = _DUMMY_SERIAL) -> bytes:
+    """Build a GivEnergy transparent request.
+    serial: 10-byte adapter serial to embed. Use real serial from heartbeat
+            for active requests; use _DUMMY_SERIAL for heartbeat ACKs.
+    """
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, func]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
     crc     = _crc16(inner[1:])
-    payload = _DUMMY_SERIAL + padding + inner + crc
+    payload = serial + padding + inner + crc
     length  = len(payload) + 2
     return b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
 
-# IR pokes (normal / handshake modes)
-_IR_POKES = [_make_request(0x32, 0x04), _make_request(0x11, 0x04)]
+# IR / HR pokes for normal/handshake modes (dummy serial)
+_IR_POKES     = [_make_request(0x32, 0x04), _make_request(0x11, 0x04)]
 _HR_HANDSHAKE = [_make_request(0x11, 0x03), _make_request(0x32, 0x03)]
 
 # Sanity-check IR pokes against known-good captured frames
 assert _IR_POKES[0] == bytes.fromhex(
     "59590001001c010241423132333447353637000000000000000832040000003cd1d5"), \
-    "0x32 IR poke mismatch — CRC bug"
+    "0x32 IR poke CRC mismatch"
 assert _IR_POKES[1] == bytes.fromhex(
     "59590001001c010241423132333447353637000000000000000811040000003cd1d5"), \
-    "0x11 IR poke mismatch — CRC bug"
+    "0x11 IR poke CRC mismatch"
 
 HERE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 
@@ -90,7 +88,7 @@ def hexdump(data, width=16):
     for i in range(0, len(data), width):
         chunk = data[i:i+width]
         out.append(f"      {i:04x}  "
-                   f"{'  '.join(f'{b:02x}' for b in chunk):<{width*3}}  "
+                   f"{' '.join(f'{b:02x}' for b in chunk):<{width*3}}  "
                    f"{''.join(chr(b) if 32<=b<127 else '.' for b in chunk)}")
     return "\n".join(out)
 
@@ -100,7 +98,6 @@ def _ts():
 
 
 def _pop_frames(buf: bytearray):
-    """Extract complete GivEnergy frames from buf in-place."""
     frames = []
     while True:
         i = buf.find(b"\x59\x59")
@@ -119,198 +116,216 @@ def _pop_frames(buf: bytearray):
 
 
 def decode_input_frame(frame):
-    """Decode an IR(0,60) response. Returns {slave, soc, solar, home} or None."""
-    if len(frame) < 164 or frame[7] != 0x02 or frame[27] != 0x04:
-        return None
-    if (frame[38] << 8 | frame[39]) != 0 or (frame[40] << 8 | frame[41]) < 60:
-        return None
-    def g(n): o = 42 + n*2; return (frame[o] << 8) | frame[o+1]
+    if len(frame) < 164 or frame[7] != 0x02 or frame[27] != 0x04: return None
+    if (frame[38] << 8 | frame[39]) != 0 or (frame[40] << 8 | frame[41]) < 60: return None
+    def g(n): o = 42+n*2; return (frame[o]<<8)|frame[o+1]
     return {"slave": frame[26], "soc": g(59), "solar": g(18)+g(20), "home": g(42)}
 
 
-def decode_hr_frame(frame):
-    """Decode an HR(0,60) response. Returns {slave, dtc, arm_fw} or None."""
-    if len(frame) < 44 or frame[7] != 0x02 or frame[27] != 0x03:
-        return None
-    if (frame[38] << 8 | frame[39]) != 0:
-        return None
-    def g(n): o = 42 + n*2; return (frame[o] << 8) | frame[o+1] if o+2 <= len(frame) else 0
-    return {"slave": frame[26], "dtc": g(0), "arm_fw": g(21)}
-
-
-def classify_device(dtc: int, arm_fw: int) -> str:
-    """Human-readable model name from DTC and ARM firmware values."""
-    if dtc == 0 and arm_fw == 0:
-        return "UNKNOWN (HR returned zeros — device may not support HR reads)"
-    family = (dtc >> 12) & 0xF
-    fw_c   = arm_fw // 100
-    if family == 2:
-        if fw_c == 3:   return f"HYBRID_GEN3   (DTC=0x{dtc:04x} ARM_fw={arm_fw})"
-        if fw_c in (8,9): return f"HYBRID_GEN2   (DTC=0x{dtc:04x} ARM_fw={arm_fw})"
-        return f"HYBRID        (DTC=0x{dtc:04x} ARM_fw={arm_fw})"
-    if family == 3: return f"AC_COUPLER    (DTC=0x{dtc:04x})"
-    if family == 4: return f"HYBRID_3PH    (DTC=0x{dtc:04x})"
-    if family == 5: return f"EMS           (DTC=0x{dtc:04x})"
-    if family == 6: return f"AC_3PH        (DTC=0x{dtc:04x})"
-    if family == 7: return f"GATEWAY       (DTC=0x{dtc:04x})"
-    if family == 8: return f"ALL_IN_ONE/HV (DTC=0x{dtc:04x})"
-    return f"UNKNOWN       (DTC=0x{dtc:04x} ARM_fw={arm_fw})"
-
-
 def _ack_heartbeat(s, frame, st, log):
-    """Acknowledge a heartbeat frame (dummy serial, correct type byte)."""
+    """ACK heartbeat using DUMMY serial (always AB1234G567, per spec)."""
     st["heartbeats"] += 1
     if ACK_HEARTBEATS:
         try:
             type_byte = frame[18:19] if len(frame) > 18 else b"\x01"
             s.sendall(_HB_RESPONSE_PREFIX + type_byte)
-            log(f"HEARTBEAT received  ->  ACK sent (#{st['heartbeats']})")
+            log(f"HEARTBEAT received  ->  ACK sent (#{st['heartbeats']}, dummy serial)")
         except Exception as exc:
-            log(f"HEARTBEAT received  ->  ACK FAILED: {exc}")
+            log(f"HEARTBEAT ACK FAILED: {exc}")
     else:
-        log(f"HEARTBEAT received  (not acknowledged; #{st['heartbeats']})")
+        log(f"HEARTBEAT received (not acknowledged; #{st['heartbeats']})")
 
 
-# ── Sequential mode: send one request, wait for the exact matching response ────
-
-def _send_and_wait(s, request, match_func, match_base, match_count,
-                   timeout, st, log, logf, binf):
-    """
-    Send `request` and block until a transparent frame arrives that matches
-    (inner func, base, count). Heartbeats are acked inline and don't break
-    the wait. Returns (frame, elapsed_s) or (None, elapsed_s) on timeout.
-    All received bytes are written to binf; every frame is hexdumped to logf.
-    """
-    s.sendall(request)
-    t0  = time.time()
-    buf = bytearray()
-
-    while True:
-        remaining = timeout - (time.time() - t0)
-        if remaining <= 0:
-            return None, time.time() - t0
-
-        s.settimeout(min(remaining, 0.5))
-        try:
-            data = s.recv(8192)
-        except socket.timeout:
-            continue
-        if not data:
-            raise ConnectionError("socket closed by remote host")
-
-        binf.write(data); binf.flush()
-        st["bytes"] += len(data)
-        buf.extend(data)
-
-        for frame in _pop_frames(buf):
-            st["frames"] += 1
-            func = frame[7] if len(frame) > 7 else 0
-            logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} func={func:02x}\n")
-            logf.write(hexdump(frame) + "\n"); logf.flush()
-
-            if func == 0x01:                           # heartbeat
-                _ack_heartbeat(s, frame, st, log)
-                continue
-
-            if len(frame) < 44 or frame[7] != 0x02:   # not transparent
-                continue
-            if frame[27] != match_func:                # wrong inner func
-                continue
-            f_base  = (frame[38] << 8) | frame[39]
-            f_count = (frame[40] << 8) | frame[41]
-            if f_base == match_base and f_count >= match_count:
-                return frame, time.time() - t0          # ✓ matched
-
+# ── Sequential mode ─────────────────────────────────────────────────────────────
 
 def _run_sequential(s, st, log, logf, binf):
     """
-    The key test loop. Behaves like a proper Modbus client:
-      1. Send HR(0,60) to 0x11 — detect the device
-      2. Loop: send IR(0,60) to 0x11, wait up to SEQ_TIMEOUT seconds
-               measure whether the response arrives in <2s or ~300s
-    Raises an exception to trigger reconnect.
+    Sequential test with real adapter serial extraction.
+
+    Phase 1: Wait passively for the heartbeat (up to 4 min).
+             Extract adapter serial from frame[8:18].
+             ACK heartbeat using dummy serial.
+    Phase 2: Test requests A-F with the real serial, one at a time.
+             5s wait per request. No reconnect on timeout.
     """
-    # ── Phase 1: detection ────────────────────────────────────────────────────
+    buf = bytearray()
+
+    # ── helper: receive frames for `duration` seconds ─────────────────────────
+    def recv_for(duration, pending_req=None):
+        """
+        Receive and log frames for `duration` seconds.
+        `pending_req`: dict {"slave","func","base","count"} or None.
+        Returns list of (frame, elapsed, is_match) for transparent frames.
+        """
+        results = []
+        t0 = time.time()
+        while time.time() - t0 < duration:
+            remaining = duration - (time.time() - t0)
+            s.settimeout(min(remaining, 0.5))
+            try:
+                data = s.recv(8192)
+            except socket.timeout:
+                continue
+            if not data:
+                raise ConnectionError("socket closed by remote host")
+            binf.write(data); binf.flush()
+            st["bytes"] += len(data)
+            buf.extend(data)
+            for frame in _pop_frames(buf):
+                elapsed = time.time() - t0
+                st["frames"] += 1
+                outer_func = frame[7] if len(frame) > 7 else 0
+                logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} "
+                            f"func={outer_func:02x}\n")
+                logf.write(hexdump(frame) + "\n"); logf.flush()
+
+                if outer_func == 0x01:
+                    # Heartbeat — extract serial and ACK
+                    if len(frame) >= 18 and frame[8:18] != _DUMMY_SERIAL:
+                        new_serial = frame[8:18]
+                        s_str = new_serial.decode('ascii', errors='replace')
+                        if new_serial != st.get("adapter_serial"):
+                            st["adapter_serial"] = new_serial
+                            log(f"Heartbeat! Adapter serial extracted: {s_str}")
+                    _ack_heartbeat(s, frame, st, log)
+                    continue
+
+                if len(frame) < 44 or outer_func != 0x02:
+                    continue
+
+                rx_slave = frame[26]
+                rx_func  = frame[27]
+                rx_base  = (frame[38] << 8) | frame[39]
+                rx_count = (frame[40] << 8) | frame[41]
+
+                is_match = (pending_req is not None and
+                            rx_slave == pending_req["slave"] and
+                            rx_func  == pending_req["func"] and
+                            rx_base  == pending_req["base"] and
+                            rx_count >= pending_req["count"])
+
+                label = "MATCHED_PENDING_REQUEST" if is_match else "UNSOLICITED_BACKGROUND"
+                log(f"RX slave=0x{rx_slave:02x} func=0x{rx_func:02x} "
+                    f"base={rx_base} count={rx_count} {label}"
+                    + (f" in {elapsed:.3f}s" if is_match else ""))
+
+                results.append((frame, elapsed, is_match))
+        return results
+
+    # ── Phase 1: wait for heartbeat ───────────────────────────────────────────
     log("=" * 64)
-    log("SEQUENTIAL MODE — behaving like a proper Modbus client")
+    log("SEQUENTIAL MODE — real serial test")
     log("=" * 64)
     log("")
-    log("Phase 1: sending HR(0,60) to slave 0x11 for device detection...")
+    log(f"Phase 1: waiting up to {HB_WAIT_TIMEOUT/60:.0f} minutes for heartbeat "
+        f"to extract real adapter serial...")
+    log("(Not sending anything yet — just listening)")
+    log("")
 
-    hr_req = _make_request(0x11, 0x03, 0, 60)
-    frame, elapsed = _send_and_wait(
-        s, hr_req, 0x03, 0, 60, timeout=5.0,
-        st=st, log=log, logf=logf, binf=binf)
+    st["adapter_serial"] = None
+    t_hb_start = time.time()
 
-    if frame:
-        hr = decode_hr_frame(frame)
-        if hr and (hr["dtc"] or hr["arm_fw"]):
-            model = classify_device(hr["dtc"], hr["arm_fw"])
-            log(f"DETECTION OK ({elapsed:.2f}s): {model}")
-            log(f"  slave in response = 0x{hr['slave']:02x}")
-        else:
-            log(f"HR response received in {elapsed:.2f}s but registers are zero.")
-            log(f"  Device may not support HR reads, or slave 0x11 is wrong.")
+    while time.time() - t_hb_start < HB_WAIT_TIMEOUT:
+        remaining = HB_WAIT_TIMEOUT - (time.time() - t_hb_start)
+        print(f"  ... waiting for heartbeat ({remaining:.0f}s remaining) ...", end="\r", flush=True)
+        recv_for(min(10.0, remaining), pending_req=None)
+        if st.get("adapter_serial"):
+            break
+
+    print("", flush=True)  # clear the \r line
+
+    if st.get("adapter_serial"):
+        serial = st["adapter_serial"]
+        serial_str = serial.decode('ascii', errors='replace')
+        log(f"Serial confirmed: {serial_str}")
+        log(f"Will use this serial for all active requests.")
     else:
-        log(f"No HR response within 5s.")
-        log(f"  The inverter did not respond to HR(0,60) at slave 0x11.")
-        log(f"  Proceeding to IR polling anyway...")
+        serial = _DUMMY_SERIAL
+        serial_str = _DUMMY_SERIAL.decode('ascii')
+        log(f"No heartbeat received within {HB_WAIT_TIMEOUT/60:.0f} minutes.")
+        log(f"Falling back to dummy serial: {serial_str}")
 
+    # ── Phase 2: test sequence A-F ─────────────────────────────────────────────
     log("")
-    log("Phase 2: polling IR(0,60) at slave 0x11 — ONE request at a time")
-    log(f"  Wait up to {SEQ_TIMEOUT}s for response, then send next request after {SEQ_PACE}s")
+    log("Phase 2: testing requests A-F with "
+        f"serial={serial_str}")
+    log("One request at a time, 5s wait, 1s sleep between.")
     log("")
-    log("*** KEY RESULT: are IR replies arriving in <2s (FAST) or ~300s (slow)? ***")
-    log("-" * 64)
 
-    # ── Phase 2: sequential IR poll ───────────────────────────────────────────
-    RETRY_LIMIT = 3
-    fails = 0
+    TESTS = [
+        ("A", 0x32, 0x04,   0, 60, "IR(0,60)   slave=0x32"),
+        ("B", 0x11, 0x04,   0, 60, "IR(0,60)   slave=0x11"),
+        ("C", 0x32, 0x03,   0, 60, "HR(0,60)   slave=0x32"),
+        ("D", 0x11, 0x03,   0, 60, "HR(0,60)   slave=0x11"),
+        ("E", 0x32, 0x04, 180, 60, "IR(180,60) slave=0x32"),
+        ("F", 0x32, 0x04,  60, 60, "IR(60,60)  slave=0x32"),
+    ]
 
-    while True:
-        ir_req = _make_request(0x11, 0x04, 0, 60)
-        t_send = time.time()
-        print(f"  > IR request sent to 0x11 ...", end=" ", flush=True)
-        log(f"IR REQUEST → slave=0x11  IR(0,60)", to_console=False)
+    results_summary = []
 
-        frame, elapsed = _send_and_wait(
-            s, ir_req, 0x04, 0, 60, timeout=SEQ_TIMEOUT,
-            st=st, log=log, logf=logf, binf=binf)
+    for test_label, slave, func, base, count, desc in TESTS:
+        log(f"--- Test {test_label}: {desc} ---")
 
-        if frame:
-            d = decode_input_frame(frame)
+        req = _make_request(slave, func, base, count, serial=serial)
+
+        # TX logging
+        log(f"TX slave=0x{slave:02x} func=0x{func:02x} base={base} "
+            f"count={count} serial={serial_str}")
+        logf.write(f"[{_ts()}] TX HEX: {req.hex()}\n"); logf.flush()
+        print(f"  TX {desc} ... ", end="", flush=True)
+
+        # Send the request
+        try:
+            s.sendall(req)
+        except Exception as exc:
+            log(f"  SEND FAILED: {exc}")
+            results_summary.append((test_label, desc, None, None))
+            time.sleep(1.0)
+            continue
+
+        # Receive for 5 seconds
+        pending = {"slave": slave, "func": func, "base": base, "count": count}
+        rx_frames = recv_for(5.0, pending_req=pending)
+
+        # Find first match
+        matched = next(((f, e) for f, e, m in rx_frames if m), None)
+
+        if matched:
+            mf, me = matched
+            d = decode_input_frame(mf)
+            verdict = f"MATCHED in {me:.3f}s"
             if d:
-                now = time.time()
-                gap = (now - st["last_reply"]) if st["last_reply"] else 0.0
-                if st["last_reply"] and gap > st["max_gap"]: st["max_gap"] = gap
-                if st["last_reply"] and gap > 30:            st["gaps_over_30s"] += 1
-                st["replies"] += 1
-                st["slaves"].add(d["slave"])
-                st["last_reply"] = now
-                fails = 0
-                verdict = "FAST — sequential polling IS working!" if elapsed < SEQ_TIMEOUT else f"{elapsed:.2f}s"
-                print(f"REPLY in {elapsed:.3f}s  ← {verdict}", flush=True)
-                log(f"IR REPLY  slave=0x{d['slave']:02x}  SOC={d['soc']}%  "
-                    f"solar={d['solar']}W  home={d['home']}W  "
-                    f"elapsed={elapsed:.3f}s  gap={gap:.1f}s")
-                if elapsed < SEQ_TIMEOUT * 0.8:
-                    log(f"*** FAST REPLY ({elapsed:.3f}s) — "
-                        f"sequential request-response mode is working! ***")
-            else:
-                print(f"frame received but couldn't decode (slave=0x{frame[26]:02x} "
-                      f"func=0x{frame[27]:02x})", flush=True)
+                verdict += f"  SOC={d['soc']}% solar={d['solar']}W home={d['home']}W"
+            log(f"Test {test_label} RESULT: ✓ {verdict}")
+            print(f"MATCHED in {me:.3f}s", flush=True)
+            results_summary.append((test_label, desc, True, me))
         else:
-            fails += 1
-            print(f"NO RESPONSE (>{SEQ_TIMEOUT}s timeout) [{fails}/{RETRY_LIMIT}]", flush=True)
-            log(f"!! IR request timed out — no response within {SEQ_TIMEOUT}s  "
-                f"[fail {fails}/{RETRY_LIMIT}]")
-            if fails >= RETRY_LIMIT:
-                raise ConnectionError(f"no IR response after {RETRY_LIMIT} attempts — reconnecting")
+            log(f"Test {test_label} RESULT: ✗ no matching response in 5s")
+            print("no response", flush=True)
+            results_summary.append((test_label, desc, False, None))
 
-        # pace: aim for SEQ_PACE seconds between sends
-        wait = max(0, SEQ_PACE - (time.time() - t_send))
-        if wait > 0:
-            time.sleep(wait)
+        time.sleep(1.0)
+
+    # ── Phase 2 summary ───────────────────────────────────────────────────────
+    log("")
+    log("=" * 64)
+    log("TEST SUMMARY")
+    log("=" * 64)
+    log(f"  Adapter serial used: {serial_str}")
+    log("")
+    for label, desc, matched, elapsed in results_summary:
+        if matched:
+            log(f"  {label}. {desc:<30}  ✓  RESPONDED in {elapsed:.3f}s")
+        elif matched is False:
+            log(f"  {label}. {desc:<30}  ✗  no response")
+        else:
+            log(f"  {label}. {desc:<30}  !  send failed")
+    log("")
+    log("Keep the session open — watching for background frames (press Ctrl+C to stop)")
+
+    # Keep receiving passively so we capture any cloud sync data
+    while True:
+        recv_for(30.0, pending_req=None)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -327,15 +342,15 @@ def main():
         if to_console: print(line, flush=True)
         logf.write(line + "\n"); logf.flush()
 
-    mode_str = ("SEQUENTIAL (detect+request-response)" if SEQUENTIAL_MODE else
-                "HANDSHAKE (IR+HR poke-and-listen)"    if HANDSHAKE_MODE  else
+    mode_str = ("SEQUENTIAL (real serial + A-F test)" if SEQUENTIAL_MODE else
+                "HANDSHAKE (IR+HR poke-and-listen)"   if HANDSHAKE_MODE  else
                 "NORMAL (poke-and-listen)")
 
     log("=== GivEnergy connection diagnostic ===")
-    log(f"Target:       {ip}:{port}")
-    log(f"Mode:         {mode_str}")
+    log(f"Target:        {ip}:{port}")
+    log(f"Mode:          {mode_str}")
     log(f"Heartbeat ACK: {'ON (dummy serial)' if ACK_HEARTBEATS else 'OFF (--no-ack)'}")
-    log(f"Raw bytes:    {bin_path.name}")
+    log(f"Raw bytes:     {bin_path.name}")
     log("Ctrl+C to stop. Type a note + Enter to mark an event.")
     log("-" * 64)
 
@@ -349,6 +364,8 @@ def main():
         "max_gap": 0.0, "gaps_over_30s": 0,
         "slaves": set(), "last_report": time.time(),
         "sock": None, "warned": False,
+        "adapter_serial": None,  # extracted from heartbeat
+        "pending": None,         # current pending request for RX labeling
     }
 
     # ── frame handler for normal/handshake modes ──────────────────────────────
@@ -358,6 +375,8 @@ def main():
         logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} func={func:02x}\n")
         logf.write(hexdump(frame) + "\n"); logf.flush()
         if func == 0x01:
+            if len(frame) >= 18:
+                st["adapter_serial"] = frame[8:18]
             _ack_heartbeat(st["sock"], frame, st, log)
             return
         d = decode_input_frame(frame)
@@ -416,14 +435,12 @@ def main():
                             buf.extend(data); process_buffer(buf)
                         t = time.time()
                         if st["last_reply"] and t-st["last_reply"] > 30 and not st["warned"]:
-                            log(f"!! No reply for {t-st['last_reply']:.0f}s "
-                                f"— this is the disconnect symptom")
+                            log(f"!! No reply for {t-st['last_reply']:.0f}s")
                             st["warned"] = True
                         if t - st["last_report"] > 30:
                             sl = ", ".join(f"0x{x:02x}" for x in sorted(st["slaves"])) or "none"
-                            log(f"... summary: {st['replies']} replies, "
-                                f"max gap {st['max_gap']:.0f}s, "
-                                f"gaps>30s: {st['gaps_over_30s']}, slave(s): {sl}")
+                            log(f"... {st['replies']} replies, max gap {st['max_gap']:.0f}s, "
+                                f"slave(s): {sl}")
                             st["last_report"] = t
 
             except KeyboardInterrupt:
@@ -437,13 +454,15 @@ def main():
 
     finally:
         sl = ", ".join(f"0x{x:02x}" for x in sorted(st["slaves"])) or "none seen"
+        serial_found = st.get("adapter_serial")
+        serial_str   = serial_found.decode('ascii', errors='replace') if serial_found else "not seen"
         log("-" * 64)
         log("RESULT SUMMARY")
         log(f"  Mode:                 {mode_str}")
+        log(f"  Adapter serial seen:  {serial_str}")
         log(f"  Replies received:     {st['replies']}")
         log(f"  Slave address(es):    {sl}")
         log(f"  Longest gap:          {st['max_gap']:.0f}s")
-        log(f"  Gaps over 30s:        {st['gaps_over_30s']}")
         log(f"  Heartbeats / acked:   {st['heartbeats']} / {'yes' if ACK_HEARTBEATS else 'no'}")
         log(f"  Total frames / bytes: {st['frames']} / {st['bytes']}")
         log(f"Please send back:  {bin_path.name}  and  {log_path.name}")
