@@ -44,6 +44,10 @@ givenergy-api-docs.html
 givenergy-api-v1.openapi.yaml
 givenergy-local-modbus.json
 
+# ─── Local planning docs (not for public repo) ───────────────────────
+BACKLOG.md
+RELEASE_PROCESS.md
+
 # ─── Editor / OS / local agent ────────────────────────────────────────
 .claude/
 .vscode/
