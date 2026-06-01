@@ -1116,7 +1116,7 @@ def api_history():
             FROM daily
             GROUP BY {monday_expr}
             ORDER BY 1 DESC
-            LIMIT 12 OFFSET {offset}
+            LIMIT 1 OFFSET {offset}
         """
     elif period == "day":
         sql = f"""
@@ -1143,10 +1143,10 @@ def api_history():
             FROM daily
             GROUP BY strftime('%Y-%m', day)
             ORDER BY 1 DESC
-            LIMIT 12 OFFSET {offset}
+            LIMIT 1 OFFSET {offset}
         """
     else:  # year
-        sql = daily_cte + """
+        sql = daily_cte + f"""
             SELECT strftime('%Y', day)      AS period,
                 ROUND(SUM(s),   2) AS solar_kwh,
                 ROUND(SUM(gi),  2) AS grid_in_kwh,
@@ -1157,6 +1157,7 @@ def api_history():
             FROM daily
             GROUP BY strftime('%Y', day)
             ORDER BY 1 DESC
+            LIMIT 1 OFFSET {offset}
         """
 
     with _db() as conn:

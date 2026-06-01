@@ -1617,24 +1617,17 @@ async function loadHistory() {
 }
 
 function renderHistory() {
-  const limit  = histPeriod === 'year' ? 999 : histPeriod === 'month' || histPeriod === 'week' ? 12 : histPeriod === 'day' ? 1 : 30;
-  const isYear = histPeriod === 'year';
+  const limit  = 1;   // all periods now show one unit at a time
+  const isYear = false;
 
   if (histData.length) {
-    const newest = pKey(histData[0]);
-    const oldest = pKey(histData[histData.length-1]);
-    let navLabel;
-    if (isYear)                  navLabel = 'All years';
-    else if (histPeriod === 'day') navLabel = fmtPLabel(newest);
-    else if (oldest === newest)   navLabel = newest;
-    else                          navLabel = oldest + ' – ' + newest;
-    $('hist-nav-label').textContent = navLabel;
+    $('hist-nav-label').textContent = fmtPLabel(pKey(histData[0]));
   } else {
     $('hist-nav-label').textContent = 'No data yet';
   }
 
-  $('hist-prev').disabled = isYear || histData.length < limit;
-  $('hist-next').disabled = isYear || histOffset === 0;
+  $('hist-prev').disabled = histData.length < limit;
+  $('hist-next').disabled = histOffset === 0;
 
   // In Day view the chart is tappable to drill into an hourly breakdown
   const dayMode = histPeriod === 'day' && histData.length;
@@ -1666,22 +1659,34 @@ function pKey(d) { return d.period || d.day || d.mon || d.yr || ''; }
 
 function fmtPLabel(p) {
   const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const thisYear = new Date().getFullYear();
   if (!p) return '';
-  if (histPeriod === 'year')  return p;
-  if (histPeriod === 'month') { const [y,m]=p.split('-'); return MON[+m-1]+' '+y.slice(2); }
+  if (histPeriod === 'year') {
+    // Show just the year; add no suffix if it's the current year
+    return +p === thisYear ? String(p) : String(p);
+  }
+  if (histPeriod === 'month') {
+    const [y,m] = p.split('-');
+    // Drop the year if it's this year
+    return +y === thisYear ? MON[+m-1] : MON[+m-1]+' '+y;
+  }
   if (histPeriod === 'week') {
-    if (!p) return '';
-    // Graceful fallback for old W%W format before server restart
-    if (/^\d{4}-W\d+$/.test(p)) return p;
+    if (/^\d{4}-W\d+$/.test(p)) return p;  // fallback for legacy format
     const [y,m,d] = p.split('-').map(Number);
     if (!y || !m || !d || isNaN(d)) return p;
     const mon = new Date(y, m-1, d);
     const sun = new Date(y, m-1, d+6);
+    const sameYear = mon.getFullYear() === thisYear && sun.getFullYear() === thisYear;
+    const yearSuffix = sameYear ? '' : ' '+mon.getFullYear();
     if (mon.getMonth() === sun.getMonth())
-      return mon.getDate()+'–'+sun.getDate()+' '+MON[mon.getMonth()];
-    return mon.getDate()+' '+MON[mon.getMonth()]+'–'+sun.getDate()+' '+MON[sun.getMonth()];
+      return mon.getDate()+'–'+sun.getDate()+' '+MON[mon.getMonth()]+yearSuffix;
+    // Week spans two months
+    const m2Suffix = sun.getFullYear() === thisYear ? '' : ' '+sun.getFullYear();
+    return mon.getDate()+' '+MON[mon.getMonth()]+yearSuffix+'–'+sun.getDate()+' '+MON[sun.getMonth()]+m2Suffix;
   }
-  const [,mm,dd] = p.split('-'); return dd+' '+MON[+mm-1];
+  // Day view
+  const [y,mm,dd] = p.split('-');
+  return +y === thisYear ? dd+' '+MON[+mm-1] : dd+' '+MON[+mm-1]+' '+y;
 }
 
 function drawHistChart() {
@@ -1821,7 +1826,7 @@ document.querySelectorAll('.period-btn').forEach(b =>
   b.addEventListener('click', () => setPeriod(b.dataset.p)));
 
 function _navStep() {
-  return histPeriod === 'day' ? 1 : (histPeriod === 'month' || histPeriod === 'week') ? 12 : 30;
+  return 1;  // all periods navigate one unit at a time
 }
 $('hist-prev').addEventListener('click', () => { histOffset += _navStep(); loadHistory(); });
 $('hist-next').addEventListener('click', () => { histOffset = Math.max(0, histOffset - _navStep()); loadHistory(); });
