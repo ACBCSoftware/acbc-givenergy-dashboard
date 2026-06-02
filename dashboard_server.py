@@ -446,9 +446,7 @@ def _status_label(raw):
 # same for both because GivEnergy computes it over the function + base + count,
 # not the slave byte.)
 def _crc16(data: bytes) -> bytes:
-    """CRC16-Modbus over the full inner frame (slave+func+base+count), LSB first.
-    GivTCP analysis confirmed the dongle validates CRC including the slave byte.
-    Gen3/AIO silently drops requests with incorrect CRC — Gen2 is lenient."""
+    """CRC16-Modbus, LSB first."""
     crc = 0xFFFF
     for b in data:
         crc ^= b
@@ -457,21 +455,26 @@ def _crc16(data: bytes) -> bytes:
     return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> bytes:
-    """Build a correctly CRC-signed GivEnergy transparent request frame."""
+    """Build a GivEnergy transparent request frame.
+    Uses LSB-first CRC over slave+func+base+count (Gen3/AIO convention).
+    For the listen-mode IR pokes use _POKE_REQUESTS below (hardcoded proven values).
+    """
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, func]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
-    crc     = _crc16(inner)           # CRC includes slave byte — required by Gen3/AIO
+    crc     = _crc16(inner)   # LSB-first, with slave byte
     payload = serial + padding + inner + crc
     length  = len(payload) + 2
     return b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
-# Input-register read requests.  Both slave addresses so Gen2 (0x32) and
-# Gen3/AIO (0x11) are triggered.  CRC now includes the slave byte — required
-# for Gen3/AIO to respond; Gen2 is lenient and accepts either CRC.
+# Hardcoded proven poke frames — each uses the CRC convention verified on real hardware:
+#   Gen2 (0x32): CRC d1d5  = MSB-first CRC over func+base+count only (original library format,
+#                             17.5h clean run confirmed). Slave-inclusive CRC (f5d8) causes drops.
+#   Gen3/AIO (0x11): CRC f28b = LSB-first CRC over slave+func+base+count (GivTCP format,
+#                               confirmed with 25/25 fast responses in wire capture).
 _POKE_REQUESTS = [
-    _make_poke(0x32, 0x04, 0, 60),   # Gen2 inverter
-    _make_poke(0x11, 0x04, 0, 60),   # Gen3 / AIO / HV hybrid
+    bytes.fromhex("59590001001c010241423132333447353637000000000000000832040000003cd1d5"),
+    bytes.fromhex("59590001001c010241423132333447353637000000000000000811040000003cf28b"),
 ]
 
 def _pop_data_frames(buf: bytearray):
