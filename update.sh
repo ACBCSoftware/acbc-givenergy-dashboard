@@ -64,9 +64,16 @@ done
 sudo chown -R "$RUN_USER":"$RUN_USER" "$INSTALL_DIR"
 
 # ── 4. Refresh Python dependencies (in case new ones were added) ──────────────
+# Flask version must match the Python version (see setup.sh for the full reasoning):
+#  • 3.14+: needs flask>=3.1.3; modbus v2 has no click pin.
+#  • <3.14: old givenergy-modbus pins click==8.0.1, which conflicts with flask>=3.1.3,
+#    so use an older Flask (2.2.x) that's compatible with that click.
 info "Updating Python packages..."
-"$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "flask>=3.1.3" waitress givenergy-modbus Pillow pyopenssl || \
-    warn "Package update step had a problem — continuing."
+PY_TAG=$("$INSTALL_DIR/venv/bin/python" -c "import sys; print(sys.version_info.major*100+sys.version_info.minor)")
+if [ "$PY_TAG" -ge 314 ]; then FLASK_SPEC="flask>=3.1.3"; else FLASK_SPEC="flask>=2.2,<2.3"; fi
+"$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "$FLASK_SPEC" waitress givenergy-modbus Pillow pyopenssl \
+    || "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade "$FLASK_SPEC" waitress Pillow pyopenssl \
+    || warn "Package update step had a problem — continuing."
 
 # ── 5. Regenerate icons (in case the generator changed) ───────────────────────
 "$INSTALL_DIR/venv/bin/python" "$INSTALL_DIR/generate_icons.py" >/dev/null 2>&1 || true

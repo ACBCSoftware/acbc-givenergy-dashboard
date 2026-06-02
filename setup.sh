@@ -76,7 +76,26 @@ python3 -m venv venv
 
 info "Installing Python packages (this takes a minute)..."
 ./venv/bin/pip install --quiet --upgrade pip
-./venv/bin/pip install --quiet "flask>=3.1.3" waitress givenergy-modbus Pillow pyopenssl
+
+# Flask version must match the Python version to avoid a dependency conflict:
+#  • Python 3.14+: givenergy-modbus resolves to the async v2 (no 'click' pin),
+#    and Flask MUST be >=3.1.3 (older Flask uses pkgutil.get_loader, removed in 3.14).
+#  • Python <3.14: only the old givenergy-modbus 0.10.x is available, which hard-pins
+#    click==8.0.1.  flask>=3.1.3 needs click>=8.1.3 → ResolutionImpossible.  An older
+#    Flask (2.2.x) is compatible with that click and runs fine on these Pythons.
+PY_TAG=$(( PY_MAJOR * 100 + PY_MINOR ))
+if [ "$PY_TAG" -ge 314 ]; then
+    FLASK_SPEC="flask>=3.1.3"
+else
+    FLASK_SPEC="flask>=2.2,<2.3"
+fi
+
+# Primary install (includes givenergy-modbus for the Gen2 Control page).
+if ! ./venv/bin/pip install --quiet "$FLASK_SPEC" waitress givenergy-modbus Pillow pyopenssl; then
+    warn "Modbus control library could not be installed on this Python."
+    warn "Falling back to monitoring-only (live data works; Gen2 Control page disabled)."
+    ./venv/bin/pip install --quiet "$FLASK_SPEC" waitress Pillow pyopenssl
+fi
 
 # ── 4. Generate PWA icons ──────────────────────────────────────────────────────
 info "Generating PWA icons..."
