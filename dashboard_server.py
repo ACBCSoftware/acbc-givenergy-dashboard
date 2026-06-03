@@ -529,8 +529,12 @@ def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> 
 _POKE_REQUESTS = [
     bytes.fromhex("59590001001c010241423132333447353637000000000000000832040000003cd1d5"),
     bytes.fromhex("59590001001c010241423132333447353637000000000000000811040000003cf28b"),
-    _make_poke(0x11, 0x04, 1600, 60),   # Gateway AIO: live power data
-    _make_poke(0x11, 0x04, 1780, 60),   # Gateway AIO: per-unit SOC
+    # Gateway AIO (DTC 0x70xx) does NOT receive active pokes for base=1600/1780.
+    # Actively requesting those pages returns different/wrong data vs the unsolicited
+    # cloud-sync broadcast (confirmed from David's AIO wire testing).
+    # The gateway pushes base=1600 (live power) and base=1780 (SOC) unsolicited every
+    # ~5 minutes during its cloud sync cycle — we listen passively for those frames.
+    # Heartbeats every ~3 min keep the watchdog alive between cloud sync cycles.
 ]
 
 def _pop_data_frames(buf: bytearray):
