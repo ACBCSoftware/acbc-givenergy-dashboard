@@ -584,6 +584,15 @@ def _decode_listen_frame(frame: bytes):
     if base == 0 and count >= 60:
         if len(frame) < regs_off + 60 * 2:
             return None
+        # Gateway AIO returns all-zero base=0 pages (real data lives at base=1600).
+        # Detect this by checking the inverter serial registers (r13-r17): on a real
+        # Gen2/Gen3 inverter these always contain ASCII bytes; on a gateway they are
+        # zero.  Also guard against accepting zero-only night/idle readings as real
+        # gateway noise by additionally checking that key power registers are zero.
+        serial_zero = all(g(n) == 0 for n in range(13, 18))
+        power_zero  = g(18) == 0 and g(20) == 0 and g(42) == 0 and g(52) == 0
+        if serial_zero and power_zero:
+            return None   # gateway zero-response — discard, real data is at base=1600
         return _build_from_input_page(g)
 
     if base == 1600 and count >= 60:
