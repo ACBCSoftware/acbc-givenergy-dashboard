@@ -47,6 +47,7 @@ givenergy-local-modbus.json
 # ─── Local planning docs (not for public repo) ───────────────────────
 BACKLOG.md
 RELEASE_PROCESS.md
+PROJECT_MEMORY.md
 
 # ─── Editor / OS / local agent ────────────────────────────────────────
 .claude/
