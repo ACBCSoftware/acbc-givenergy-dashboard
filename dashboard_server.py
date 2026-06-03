@@ -49,6 +49,8 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
+APP_VERSION = "1.7"
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser()
 _cfg.read(Path(__file__).parent / "config.ini")
@@ -80,6 +82,8 @@ WEATHER_POLL_MINS = _cfg.getint("weather", "poll_interval_mins", fallback=30)
 
 BACKUP_ENABLED   = _cfg.getboolean("backup", "enabled",   fallback=True)
 BACKUP_KEEP_DAYS = _cfg.getint("backup",     "keep_days", fallback=7)
+
+CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
@@ -282,6 +286,15 @@ _lock        = threading.Lock()
 _cached: dict = {}
 _error: str   = ""
 
+# Slave address of the inverter as seen in the most recent IR frame from the
+# listen loop (frame[26]).  0 = not yet observed.  Read by the control engine
+# as a hint; never used as the sole discriminator for generation.
+_inverter_slave: int = 0
+
+# Last SOC value seen from a Gateway AIO base=1780 broadcast (IR1801 = aio1_soc).
+# Updated whenever a base=1780 frame arrives; merged into the base=1600 live dict.
+_gateway_soc: int = 0
+
 # ── Live-data smoothing ────────────────────────────────────────────────────────
 # Fields that should almost never be zero in a real home.
 # If a zero reading hasn't persisted for this many consecutive polls it is
@@ -368,6 +381,44 @@ def _build_from_input_page(g) -> dict:
         "bat_chg_today":  g(36) / 10,                 # E_BATTERY_CHARGE_DAY
         "bat_dis_today":  g(37) / 10,                 # E_BATTERY_DISCHARGE_DAY
         "status":     str(g(0)),                      # INVERTER_STATUS
+    }
+
+# ── Gateway AIO live data (IR base=1600, GivTCP gateway.py confirmed) ────────────
+def _build_from_gateway_page(g) -> dict:
+    """Decode a GivEnergy Gateway AIO base=1600 input-register frame.
+
+    Register offsets (0-based from base=1600):
+      r16 p_ac1     grid W signed int16  (neg=import, pos=export — same as gen2)
+      r17 p_pv      solar W uint16
+      r18 p_load    home load W uint16
+      r19 p_liberty battery W signed int16 (pos=charge, neg=discharge — inverted vs gen2)
+    SOC comes from a separate base=1780 frame (IR1801); cached in _gateway_soc.
+    """
+    def s16(v): return v - 65536 if v >= 32768 else v
+    grid_raw    = s16(g(16))   # p_ac1:     neg=import, pos=export
+    bat_raw     = -s16(g(19))  # p_liberty: flip sign → neg=charge, pos=discharge (gen2 convention)
+    return {
+        "ok":  True,
+        "ts":  time.time(),
+        "solar_w":             g(17),
+        "home_w":              g(18),
+        "battery_w":           abs(bat_raw),
+        "battery_charging":    bat_raw < 0,
+        "battery_discharging": bat_raw > 0,
+        "battery_idle":        bat_raw == 0,
+        "grid_w":              abs(grid_raw),
+        "grid_importing":      grid_raw < 0,
+        "grid_exporting":      grid_raw > 0,
+        "soc":        _gateway_soc,
+        "v_battery":  0,
+        "t_battery":  0,
+        "t_heatsink": 0,
+        "solar_today":    g(43) / 10,   # e_pv_today      IR1643
+        "grid_in_today":  g(40) / 10,   # e_grid_import_today IR1640
+        "grid_out_today": g(46) / 10,   # e_grid_export_today IR1646
+        "bat_chg_today":  g(49) / 10,   # e_aio_charge_today  IR1649
+        "bat_dis_today":  g(52) / 10,   # e_aio_discharge_today IR1652
+        "status":     "1",              # Gateway broadcasts as normal
     }
 
 # ── Active poll (Gen2 / library) ─────────────────────────────────────────────────
@@ -472,9 +523,14 @@ def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> 
 #                             17.5h clean run confirmed). Slave-inclusive CRC (f5d8) causes drops.
 #   Gen3/AIO (0x11): CRC f28b = LSB-first CRC over slave+func+base+count (GivTCP format,
 #                               confirmed with 25/25 fast responses in wire capture).
+#   Gateway AIO (DTC 0x70xx): live data at IR base=1600, SOC at IR base=1780 (confirmed from
+#                               David's wire capture + GivTCP gateway.py register map).
+#                               Both use the same slave-inclusive LSB-first CRC as Gen3/AIO.
 _POKE_REQUESTS = [
     bytes.fromhex("59590001001c010241423132333447353637000000000000000832040000003cd1d5"),
     bytes.fromhex("59590001001c010241423132333447353637000000000000000811040000003cf28b"),
+    _make_poke(0x11, 0x04, 1600, 60),   # Gateway AIO: live power data
+    _make_poke(0x11, 0x04, 1780, 60),   # Gateway AIO: per-unit SOC
 ]
 
 def _pop_data_frames(buf: bytearray):
@@ -503,23 +559,47 @@ def _pop_data_frames(buf: bytearray):
         del buf[:total]
 
 def _decode_listen_frame(frame: bytes):
-    """If `frame` is a broadcast 'read input registers 0–59' response, decode it
-    into the live data dict; otherwise return None."""
-    # outer func at [7]; inner function at [27]; base at [38:40]; count at [40:42]
+    """Decode a broadcast input-register response into the live data dict.
+    Handles three frame types:
+      base=0    — Gen2/Gen3 standard IR page (IR 0-59)
+      base=1600 — Gateway AIO live power data (GivTCP confirmed)
+      base=1780 — Gateway AIO per-unit SOC (updates _gateway_soc cache only)
+    Returns a data dict on success, None if the frame is unrecognised or
+    if only the SOC cache was updated (base=1780)."""
+    global _gateway_soc
     if len(frame) < 44 or frame[7] != 0x02:
         return None
     inner_func = frame[27]
     base  = (frame[38] << 8) | frame[39]
     count = (frame[40] << 8) | frame[41]
-    if inner_func != 0x04 or base != 0 or count < 60:
+    if inner_func != 0x04:
         return None
     regs_off = 42
-    if len(frame) < regs_off + 60 * 2:
-        return None
     def g(n):
         o = regs_off + n * 2
-        return (frame[o] << 8) | frame[o + 1]
-    return _build_from_input_page(g)
+        if o + 1 < len(frame):
+            return (frame[o] << 8) | frame[o + 1]
+        return 0
+
+    if base == 0 and count >= 60:
+        if len(frame) < regs_off + 60 * 2:
+            return None
+        return _build_from_input_page(g)
+
+    if base == 1600 and count >= 60:
+        if len(frame) < regs_off + 60 * 2:
+            return None
+        return _build_from_gateway_page(g)
+
+    if base == 1780 and count >= 22:
+        # IR1801 = aio1_soc is at offset 21 from base 1780.
+        if len(frame) >= regs_off + 22 * 2:
+            soc = g(21)
+            if 0 <= soc <= 100:
+                _gateway_soc = soc
+        return None   # SOC cache updated; no full reading to publish yet
+
+    return None
 
 def _is_heartbeat_frame(frame: bytes) -> bool:
     """True if this is a 1/Heartbeat frame from the dongle (outer function 0x01)."""
@@ -577,6 +657,54 @@ def _maybe_weather():
         except Exception as exc:
             log.error("Weather fetch failed: %s", exc)
 
+# ── Update check ──────────────────────────────────────────────────────────────
+_update_info: dict = {}
+_last_update_check: float = 0.0
+_UPDATE_INTERVAL = 86400   # 24 hours
+_GH_API = "https://api.github.com/repos/ACBCSoftware/acbc-givenergy-dashboard/releases/latest"
+
+def _parse_version(tag: str) -> tuple:
+    """'v1.7' or '1.7' → (1, 7). Returns (0,) on parse failure."""
+    try:
+        return tuple(int(x) for x in tag.lstrip("v").split("."))
+    except Exception:
+        return (0,)
+
+def _check_for_update():
+    """Fetch the latest GitHub release and update _update_info. Silent on error."""
+    global _update_info, _last_update_check
+    if not CHECK_UPDATES:
+        return
+    try:
+        req = urllib.request.Request(
+            _GH_API,
+            headers={"User-Agent": f"acbc-givenergy-dashboard/{APP_VERSION}",
+                     "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode())
+        latest_tag  = data.get("tag_name", "")
+        latest_name = data.get("name", latest_tag)[:80]   # release title, capped
+        available   = _parse_version(latest_tag) > _parse_version(APP_VERSION)
+        _update_info = {
+            "available":    available,
+            "current":      APP_VERSION,
+            "latest":       latest_tag.lstrip("v"),
+            "release_name": latest_name,
+            "url":          "https://software.andrewcampbell.co.uk/release-notes.html",
+            "checked_at":   int(time.time()),
+        }
+        if available:
+            log.warning("Update available: v%s → %s", APP_VERSION, latest_tag)
+    except Exception as exc:
+        log.warning("Update check failed: %s", exc)
+    finally:
+        _last_update_check = time.time()
+
+def _maybe_check_update():
+    """Call at most once per day from the data loop."""
+    if CHECK_UPDATES and time.time() - _last_update_check > _UPDATE_INTERVAL:
+        _check_for_update()
+
 def _run_poll(st: dict):
     """Active-poll loop (Gen2). One reading per POLL_INTERVAL."""
     global _cached, _error
@@ -603,6 +731,7 @@ def _run_poll(st: dict):
                 _log_event("fault", f"Lost connection to inverter: {msg}")
                 st["offline"] = True
         _maybe_weather()
+        _maybe_check_update()
         time.sleep(POLL_INTERVAL)
 
 def _send_pokes(s):
@@ -617,7 +746,7 @@ def _run_listen(st: dict):
     trigger the inverter, then decodes the input-register frames it emits.
     Publishes one reading per POLL_INTERVAL so the database grows at the normal
     rate. Needs no Modbus library and never hits the IR:052 parse problem."""
-    global _cached, _error
+    global _cached, _error, _inverter_slave
     while True:
         buf = bytearray()
         latest = None
@@ -651,12 +780,17 @@ def _run_listen(st: dict):
                         if d:
                             latest = d
                             last_frame = now
+                            # Record responding slave as hint for control detection.
+                            # frame[26] is the slave byte in transparent responses.
+                            if _inverter_slave == 0 and len(frame) > 26:
+                                _inverter_slave = frame[26]
                 # Publish at most once per interval
                 if latest and now - last_proc >= POLL_INTERVAL:
                     _handle_reading(latest, st)
                     log.info("Listen: solar=%dW soc=%d%%", latest["solar_w"], latest["soc"])
                     last_proc = now
                 _maybe_weather()
+                _maybe_check_update()
                 # Offline watchdog: no decodable frame for 75s
                 if now - last_frame > 75:
                     raise ConnectionError("no inverter data for 75s")
@@ -742,58 +876,408 @@ def _data_loop():
         _run_poll(st)
 
 
-# ── Inverter control ──────────────────────────────────────────────────────────
-def _ctrl_client():
-    """Return a low-level Modbus client for register writes."""
-    from givenergy_modbus.modbus import GivEnergyModbusTcpClient as _MC
-    return _MC(host=INVERTER_IP, port=INVERTER_PORT)
+# ── Inverter control — library-free raw-socket engine ─────────────────────────
+#
+# All HR reads and writes use a fresh short-lived TCP connection so they never
+# contend with the listen-loop socket.  CRC is slave-inclusive LSB-first (the
+# Gen3/AIO convention, and correct for slave 0x11 per the official spec).
+# The library (givenergy-modbus) is no longer used for control at all.
 
-def _bcd_to_hhmm(v):
-    """Convert BCD-encoded inverter time (e.g. 430) to HH:MM string."""
+def _bcd_to_hhmm(v: int) -> str:
+    """BCD-encoded inverter time (e.g. 430) → 'HH:MM'."""
     s = f"{v:04d}"
     return f"{s[:2]}:{s[2:]}"
 
 def _hhmm_to_bcd(hhmm: str) -> int:
-    """Convert HH:MM string to BCD int (e.g. '04:30' → 430)."""
+    """'HH:MM' → BCD int (e.g. '04:30' → 430)."""
     h, m = hhmm.split(":")
     return int(h) * 100 + int(m)
 
+
+# ── Raw HR read / write ───────────────────────────────────────────────────────
+
+def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
+    """Read `count` holding registers starting at `base` from `slave`.
+    Returns a list of raw uint16 values.  Raises on timeout or bad response."""
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, 0x03]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
+    crc     = _crc16(inner)
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+
+    s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+    s.settimeout(timeout)
+    try:
+        s.sendall(frame)
+        buf = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for f in _pop_data_frames(buf):
+                if len(f) < 44 or f[7] != 0x02:
+                    continue
+                if f[27] != 0x03:          # must be HR read response
+                    continue
+                rx_base  = (f[38] << 8) | f[39]
+                rx_count = (f[40] << 8) | f[41]
+                if rx_base != base or rx_count != count:
+                    continue
+                if len(f) < 42 + count * 2:
+                    continue
+                return [(f[42 + i*2] << 8) | f[43 + i*2] for i in range(count)]
+    finally:
+        s.close()
+    raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
+
+
+def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
+    """Write a single holding register.  Verifies the echo response.
+    Raises on timeout or echo mismatch."""
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, 0x06]) + reg.to_bytes(2, "big") + value.to_bytes(2, "big")
+    crc     = _crc16(inner)
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+
+    s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+    s.settimeout(timeout)
+    try:
+        s.sendall(frame)
+        buf = bytearray()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for f in _pop_data_frames(buf):
+                if len(f) < 44 or f[7] != 0x02:
+                    continue
+                if f[27] != 0x06:
+                    continue
+                echo_reg = (f[38] << 8) | f[39]
+                echo_val = (f[40] << 8) | f[41]
+                if echo_reg != reg or echo_val != value:
+                    raise ValueError(
+                        f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
+                        f"(expected reg={reg} val={value})")
+                return
+    finally:
+        s.close()
+    raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
+
+
+# ── Generation / profile detection ────────────────────────────────────────────
+#
+# Profile drives which register map and slot count to use.  Detection reads
+# HR[0] (device_type_code) and HR[21] (arm_firmware_version) from the inverter
+# and classifies using the same logic as the givenergy-modbus library.
+#
+# Profiles:
+#   single_phase_2slot     – Gen1/Gen2, Gen3 with ARM fw ≤302
+#   single_phase_extended  – Gen3 (ARM fw >302), Gen3+, Gen4, HV Gen3, AIO Hybrid
+#   three_phase_aio        – three-phase / AIO Commercial / All-in-One
+#   unknown                – detection failed or unrecognised DTC
+
+_inverter_profile: str = ""     # "" = not yet detected
+_inverter_model:   str = ""     # human-readable model name
+_detect_lock = threading.Lock()
+
+# DTC first-byte → profile (before firmware disambiguation)
+_DTC_PREFIX_PROFILE = {
+    "2": "single_phase_2slot",    # HYBRID family — fw disambiguates Gen2/Gen3
+    "3": "single_phase_2slot",    # AC single-phase
+    "4": "three_phase_aio",       # three-phase hybrid
+    "5": "single_phase_2slot",    # EMS
+    "6": "three_phase_aio",       # three-phase AC
+    "7": "single_phase_2slot",    # GATEWAY
+    "8": "three_phase_aio",       # ALL_IN_ONE family
+}
+
+# Specific two-digit DTC prefixes that override the coarse map
+_DTC_TWO_PREFIX_PROFILE = {
+    "21": "single_phase_2slot",   # POLAR
+    "41": "three_phase_aio",      # AIO Commercial
+    "51": "single_phase_2slot",   # EMS Commercial
+    "70": "gateway_aio",          # Gateway AIO (DTC 0x70xx) — live data at IR base=1600
+    "81": "single_phase_extended",# HV Gen3 (single-phase HV)
+    "82": "three_phase_aio",      # All-in-One Hybrid
+    "83": "single_phase_extended",# Gen4
+}
+
+# ARM firmware century → generation for DTC prefix "20" (HYBRID family)
+# Century 3xx → Gen3, 8xx/9xx → Gen2, else → Gen1 (2-slot)
+_FW_CENTURY_GEN = {3: "gen3", 8: "gen2", 9: "gen2"}
+
+
+_DTC_TWO_MODEL_NAME = {
+    "21": "Polar",
+    "41": "AIO Commercial",
+    "51": "EMS Commercial",
+    "70": "Gateway AIO",
+    "81": "Hybrid HV Gen3",
+    "82": "All-in-One Hybrid",
+    "83": "Hybrid Gen4",
+}
+_DTC_ONE_MODEL_NAME = {
+    "3": "AC Inverter",
+    "4": "Three-Phase Hybrid",
+    "5": "EMS",
+    "6": "Three-Phase AC",
+    "7": "Gateway",
+    "8": "All-in-One",
+}
+
+def _classify_model(raw_dtc: int, arm_fw: int):
+    """Return (profile, model_name) from raw HR[0] and HR[21] values."""
+    dtc_hex = f"{raw_dtc:04x}"
+    two     = dtc_hex[:2]
+    one     = dtc_hex[:1]
+
+    if two in _DTC_TWO_PREFIX_PROFILE:
+        profile = _DTC_TWO_PREFIX_PROFILE[two]
+        model   = _DTC_TWO_MODEL_NAME.get(two, f"DTC-{two.upper()}")
+    elif one == "2":
+        # HYBRID family: firmware century determines Gen1/Gen2/Gen3
+        gen = _FW_CENTURY_GEN.get(arm_fw // 100, "gen1")
+        if gen == "gen3":
+            profile = "single_phase_extended" if arm_fw > 302 else "single_phase_2slot"
+            model   = "Hybrid Gen3"
+        elif gen == "gen2":
+            profile = "single_phase_2slot"
+            model   = "Hybrid Gen2"
+        else:
+            profile = "single_phase_2slot"
+            model   = "Hybrid Gen1"
+    elif one in _DTC_PREFIX_PROFILE:
+        profile = _DTC_PREFIX_PROFILE[one]
+        model   = _DTC_ONE_MODEL_NAME.get(one, f"DTC-{one.upper()}")
+    else:
+        profile = "unknown"
+        model   = f"Unknown (DTC 0x{raw_dtc:04x})"
+
+    return profile, model
+
+
+def _detect_inverter() -> tuple:
+    """Return (slave, profile, model_name), detecting and caching on first call.
+
+    Uses the listener's observed slave as a hint for which address to poll.
+    Falls back to an active IR probe on 0x11 if the listener hasn't seen a
+    frame yet, so the control page is immediately usable at startup.
+    """
+    global _inverter_profile, _inverter_model
+
+    with _detect_lock:
+        if _inverter_profile:
+            # Already detected — return cached values.
+            slave = _inverter_slave if _inverter_slave else 0x11
+            return slave, _inverter_profile, _inverter_model
+
+        # Choose slave: prefer the one the listener has already seen;
+        # fall back to 0x11 (the official inverter address for all generations).
+        slave = _inverter_slave if _inverter_slave else 0x11
+
+        try:
+            regs   = _hr_read(slave, 0, 22, timeout=5.0)
+            raw_dtc = regs[0]
+            arm_fw  = regs[21]
+            profile, model = _classify_model(raw_dtc, arm_fw)
+            log.warning(
+                "Inverter detected: slave=0x%02x DTC=0x%04x ARM_fw=%d → %s (%s)",
+                slave, raw_dtc, arm_fw, model, profile)
+        except Exception as exc:
+            log.warning("Inverter detection failed: %s", exc)
+            profile, model = "unknown", "Detection failed"
+
+        _inverter_profile = profile
+        _inverter_model   = model
+        return slave, profile, model
+
+
+# ── Register maps ─────────────────────────────────────────────────────────────
+#
+# All register numbers are raw HR indices as per the GivEnergy Modbus spec.
+# Slot tuples are (start_hr, end_hr).  SOC target lists are indexed by slot
+# number (0-based internally, displayed as 1-based).
+
+# Registers common to all single-phase profiles
+_HR = {
+    "ENABLE_CHARGE":         96,
+    "ENABLE_DISCHARGE":      59,
+    "BATTERY_POWER_MODE":    27,
+    "CHARGE_TARGET_SOC":    116,   # global target; Gen3 also has per-slot at HR 242+
+    "BATTERY_SOC_RESERVE":  110,
+    "BATTERY_CHARGE_LIMIT": 111,
+    "BATTERY_DISCHARGE_LIMIT": 112,
+    "BATTERY_POWER_RESERVE": 114,
+}
+
+# Slot time-pair registers: (start_hr, end_hr).
+# EXTENDED_SLOTS keeps slots 1+2 at the same addresses as 2-slot; slots 3-10
+# are new registers.  Confirmed from the givenergy-modbus EXTENDED_SLOTS map.
+_CHARGE_SLOT_HR = [
+    (94, 95),    # slot 1
+    (31, 32),    # slot 2  — same address in both 2-slot and extended profiles
+    (246, 247),  # slot 3  } extended (Gen3/Gen4/HV-Gen3) only
+    (249, 250),  # slot 4  }
+    (252, 253),  # slot 5  }
+    (255, 256),  # slot 6  }
+    (258, 259),  # slot 7  }
+    (261, 262),  # slot 8  }
+    (264, 265),  # slot 9  }
+    (267, 268),  # slot 10 }
+]
+_DISCHARGE_SLOT_HR = [
+    (56, 57),    # slot 1
+    (44, 45),    # slot 2
+    (276, 277),  # slot 3  } extended only
+    (279, 280),  # slot 4  }
+    (282, 283),  # slot 5  }
+    (285, 286),  # slot 6  }
+    (288, 289),  # slot 7  }
+    (291, 292),  # slot 8  }
+    (294, 295),  # slot 9  }
+    (297, 298),  # slot 10 }
+]
+
+# Per-slot charge/discharge target SOC registers (extended profile only).
+# Pattern: slot N → base + (N-1)*3  where base=242/272.
+# Explicitly listed to be auditable rather than computed.
+_CHARGE_SOC_HR    = [242, 245, 248, 251, 254, 257, 260, 263, 266, 269]
+_DISCHARGE_SOC_HR = [272, 275, 278, 281, 284, 287, 290, 293, 296, 299]
+
+# Three-phase / AIO slot registers (shadow the single-phase addresses).
+# Only 2 slots confirmed for three-phase — no extended map exists yet.
+_CHARGE_SLOT_HR_3PH    = [(1113, 1114), (1115, 1116)]
+_DISCHARGE_SLOT_HR_3PH = [(1118, 1119), (1120, 1121)]
+_HR_3PH_CHARGE_TARGET  = 1111   # shadows HR 116
+
+# Number of slots per profile
+_SLOT_COUNT = {
+    "single_phase_2slot":    2,
+    "single_phase_extended": 10,
+    "three_phase_aio":       2,
+    "gateway_aio":           2,
+}
+
+
+# ── State reader ──────────────────────────────────────────────────────────────
+
 def _read_control_state() -> dict:
-    """Read current inverter control settings from holding registers."""
-    from givenergy_modbus.model.register import HoldingRegister as HR
-    from givenergy_modbus.model.register_cache import RegisterCache
-    mc = _ctrl_client()
-    rc = RegisterCache()
-    rc.set_registers(HR, mc.read_registers(HR, 0,  60, slave_address=0x32))
-    rc.set_registers(HR, mc.read_registers(HR, 60, 60, slave_address=0x32))
+    """Read current inverter control settings.  Returns a structured dict
+    including profile and slot arrays so the frontend can render correctly."""
+    slave, profile, model = _detect_inverter()
 
-    def g(name):
-        r = HR[name]
-        return rc[r]
+    if profile == "unknown":
+        return {"ok": False,
+                "error": f"Inverter model not recognised — cannot read settings ({model}). "
+                          "Please send a capture log.",
+                "profile": profile, "model": model}
+    # gateway_aio uses the same HR 0-119 register layout as single_phase_2slot
+    # (confirmed from wire capture). Treat as 2-slot for HR reads.
 
-    return {
-        "ok":                    True,
-        "enable_charge":         bool(g("ENABLE_CHARGE")),
-        "enable_discharge":      bool(g("ENABLE_DISCHARGE")),
-        "battery_power_mode":    g("BATTERY_POWER_MODE"),   # 0=max/export 1=demand
-        "charge_target_soc":     g("CHARGE_TARGET_SOC"),
-        "soc_reserve":           g("BATTERY_SOC_RESERVE"),
-        "charge_limit":          g("BATTERY_CHARGE_LIMIT"),
-        "discharge_limit":       g("BATTERY_DISCHARGE_LIMIT"),
-        "power_reserve":         g("BATTERY_DISCHARGE_MIN_POWER_RESERVE"),
-        "charge_slot_1_start":   _bcd_to_hhmm(g("CHARGE_SLOT_1_START")),
-        "charge_slot_1_end":     _bcd_to_hhmm(g("CHARGE_SLOT_1_END")),
-        "charge_slot_2_start":   _bcd_to_hhmm(g("CHARGE_SLOT_2_START")),
-        "charge_slot_2_end":     _bcd_to_hhmm(g("CHARGE_SLOT_2_END")),
-        "discharge_slot_1_start":_bcd_to_hhmm(g("DISCHARGE_SLOT_1_START")),
-        "discharge_slot_1_end":  _bcd_to_hhmm(g("DISCHARGE_SLOT_1_END")),
-        "discharge_slot_2_start":_bcd_to_hhmm(g("DISCHARGE_SLOT_2_START")),
-        "discharge_slot_2_end":  _bcd_to_hhmm(g("DISCHARGE_SLOT_2_END")),
-        # Power-display settings so the control page can show limits in watts
+    # ── Read holding registers ────────────────────────────────────────────────
+    regs_0   = _hr_read(slave, 0,   60)   # HR  0-59
+    regs_60  = _hr_read(slave, 60,  60)   # HR 60-119
+
+    def hr(n):
+        if n < 60:   return regs_0[n]
+        if n < 120:  return regs_60[n - 60]
+        raise IndexError(f"HR {n} not in base read range")
+
+    if profile == "single_phase_extended":
+        regs_240 = _hr_read(slave, 240, 60)   # HR 240-299
+        def hr_ext(n):
+            if 240 <= n < 300: return regs_240[n - 240]
+            return hr(n)
+    else:
+        def hr_ext(n):
+            return hr(n)
+
+    if profile == "three_phase_aio":
+        # Three-phase slot registers live in the 1100 range
+        regs_1100 = _hr_read(slave, 1100, 22)   # HR 1100-1121
+        def hr_3ph(n):
+            if 1100 <= n < 1122: return regs_1100[n - 1100]
+            return hr(n)
+
+    # ── Build slot arrays ─────────────────────────────────────────────────────
+    num_slots = _SLOT_COUNT[profile]
+
+    def read_slot(slot_hrs, soc_hrs, idx):
+        start_hr, end_hr = slot_hrs[idx]
+        if profile == "three_phase_aio":
+            start = hr_3ph(start_hr)
+            end   = hr_3ph(end_hr)
+        else:
+            start = hr_ext(start_hr)
+            end   = hr_ext(end_hr)
+        slot = {"start": _bcd_to_hhmm(start), "end": _bcd_to_hhmm(end)}
+        if soc_hrs and profile == "single_phase_extended":
+            slot["target_soc"] = hr_ext(soc_hrs[idx])
+        return slot
+
+    charge_slots = [
+        read_slot(_CHARGE_SLOT_HR, _CHARGE_SOC_HR, i)
+        for i in range(num_slots)
+    ]
+    discharge_slots = [
+        read_slot(_DISCHARGE_SLOT_HR, _DISCHARGE_SOC_HR, i)
+        for i in range(num_slots)
+    ]
+
+    if profile == "three_phase_aio":
+        charge_slots    = [read_slot(_CHARGE_SLOT_HR_3PH,    None, i) for i in range(2)]
+        discharge_slots = [read_slot(_DISCHARGE_SLOT_HR_3PH, None, i) for i in range(2)]
+        charge_target   = hr_3ph(_HR_3PH_CHARGE_TARGET)
+    else:
+        charge_target = hr(_HR["CHARGE_TARGET_SOC"])
+
+    # Serial number: HR[13-17], each register = 2 ASCII chars (big-endian)
+    serial = "".join(
+        chr((regs_0[i] >> 8) & 0xFF) + chr(regs_0[i] & 0xFF)
+        for i in range(13, 18)
+    ).strip("\x00").strip()
+
+    result = {
+        "ok":               True,
+        "profile":          profile,
+        "model":            model,
+        "serial":           serial,
+        "writable":         profile not in ("three_phase_aio",),  # gateway_aio writes now confirmed
+        "enable_charge":    bool(hr(_HR["ENABLE_CHARGE"])),
+        "enable_discharge": bool(hr(_HR["ENABLE_DISCHARGE"])),
+        "battery_power_mode":   hr(_HR["BATTERY_POWER_MODE"]),
+        "charge_target_soc":    charge_target,
+        "soc_reserve":          hr(_HR["BATTERY_SOC_RESERVE"]),
+        "charge_limit":         hr(_HR["BATTERY_CHARGE_LIMIT"]),
+        "discharge_limit":      hr(_HR["BATTERY_DISCHARGE_LIMIT"]),
+        "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
+        "charge_slots":         charge_slots,
+        "discharge_slots":      discharge_slots,
+        # Power-display config (for the UI to convert % limits to watts)
         "power_units":     POWER_UNITS,
         "max_charge_w":    MAX_CHARGE_W,
         "max_discharge_w": MAX_DISCHARGE_W,
     }
+    return result
+
+
+# ── Control log ───────────────────────────────────────────────────────────────
 
 def _log_control(command, params, success, message=""):
     with _db() as conn:
@@ -803,91 +1287,136 @@ def _log_control(command, params, success, message=""):
              int(success), message))
         conn.commit()
 
-# Map of simple command name → (register_name, value)
-_SIMPLE_CMDS = {
-    "enable_charge":    ("ENABLE_CHARGE",    1),
-    "disable_charge":   ("ENABLE_CHARGE",    0),
-    "enable_discharge": ("ENABLE_DISCHARGE", 1),
-    "disable_discharge":("ENABLE_DISCHARGE", 0),
-}
+
+# ── Control writer ────────────────────────────────────────────────────────────
 
 def _execute_control(command: str, params: dict) -> dict:
-    """Write a control command to the inverter. Returns {ok, message}."""
-    from givenergy_modbus.model.register import HoldingRegister as HR
-    mc = _ctrl_client()
+    """Write a control command to the inverter via library-free HR writes.
+    Returns {ok, message}."""
+    slave, profile, model = _detect_inverter()
+
+    if profile == "unknown":
+        return {"ok": False, "message": f"Inverter not recognised ({model}) — writes disabled."}
+
+    if profile == "three_phase_aio":
+        return {"ok": False,
+                "message": "Write control is not yet confirmed for three-phase/AIO inverters. "
+                           "Please send a capture log so register maps can be verified."}
+    # gateway_aio: HR register layout confirmed identical to single_phase_2slot
+    # from David's wire capture (HR[27]=battery_power_mode, HR[26]=6000W, HR[30]=0x11 etc.)
+    # Fall through to _do_control with profile treated as 2-slot.
 
     try:
-        if command in _SIMPLE_CMDS:
-            reg_name, val = _SIMPLE_CMDS[command]
-            mc.write_holding_register(HR[reg_name], val)
-            msg = f"{command} applied"
-
-        elif command == "set_mode_dynamic":
-            # Eco: demand mode, low reserve, disable discharge override
-            mc.write_holding_register(HR["BATTERY_POWER_MODE"], 1)
-            mc.write_holding_register(HR["BATTERY_SOC_RESERVE"], 4)
-            mc.write_holding_register(HR["ENABLE_DISCHARGE"], 0)
-            msg = "Mode set to Dynamic (Eco)"
-
-        elif command == "set_mode_storage":
-            # Storage: enable discharge, demand mode (no export)
-            mc.write_holding_register(HR["ENABLE_DISCHARGE"], 1)
-            mc.write_holding_register(HR["BATTERY_POWER_MODE"], 1)
-            msg = "Mode set to Storage"
-
-        elif command == "set_charge_slot":
-            slot = int(params.get("slot", 1))
-            start_reg = f"CHARGE_SLOT_{slot}_START"
-            end_reg   = f"CHARGE_SLOT_{slot}_END"
-            mc.write_holding_register(HR[start_reg], _hhmm_to_bcd(params["start"]))
-            mc.write_holding_register(HR[end_reg],   _hhmm_to_bcd(params["end"]))
-            msg = f"Charge slot {slot} set to {params['start']}–{params['end']}"
-
-        elif command == "set_discharge_slot":
-            slot = int(params.get("slot", 1))
-            start_reg = f"DISCHARGE_SLOT_{slot}_START"
-            end_reg   = f"DISCHARGE_SLOT_{slot}_END"
-            mc.write_holding_register(HR[start_reg], _hhmm_to_bcd(params["start"]))
-            mc.write_holding_register(HR[end_reg],   _hhmm_to_bcd(params["end"]))
-            msg = f"Discharge slot {slot} set to {params['start']}–{params['end']}"
-
-        elif command == "set_charge_target_soc":
-            val = max(4, min(100, int(params["value"])))
-            mc.write_holding_register(HR["CHARGE_TARGET_SOC"], val)
-            msg = f"Charge target SOC set to {val}%"
-
-        elif command == "set_soc_reserve":
-            val = max(4, min(100, int(params["value"])))
-            mc.write_holding_register(HR["BATTERY_SOC_RESERVE"], val)
-            msg = f"SOC reserve set to {val}%"
-
-        elif command == "set_charge_limit":
-            val = max(0, min(50, int(params["value"])))
-            mc.write_holding_register(HR["BATTERY_CHARGE_LIMIT"], val)
-            msg = f"Charge power limit set to {val}%"
-
-        elif command == "set_discharge_limit":
-            val = max(0, min(50, int(params["value"])))
-            mc.write_holding_register(HR["BATTERY_DISCHARGE_LIMIT"], val)
-            msg = f"Discharge power limit set to {val}%"
-
-        elif command == "set_discharge_mode":
-            val = max(0, min(1, int(params["value"])))
-            mc.write_holding_register(HR["BATTERY_POWER_MODE"], val)
-            msg = f"Discharge mode set to {'Max Power / Export' if val == 0 else 'Demand only'}"
-
-        else:
-            return {"ok": False, "message": f"Unknown command: {command}"}
-
+        msg = _do_control(slave, profile, command, params)
         _log_control(command, params, True, msg)
-        log.info("Control: %s", msg)
+        log.warning("Control: %s", msg)
         return {"ok": True, "message": msg}
-
     except Exception as exc:
         err = str(exc)
         _log_control(command, params, False, err)
         log.error("Control failed %s: %s", command, err)
         return {"ok": False, "message": err}
+
+
+def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
+    """Dispatch control command to raw HR writes.  Raises on failure."""
+
+    def wr(reg, val):
+        _hr_write(slave, reg, val)
+
+    # ── Simple enable/disable toggles ─────────────────────────────────────────
+    if command == "enable_charge":
+        wr(_HR["ENABLE_CHARGE"], 1);    return "Charge enabled"
+    if command == "disable_charge":
+        wr(_HR["ENABLE_CHARGE"], 0);    return "Charge disabled"
+    if command == "enable_discharge":
+        wr(_HR["ENABLE_DISCHARGE"], 1); return "Discharge enabled"
+    if command == "disable_discharge":
+        wr(_HR["ENABLE_DISCHARGE"], 0); return "Discharge disabled"
+
+    # ── Mode presets ──────────────────────────────────────────────────────────
+    if command == "set_mode_dynamic":
+        wr(_HR["BATTERY_POWER_MODE"],   1)
+        wr(_HR["BATTERY_SOC_RESERVE"],  4)
+        wr(_HR["ENABLE_DISCHARGE"],     0)
+        return "Mode set to Dynamic (Eco)"
+
+    if command == "set_mode_storage":
+        wr(_HR["ENABLE_DISCHARGE"],     1)
+        wr(_HR["BATTERY_POWER_MODE"],   1)
+        return "Mode set to Storage"
+
+    # ── Charge slot ───────────────────────────────────────────────────────────
+    if command == "set_charge_slot":
+        slot = int(params.get("slot", 1))
+        max_slots = _SLOT_COUNT[profile]
+        if not 1 <= slot <= max_slots:
+            raise ValueError(f"Slot {slot} out of range for this inverter (max {max_slots})")
+        start_hr, end_hr = _CHARGE_SLOT_HR[slot - 1]
+        wr(start_hr, _hhmm_to_bcd(params["start"]))
+        wr(end_hr,   _hhmm_to_bcd(params["end"]))
+        return f"Charge slot {slot} set to {params['start']}–{params['end']}"
+
+    # ── Discharge slot ────────────────────────────────────────────────────────
+    if command == "set_discharge_slot":
+        slot = int(params.get("slot", 1))
+        max_slots = _SLOT_COUNT[profile]
+        if not 1 <= slot <= max_slots:
+            raise ValueError(f"Slot {slot} out of range for this inverter (max {max_slots})")
+        start_hr, end_hr = _DISCHARGE_SLOT_HR[slot - 1]
+        wr(start_hr, _hhmm_to_bcd(params["start"]))
+        wr(end_hr,   _hhmm_to_bcd(params["end"]))
+        return f"Discharge slot {slot} set to {params['start']}–{params['end']}"
+
+    # ── Per-slot SOC target (extended profile only) ───────────────────────────
+    if command == "set_charge_slot_soc":
+        if profile != "single_phase_extended":
+            raise ValueError("Per-slot charge SOC target is only available on Gen3/Gen4 inverters")
+        slot = int(params.get("slot", 1))
+        if not 1 <= slot <= 10:
+            raise ValueError(f"Slot {slot} out of range (max 10)")
+        val = max(4, min(100, int(params["value"])))
+        wr(_CHARGE_SOC_HR[slot - 1], val)
+        return f"Charge slot {slot} target SOC set to {val}%"
+
+    if command == "set_discharge_slot_soc":
+        if profile != "single_phase_extended":
+            raise ValueError("Per-slot discharge SOC target is only available on Gen3/Gen4 inverters")
+        slot = int(params.get("slot", 1))
+        if not 1 <= slot <= 10:
+            raise ValueError(f"Slot {slot} out of range (max 10)")
+        val = max(4, min(100, int(params["value"])))
+        wr(_DISCHARGE_SOC_HR[slot - 1], val)
+        return f"Discharge slot {slot} target SOC set to {val}%"
+
+    # ── Scalar settings ───────────────────────────────────────────────────────
+    if command == "set_charge_target_soc":
+        val = max(4, min(100, int(params["value"])))
+        wr(_HR["CHARGE_TARGET_SOC"], val)
+        return f"Charge target SOC set to {val}%"
+
+    if command == "set_soc_reserve":
+        val = max(4, min(100, int(params["value"])))
+        wr(_HR["BATTERY_SOC_RESERVE"], val)
+        return f"SOC reserve set to {val}%"
+
+    if command == "set_charge_limit":
+        val = max(0, min(50, int(params["value"])))
+        wr(_HR["BATTERY_CHARGE_LIMIT"], val)
+        return f"Charge power limit set to {val}%"
+
+    if command == "set_discharge_limit":
+        val = max(0, min(50, int(params["value"])))
+        wr(_HR["BATTERY_DISCHARGE_LIMIT"], val)
+        return f"Discharge power limit set to {val}%"
+
+    if command == "set_discharge_mode":
+        val = max(0, min(1, int(params["value"])))
+        wr(_HR["BATTERY_POWER_MODE"], val)
+        label = "Max Power / Export" if val == 0 else "Demand only"
+        return f"Discharge mode set to {label}"
+
+    raise ValueError(f"Unknown command: {command}")
 
 
 # ── Flask app ──────────────────────────────────────────────────────────────────
@@ -973,6 +1502,8 @@ def get_settings():
         "backup_enabled":      BACKUP_ENABLED,
         "backup_keep_days":    BACKUP_KEEP_DAYS,
         "last_backup":         _last_backup_info()[1] or "none yet",
+        "check_for_updates":   CHECK_UPDATES,
+        "app_version":         APP_VERSION,
         # API key is intentionally never returned to the browser
     })
 
@@ -982,7 +1513,7 @@ def save_settings():
     global DATA_RETENTION_DAYS, MET_API_KEY, MET_GEOHASH, _last_weather_ts
     global ADMIN_HASH, WEATHER_POLL_MINS
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
-    global BACKUP_ENABLED, BACKUP_KEEP_DAYS
+    global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -1016,6 +1547,8 @@ def save_settings():
         BACKUP_ENABLED = bool(data["backup_enabled"]); _set("backup", "enabled", "yes" if BACKUP_ENABLED else "no")
     if "backup_keep_days" in data:
         BACKUP_KEEP_DAYS = max(1, min(60, int(data["backup_keep_days"]))); _set("backup", "keep_days", BACKUP_KEEP_DAYS)
+    if "check_for_updates" in data:
+        CHECK_UPDATES = bool(data["check_for_updates"]); _set("server", "check_for_updates", "yes" if CHECK_UPDATES else "no")
 
     if not cfg.has_section("weather"): cfg.add_section("weather")
     if "weather_poll_mins" in data:
@@ -1094,6 +1627,14 @@ def backup_import():
     except Exception as exc:
         staging.unlink(missing_ok=True)
         return jsonify({"ok": False, "error": str(exc)}), 500
+
+@app.route("/api/update")
+def api_update():
+    if not CHECK_UPDATES:
+        return jsonify({"available": False, "current": APP_VERSION, "checking": False})
+    if not _update_info:
+        return jsonify({"available": False, "current": APP_VERSION, "checking": True})
+    return jsonify(_update_info)
 
 @app.route("/api/weather")
 def api_weather():
@@ -1298,6 +1839,13 @@ if __name__ == "__main__":
 
     t = threading.Thread(target=_data_loop, daemon=True)
     t.start()
+
+    # Delayed first update check — runs 30s after startup so the inverter
+    # connection settles before we make an outbound request.
+    def _deferred_update_check():
+        time.sleep(30)
+        _check_for_update()
+    threading.Thread(target=_deferred_update_check, daemon=True).start()
 
     # Wait for first successful poll
     print("ACBC - GivEnergy Portal - connecting to inverter...")

@@ -62,6 +62,15 @@ html,body{
   padding:2px 12px calc(4px + env(safe-area-inset-bottom,0px));
   letter-spacing:.3px;
 }
+#update-bar{
+  display:none;flex-shrink:0;
+  background:#b45309;color:#fff;
+  font-size:.78rem;padding:7px 12px;
+  display:none;align-items:center;gap:8px;
+}
+#update-bar a{color:#fde68a;font-weight:600;text-decoration:none}
+#update-bar a:hover{text-decoration:underline}
+#update-dismiss{margin-left:auto;background:none;border:none;color:#fff;font-size:1rem;cursor:pointer;opacity:.7;padding:0 2px}
 
 /* ── Settings panel ───────────────────────────── */
 #settings-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
@@ -357,6 +366,15 @@ html,body{
 <body>
 <div id="app">
 
+  <!-- Update banner (hidden until update detected) -->
+  <div id="update-bar">
+    <span>&#11014; Update available: </span>
+    <strong id="update-version"></strong>
+    &mdash; <span id="update-name" style="opacity:.85"></span>
+    <a id="update-link" href="#" target="_blank" rel="noopener">Release notes &#8599;</a>
+    <button id="update-dismiss" title="Dismiss">&#10005;</button>
+  </div>
+
   <!-- Header -->
   <div id="hdr">
     <div id="hdr-title">
@@ -481,7 +499,7 @@ html,body{
     </div>
   </div>
 
-  <div id="ver-bar">V1.6 Public Beta &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
+  <div id="ver-bar">V1.7 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
   <!-- v1.2 includes inverter control + activity log -->
 
   <!-- Password modal -->
@@ -555,6 +573,17 @@ html,body{
         <div class="sett-row"><label>Poll interval (mins)</label><input id="s-wxpoll" type="number" min="5" max="1440"></div>
       </div>
       <div class="sett-section">
+        <div class="sett-heading">Updates</div>
+        <div class="sett-hint">Checks GitHub once a day for a new release. No personal data is sent.</div>
+        <div class="sett-row">
+          <label>Check for updates</label>
+          <select id="s-checkupdates" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="yes">On</option>
+            <option value="no">Off</option>
+          </select>
+        </div>
+      </div>
+      <div class="sett-section">
         <div class="sett-heading">Admin Password</div>
         <div class="sett-hint">Leave blank to keep current password</div>
         <div class="sett-row"><label>New password</label><input id="s-newpw" type="password" placeholder="New password"></div>
@@ -572,6 +601,14 @@ html,body{
       <span id="ctrl-title"><svg width="13" height="11" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;margin-right:5px"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg>Inverter Control</span>
     </div>
     <div id="ctrl-body">
+
+      <!-- Inverter info -->
+      <div class="ctrl-section" style="padding-bottom:6px;border-bottom:1px solid var(--border)">
+        <div style="display:flex;gap:16px;flex-wrap:wrap">
+          <div><span class="ctrl-heading">Model</span><br><span id="ctrl-model" style="font-size:.85rem">—</span></div>
+          <div><span class="ctrl-heading">Serial</span><br><span id="ctrl-serial" style="font-size:.85rem;font-family:monospace">—</span></div>
+        </div>
+      </div>
 
       <!-- Mode -->
       <div class="ctrl-section">
@@ -629,24 +666,7 @@ html,body{
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('charge')">Set</button>
         </div>
         <div class="ctrl-heading" style="margin-top:4px">Charge Slots</div>
-        <div class="slot-grid">
-          <div class="slot-box">
-            <label>Slot 1 start</label>
-            <input class="slot-time" id="cs1-start" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 1 end</label>
-            <input class="slot-time" id="cs1-end" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 2 start</label>
-            <input class="slot-time" id="cs2-start" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 2 end</label>
-            <input class="slot-time" id="cs2-end" type="time">
-          </div>
-        </div>
+        <div id="charge-slots-container"></div>
         <button class="ctrl-btn amber" onclick="ctrlSaveSlots('charge')" style="margin-top:4px">Save Charge Slots</button>
       </div>
 
@@ -680,24 +700,7 @@ html,body{
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('discharge')">Set</button>
         </div>
         <div class="ctrl-heading" style="margin-top:4px">Discharge Slots</div>
-        <div class="slot-grid">
-          <div class="slot-box">
-            <label>Slot 1 start</label>
-            <input class="slot-time" id="ds1-start" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 1 end</label>
-            <input class="slot-time" id="ds1-end" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 2 start</label>
-            <input class="slot-time" id="ds2-start" type="time">
-          </div>
-          <div class="slot-box">
-            <label>Slot 2 end</label>
-            <input class="slot-time" id="ds2-end" type="time">
-          </div>
-        </div>
+        <div id="discharge-slots-container"></div>
         <button class="ctrl-btn amber" onclick="ctrlSaveSlots('discharge')" style="margin-top:4px">Save Discharge Slots</button>
       </div>
 
@@ -1176,6 +1179,33 @@ async function pollWeather() {
   setTimeout(pollWeather, 600000);    // refresh badge every 10 mins (server caches Met Office calls)
 }
 
+// ── Update banner ─────────────────────────────────────────────────────────────
+let _updateDismissed = false;
+
+async function checkForUpdate() {
+  if (_updateDismissed) return;
+  try {
+    const r = await fetch('/api/update', { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.available) {
+      $('update-version').textContent = 'v' + d.latest;
+      $('update-name').textContent    = d.release_name || '';
+      $('update-link').href           = d.url || '#';
+      $('update-bar').style.display   = 'flex';
+    }
+  } catch(e) {}
+}
+
+$('update-dismiss').addEventListener('click', () => {
+  _updateDismissed = true;
+  $('update-bar').style.display = 'none';
+});
+
+// Check on load, then every hour in case the server fetches a new result
+checkForUpdate();
+setInterval(checkForUpdate, 3600000);
+
 // ── Inverter Control ─────────────────────────────────────────────────────────
 function _ctrlHeaders() {
   return { 'Content-Type':'application/json', 'X-Admin-Password': _adminPw };
@@ -1195,7 +1225,11 @@ async function loadControlState() {
     const r = await fetch('/api/control', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
     if (r.status === 401) { showView('live'); return; }
     const d = await r.json();
-    if (!d.ok) { _ctrlMsg('Read failed: ' + d.error, false); return; }
+    if (!d.ok) { _ctrlMsg('Read failed: ' + (d.error || d.message), false); return; }
+
+    // Inverter info
+    $('ctrl-model').textContent  = d.model  || '—';
+    $('ctrl-serial').textContent = d.serial || '—';
 
     // Mode buttons
     const isStorage = d.enable_discharge && d.battery_power_mode === 1;
@@ -1223,19 +1257,19 @@ async function loadControlState() {
     _configLimitSlider('charge',    d.charge_limit);
     _configLimitSlider('discharge', d.discharge_limit);
 
-    // Charge slots
-    $('cs1-start').value = d.charge_slot_1_start;
-    $('cs1-end').value   = d.charge_slot_1_end;
-    $('cs2-start').value = d.charge_slot_2_start;
-    $('cs2-end').value   = d.charge_slot_2_end;
+    // Render slot grids dynamically from API arrays
+    _renderSlots('charge',    d.charge_slots    || [], d.profile);
+    _renderSlots('discharge', d.discharge_slots || [], d.profile);
 
-    // Discharge slots
-    $('ds1-start').value = d.discharge_slot_1_start;
-    $('ds1-end').value   = d.discharge_slot_1_end;
-    $('ds2-start').value = d.discharge_slot_2_start;
-    $('ds2-end').value   = d.discharge_slot_2_end;
+    // Read-only banner for unconfirmed inverter types
+    const roMsg = d.writable === false
+      ? (d.profile === 'gateway_aio'
+          ? 'Gateway AIO detected — monitoring works fully. Write control not yet confirmed for this hardware.'
+          : 'Write control is not yet confirmed for three-phase/AIO inverters.')
+      : '';
+    _ctrlMsg(roMsg, roMsg === '');
 
-    $('ctrl-msg').textContent = '';
+    $('ctrl-msg').textContent = roMsg;
   } catch(e) { _ctrlMsg('Error: ' + e.message, false); }
 }
 
@@ -1301,13 +1335,48 @@ async function ctrlSetLimit(type) {
   await ctrlCmd(cmd, { value: reg });
 }
 
+function _renderSlots(type, slots, profile) {
+  const container = $(type === 'charge' ? 'charge-slots-container' : 'discharge-slots-container');
+  const extended  = profile === 'single_phase_extended';
+  let html = '<div class="slot-grid">';
+  slots.forEach((slot, i) => {
+    const n   = i + 1;
+    const pfx = type === 'charge' ? 'cs' : 'ds';
+    html += `<div class="slot-box">
+      <label>Slot ${n} start</label>
+      <input class="slot-time" id="${pfx}${n}-start" type="time" value="${slot.start || ''}">
+    </div>
+    <div class="slot-box">
+      <label>Slot ${n} end</label>
+      <input class="slot-time" id="${pfx}${n}-end" type="time" value="${slot.end || ''}">
+    </div>`;
+    if (extended && type === 'charge' && slot.target_soc !== undefined) {
+      html += `<div class="slot-box" style="grid-column:span 2">
+        <label>Slot ${n} target SOC</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="range" class="ctrl-slider" id="${pfx}${n}-soc"
+            min="4" max="100" value="${slot.target_soc}"
+            oninput="$(this.id+'-val').textContent=this.value+'%'"
+            style="flex:1">
+          <span id="${pfx}${n}-soc-val" style="font-size:.8rem;min-width:36px">${slot.target_soc}%</span>
+          <button class="ctrl-btn amber ctrl-btn-sm"
+            onclick="ctrlCmd('set_charge_slot_soc',{slot:${n},value:parseInt($('${pfx}${n}-soc').value)})">Set</button>
+        </div>
+      </div>`;
+    }
+  });
+  html += '</div>';
+  container.innerHTML = html;
+}
+
 async function ctrlSaveSlots(type) {
-  const prefix = type === 'charge' ? 'c' : 'd';
-  for (const slot of [1, 2]) {
-    const start = $(`${prefix}s${slot}-start`).value;
-    const end   = $(`${prefix}s${slot}-end`).value;
-    if (start && end) {
-      await ctrlCmd(`set_${type}_slot`, { slot, start, end });
+  const pfx   = type === 'charge' ? 'cs' : 'ds';
+  const slots = document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`);
+  for (const startEl of slots) {
+    const n   = startEl.id.replace(`${pfx}`, '').replace('-start', '');
+    const end = $(pfx + n + '-end');
+    if (startEl.value && end && end.value) {
+      await ctrlCmd(`set_${type}_slot`, { slot: parseInt(n), start: startEl.value, end: end.value });
     }
   }
 }
@@ -1463,8 +1532,9 @@ async function loadSettings() {
     $('s-maxchg').value    = s.max_charge_w         || 2600;
     $('s-maxdis').value    = s.max_discharge_w      || 2600;
     $('s-retention').value = s.data_retention_days  || 730;
-    $('s-bkenabled').value = s.backup_enabled ? 'yes' : 'no';
-    $('s-bkkeep').value    = s.backup_keep_days     || 7;
+    $('s-bkenabled').value     = s.backup_enabled    ? 'yes' : 'no';
+    $('s-checkupdates').value  = s.check_for_updates ? 'yes' : 'no';
+    $('s-bkkeep').value        = s.backup_keep_days  || 7;
     $('s-bklast').textContent = s.last_backup || '—';
     $('s-bkmsg').textContent = '';
     $('s-wxhash').value    = s.weather_geohash      || '';
@@ -1496,6 +1566,7 @@ $('sett-save').addEventListener('click', async () => {
     max_discharge_w:     parseInt($('s-maxdis').value) || 2600,
     data_retention_days: parseInt($('s-retention').value),
     backup_enabled:      $('s-bkenabled').value === 'yes',
+    check_for_updates:   $('s-checkupdates').value === 'yes',
     backup_keep_days:    parseInt($('s-bkkeep').value) || 7,
     weather_geohash:     $('s-wxhash').value.trim(),
     weather_api_key:     $('s-wxkey').value.trim(),
