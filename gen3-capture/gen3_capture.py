@@ -12,6 +12,12 @@ Flags:
                   HR(0,60), HR(60,60), HR(120,60) all at slave 0x11)
                   in rapid succession, waits 30s for any response.
                   This is the key test — GivTCP's approach is KNOWN to work.
+  --aio           Gateway AIO refresh-rate diagnostic. Actively polls
+                  IR(1600,60) and IR(1780,60) every 10 seconds for 10 minutes
+                  and labels every frame as POKE_RESPONSE or UNSOLICITED.
+                  Answers the key question: does active polling return fresh
+                  data, or only the last 5-minute cloud-sync snapshot?
+                  Key values decoded: solar, home, battery, grid, SOC.
 """
 import socket
 import sys
@@ -26,6 +32,7 @@ ACK_HEARTBEATS  = "--no-ack"      not in sys.argv
 HANDSHAKE_MODE  = "--handshake"   in sys.argv
 SEQUENTIAL_MODE = "--sequential"  in sys.argv
 GIVTCP_MODE     = "--givtcp"      in sys.argv
+AIO_MODE        = "--aio"         in sys.argv
 
 POKE_INTERVAL   = 10.0
 HB_WAIT_TIMEOUT = 240.0   # 4 minutes to wait for first heartbeat
@@ -135,10 +142,41 @@ def _pop_frames(buf: bytearray):
 
 
 def decode_input_frame(frame):
-    if len(frame) < 164 or frame[7] != 0x02 or frame[27] != 0x04: return None
-    if (frame[38] << 8 | frame[39]) != 0 or (frame[40] << 8 | frame[41]) < 60: return None
-    def g(n): o = 42+n*2; return (frame[o]<<8)|frame[o+1]
-    return {"slave": frame[26], "soc": g(59), "solar": g(18)+g(20), "home": g(42)}
+    if len(frame) < 44 or frame[7] != 0x02 or frame[27] != 0x04: return None
+    base  = (frame[38] << 8) | frame[39]
+    count = (frame[40] << 8) | frame[41]
+    if count < 60: return None
+    regs_off = 42
+    if len(frame) < regs_off + count * 2: return None
+    def g(n): o = regs_off + n*2; return (frame[o]<<8)|frame[o+1]
+    regs = [g(n) for n in range(count)]
+    return {
+        "slave": frame[26],
+        "base":  base,
+        "count": count,
+        "regs":  regs,
+        # key metrics — only valid when base==0 (standard IR page)
+        "soc":   g(59) if base == 0 else 0,
+        "solar": (g(18)+g(20)) if base == 0 else 0,
+        "home":  g(42) if base == 0 else 0,
+    }
+
+
+def dump_regs(d, log):
+    """Print all non-zero registers from a decoded input frame."""
+    regs = d["regs"]
+    log(f"  Register dump (slave=0x{d['slave']:02x} base={d['base']} count={d['count']}):")
+    nonzero = [(i, v) for i, v in enumerate(regs) if v != 0]
+    if not nonzero:
+        log("    (all registers are zero)")
+        return
+    # Print in rows of 8
+    for i in range(0, len(regs), 8):
+        chunk = regs[i:i+8]
+        row = "  ".join(f"r{i+j:03d}={v:5d}" for j, v in enumerate(chunk) if v != 0)
+        if row:
+            log(f"    {row}")
+    log(f"  Non-zero registers: {[i for i, v in nonzero]}")
 
 
 def _ack_heartbeat(s, frame, st, log):
@@ -278,6 +316,8 @@ def _run_sequential(s, st, log, logf, binf):
         ("D", 0x11, 0x03,   0, 60, "HR(0,60)   slave=0x11"),
         ("E", 0x32, 0x04, 180, 60, "IR(180,60) slave=0x32"),
         ("F", 0x32, 0x04,  60, 60, "IR(60,60)  slave=0x32"),
+        ("G", 0x11, 0x04, 180, 60, "IR(180,60) slave=0x11  ← AIO/Gen3 extended"),
+        ("H", 0x11, 0x04,  60, 60, "IR(60,60)  slave=0x11  ← AIO/Gen3 extended"),
     ]
 
     results_summary = []
@@ -314,8 +354,11 @@ def _run_sequential(s, st, log, logf, binf):
             d = decode_input_frame(mf)
             verdict = f"MATCHED in {me:.3f}s"
             if d:
-                verdict += f"  SOC={d['soc']}% solar={d['solar']}W home={d['home']}W"
+                if d["base"] == 0:
+                    verdict += f"  SOC={d['soc']}% solar={d['solar']}W home={d['home']}W"
             log(f"Test {test_label} RESULT: ✓ {verdict}")
+            if d:
+                dump_regs(d, log)
             print(f"MATCHED in {me:.3f}s", flush=True)
             results_summary.append((test_label, desc, True, me))
         else:
@@ -457,7 +500,9 @@ def _run_givtcp(s, st, log, logf, binf):
                     st["replies"] += 1; st["slaves"].add(rx_slave)
                     d = decode_input_frame(frame)
                     if d:
-                        log(f"  → SOC={d['soc']}% solar={d['solar']}W home={d['home']}W")
+                        if d["base"] == 0:
+                            log(f"  → SOC={d['soc']}% solar={d['solar']}W home={d['home']}W")
+                        dump_regs(d, log)
                     if elapsed < 5.0:
                         log(f"  *** FAST RESPONSE in {elapsed:.3f}s — "
                             f"GivTCP burst IS working! ***")
@@ -477,6 +522,237 @@ def _run_givtcp(s, st, log, logf, binf):
             time.sleep(sleep_time)
 
 
+# ── AIO refresh-rate diagnostic ───────────────────────────────────────────────
+
+def _decode_aio_1600(frame):
+    """Decode a base=1600 gateway frame into key AIO power values."""
+    if len(frame) < 44 or frame[7] != 0x02 or frame[27] != 0x04:
+        return None
+    base  = (frame[38] << 8) | frame[39]
+    count = (frame[40] << 8) | frame[41]
+    if base != 1600 or count < 20:
+        return None
+    if len(frame) < 42 + 20 * 2:
+        return None
+    def g(n):
+        o = 42 + n * 2
+        return (frame[o] << 8) | frame[o + 1]
+    def s16(v): return v - 65536 if v >= 32768 else v
+    return {
+        "solar_w":   g(17),
+        "home_w":    g(18),
+        "bat_w":     s16(g(19)),   # positive=charge, negative=discharge (GivTCP convention)
+        "grid_w":    s16(g(16)),   # negative=import, positive=export
+        "v_ac":      g(8) / 10,    # AC voltage ×0.1
+    }
+
+def _decode_aio_soc(frame):
+    """Extract SOC from a base=1780 gateway frame (IR1801 = offset 21)."""
+    if len(frame) < 44 or frame[7] != 0x02 or frame[27] != 0x04:
+        return None
+    base  = (frame[38] << 8) | frame[39]
+    count = (frame[40] << 8) | frame[41]
+    if base != 1780 or count < 22:
+        return None
+    if len(frame) < 42 + 22 * 2:
+        return None
+    soc = (frame[42 + 21*2] << 8) | frame[43 + 21*2]
+    return soc if 0 <= soc <= 100 else None
+
+
+def _run_aio(s, st, log, logf, binf):
+    """
+    Gateway AIO refresh-rate diagnostic.
+
+    Sends IR(1600,60) and IR(1780,60) pokes to slave 0x11 every 10 seconds,
+    then labels every base=1600 and base=1780 frame as either POKE_RESPONSE
+    (arrived within 3s of our poke) or UNSOLICITED_BROADCAST.
+
+    This answers definitively: does the gateway return FRESH values when
+    actively polled, or only serve its last 5-minute cloud-sync snapshot?
+
+    Key values printed each time a 1600-frame arrives:
+      solar, home, battery, grid (all in watts), AC voltage, SOC%
+    """
+    POLL_SEC      = 10.0    # how often to send pokes
+    POKE_WINDOW   = 3.0     # seconds after poke = response counts as POKE_RESPONSE
+    RUN_MINUTES   = 10      # total run time
+    SOC_INTERVAL  = 60.0    # how often to also poke base=1780 for SOC
+
+    poke_1600 = _make_request(0x11, 0x04, 1600, 60)
+    poke_1780 = _make_request(0x11, 0x04, 1780, 60)
+
+    buf               = bytearray()
+    last_poke_ts      = 0.0
+    last_soc_poke_ts  = 0.0
+    last_soc          = None
+    poke_count        = 0
+    frame_count_1600  = 0
+    poke_resp_count   = 0
+    unsol_count       = 0
+    last_values       = None
+    start_ts          = time.time()
+
+    log("=" * 64)
+    log("AIO REFRESH-RATE DIAGNOSTIC")
+    log("=" * 64)
+    log("")
+    log(f"Actively polls IR(1600,60) every {POLL_SEC:.0f}s and IR(1780,60) "
+        f"every {SOC_INTERVAL:.0f}s for {RUN_MINUTES} minutes.")
+    log("Each base=1600 frame is labelled:")
+    log("  POKE_RESPONSE   — arrived within 3s of our poke   (= gateway serves fresh data)")
+    log("  UNSOLICITED     — arrived outside poke window      (= cloud-sync broadcast)")
+    log("")
+    log("Key values: solar | home | battery (+=charge +=discharge) | grid (+=export -=import) | SOC%")
+    log("-" * 64)
+
+    deadline = start_ts + RUN_MINUTES * 60
+
+    while time.time() < deadline:
+        now = time.time()
+        elapsed_total = now - start_ts
+
+        # Send pokes
+        if now - last_poke_ts >= POLL_SEC:
+            s.sendall(poke_1600)
+            last_poke_ts = now
+            poke_count += 1
+            log(f"  [{elapsed_total:5.0f}s] POKE  IR(1600,60) #{poke_count}", to_console=False)
+            print(f"  [{elapsed_total:5.0f}s] > poke sent (#{poke_count})", flush=True)
+
+        if now - last_soc_poke_ts >= SOC_INTERVAL:
+            time.sleep(0.25)           # space from previous poke
+            s.sendall(poke_1780)
+            last_soc_poke_ts = now
+            log(f"  [{elapsed_total:5.0f}s] POKE  IR(1780,60) for SOC", to_console=False)
+
+        # Receive
+        try:
+            data = s.recv(8192)
+        except socket.timeout:
+            data = b""
+        if not data:
+            continue
+
+        binf.write(data); binf.flush()
+        st["bytes"] += len(data)
+        buf.extend(data)
+
+        for frame in _pop_frames(buf):
+            st["frames"] += 1
+            outer_func = frame[7] if len(frame) > 7 else 0
+
+            # Log raw frame
+            logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} "
+                       f"func={outer_func:02x}\n")
+            logf.write(hexdump(frame) + "\n"); logf.flush()
+
+            # Heartbeat
+            if outer_func == 0x01:
+                if len(frame) >= 18:
+                    st["adapter_serial"] = frame[8:18]
+                _ack_heartbeat(s, frame, st, log)
+                continue
+
+            if len(frame) < 44 or outer_func != 0x02:
+                continue
+
+            rx_base  = (frame[38] << 8) | frame[39]
+            rx_count = (frame[40] << 8) | frame[41]
+            rx_slave = frame[26]
+            elapsed_since_poke = now - last_poke_ts
+
+            # ── base=1600: key AIO live data ──────────────────────────────
+            if rx_base == 1600:
+                frame_count_1600 += 1
+                is_poke_resp = elapsed_since_poke < POKE_WINDOW
+                label = "POKE_RESPONSE  " if is_poke_resp else "UNSOLICITED    "
+                if is_poke_resp:
+                    poke_resp_count += 1
+                else:
+                    unsol_count += 1
+
+                d = _decode_aio_1600(frame)
+                soc_str = f"SOC={last_soc}%" if last_soc is not None else "SOC=?"
+
+                if d:
+                    bat_dir = "chg" if d["bat_w"] >= 0 else "dis"
+                    grd_dir = "exp" if d["grid_w"] >= 0 else "imp"
+                    values_str = (
+                        f"solar={d['solar_w']:5d}W  "
+                        f"home={d['home_w']:5d}W  "
+                        f"bat={abs(d['bat_w']):5d}W({bat_dir})  "
+                        f"grid={abs(d['grid_w']):4d}W({grd_dir})  "
+                        f"{soc_str}  "
+                        f"Vac={d['v_ac']:.1f}V"
+                    )
+
+                    # Flag if values changed from last reading
+                    changed = ""
+                    if last_values and d:
+                        diffs = []
+                        for k in ("solar_w", "home_w", "bat_w", "grid_w"):
+                            if abs(d[k] - last_values.get(k, d[k])) > 10:
+                                diffs.append(k.replace("_w", ""))
+                        if diffs:
+                            changed = f"  << CHANGED: {', '.join(diffs)}"
+                    last_values = d
+
+                    msg = (f"[{elapsed_total:5.0f}s] {label}  "
+                           f"{values_str}{changed}")
+                else:
+                    msg = (f"[{elapsed_total:5.0f}s] {label}  "
+                           f"(decode failed, count={rx_count})")
+
+                log(msg)
+
+            # ── base=1780: SOC update ─────────────────────────────────────
+            elif rx_base == 1780:
+                elapsed_since_soc_poke = now - last_soc_poke_ts
+                is_poke_resp = elapsed_since_soc_poke < POKE_WINDOW
+                soc_label = "POKE_RESPONSE" if is_poke_resp else "UNSOLICITED  "
+                soc = _decode_aio_soc(frame)
+                if soc is not None:
+                    last_soc = soc
+                    log(f"[{elapsed_total:5.0f}s] SOC {soc_label}  aio1_soc = {soc}%")
+
+            # ── other bases: just note them ───────────────────────────────
+            else:
+                if rx_base not in (0, 180):   # skip noisy known-zero pages
+                    log(f"[{elapsed_total:5.0f}s] OTHER  slave=0x{rx_slave:02x} "
+                        f"base={rx_base} count={rx_count}  (logged to file)")
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    log("")
+    log("=" * 64)
+    log("AIO DIAGNOSTIC SUMMARY")
+    log("=" * 64)
+    log(f"  Run time:           {RUN_MINUTES} minutes")
+    log(f"  Pokes sent:         {poke_count}  (every {POLL_SEC:.0f}s)")
+    log(f"  base=1600 frames:   {frame_count_1600}")
+    log(f"    POKE_RESPONSE:    {poke_resp_count}")
+    log(f"    UNSOLICITED:      {unsol_count}")
+    log("")
+    if poke_resp_count > 0:
+        log("  RESULT: Gateway DOES respond to IR(1600) pokes.")
+        log("  Next step: check if POKE_RESPONSE values change each poll,")
+        log("             or stay frozen until a cloud-sync UNSOLICITED frame arrives.")
+        if unsol_count > 0:
+            log("  Both poke responses AND unsolicited frames seen.")
+            log("  Compare their values in the log to confirm whether poke data is fresh.")
+    elif unsol_count > 0:
+        log("  RESULT: Gateway does NOT respond to IR(1600) pokes.")
+        log("  Data only arrives in unsolicited cloud-sync broadcasts (~5 min intervals).")
+        log("  Dashboard should use passive listen-only mode for this device.")
+    else:
+        log("  RESULT: No base=1600 frames received at all.")
+        log("  Check inverter IP, port 8899, and that no other app is connected.")
+    log("")
+    stamp_now = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log(f"Please send back:  capture_{stamp_now}.log  and  capture_{stamp_now}.bin")
+    log("(the .log AND .bin files)")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     ip, port = load_config()
@@ -491,7 +767,8 @@ def main():
         if to_console: print(line, flush=True)
         logf.write(line + "\n"); logf.flush()
 
-    mode_str = ("GIVTCP (5-frame burst at 0x11)"       if GIVTCP_MODE     else
+    mode_str = ("AIO refresh-rate diagnostic"          if AIO_MODE        else
+                "GIVTCP (5-frame burst at 0x11)"       if GIVTCP_MODE     else
                 "SEQUENTIAL (real serial + A-F test)" if SEQUENTIAL_MODE else
                 "HANDSHAKE (IR+HR poke-and-listen)"   if HANDSHAKE_MODE  else
                 "NORMAL (poke-and-listen)")
@@ -538,9 +815,14 @@ def main():
         if st["last_reply"] and gap > st["max_gap"]: st["max_gap"] = gap
         if st["last_reply"] and gap > 30:            st["gaps_over_30s"] += 1
         st["last_reply"] = now; st["warned"] = False
-        log(f"REPLY  slave=0x{d['slave']:02x}  SOC={d['soc']}%  "
-            f"solar={d['solar']}W  home={d['home']}W  "
-            f"(gap:{gap:5.1f}s, {spok:.1f}s after poke)")
+        if d["base"] == 0:
+            log(f"REPLY  slave=0x{d['slave']:02x}  SOC={d['soc']}%  "
+                f"solar={d['solar']}W  home={d['home']}W  "
+                f"(gap:{gap:5.1f}s, {spok:.1f}s after poke)")
+        else:
+            log(f"REPLY  slave=0x{d['slave']:02x}  base={d['base']}  "
+                f"(gap:{gap:5.1f}s, {spok:.1f}s after poke)")
+        dump_regs(d, log)
 
     def process_buffer(buf):
         for frame in _pop_frames(buf):
@@ -557,7 +839,10 @@ def main():
                 st["sock"] = s
                 log("Connected.")
 
-                if GIVTCP_MODE:
+                if AIO_MODE:
+                    _run_aio(s, st, log, logf, binf)
+                    break   # _run_aio has its own run-time; exit outer loop
+                elif GIVTCP_MODE:
                     _run_givtcp(s, st, log, logf, binf)
                 elif SEQUENTIAL_MODE:
                     _run_sequential(s, st, log, logf, binf)
