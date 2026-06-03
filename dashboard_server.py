@@ -754,6 +754,59 @@ def _send_pokes(s):
     for poke in _POKE_REQUESTS:
         s.sendall(poke)
 
+def _detect_on_socket(s, slave: int) -> None:
+    """Read HR[0]+HR[21] on an already-open listen socket to detect the inverter
+    model.  Populates _inverter_profile/_inverter_model so that later calls to
+    _detect_inverter() hit the cache and never open a second TCP connection."""
+    global _inverter_profile, _inverter_model
+    if _inverter_profile:
+        return   # already done
+    try:
+        serial  = b"AB1234G567"
+        padding = b"\x00" * 7 + b"\x08"
+        inner   = bytes([slave, 0x03]) + (0).to_bytes(2, "big") + (22).to_bytes(2, "big")
+        crc     = _crc16(inner)
+        payload = serial + padding + inner + crc
+        length  = len(payload) + 2
+        req     = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+        s.sendall(req)
+        # Read response — allow up to 3 seconds; other frames may arrive first
+        buf   = bytearray()
+        t0    = time.time()
+        while time.time() - t0 < 3.0:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for frame in _pop_data_frames(buf):
+                if len(frame) < 44 or frame[7] != 0x02 or frame[27] != 0x03:
+                    continue
+                rx_base  = (frame[38] << 8) | frame[39]
+                rx_count = (frame[40] << 8) | frame[41]
+                if rx_base != 0 or rx_count < 22:
+                    continue
+                if len(frame) < 42 + 22 * 2:
+                    continue
+                def g(n): return (frame[42 + n*2] << 8) | frame[43 + n*2]
+                raw_dtc = g(0)
+                arm_fw  = g(21)
+                with _detect_lock:
+                    if not _inverter_profile:
+                        profile, model = _classify_model(raw_dtc, arm_fw)
+                        _inverter_profile = profile
+                        _inverter_model   = model
+                        log.warning(
+                            "Inverter detected on listen socket: "
+                            "slave=0x%02x DTC=0x%04x ARM_fw=%d → %s (%s)",
+                            slave, raw_dtc, arm_fw, model, profile)
+                return
+    except Exception as exc:
+        log.warning("In-socket detection failed: %s", exc)
+
+
 def _run_listen(st: dict):
     """Poke-and-listen loop (Gen2 + Gen3). Sends the static read request to
     trigger the inverter, then decodes the input-register frames it emits.
@@ -793,10 +846,13 @@ def _run_listen(st: dict):
                         if d:
                             latest = d
                             last_frame = now
-                            # Record responding slave as hint for control detection.
-                            # frame[26] is the slave byte in transparent responses.
+                            # First valid frame: record slave and detect model on
+                            # this socket so _detect_inverter() hits cache later
+                            # and never needs to open a second TCP connection.
                             if _inverter_slave == 0 and len(frame) > 26:
                                 _inverter_slave = frame[26]
+                                if not _inverter_profile:
+                                    _detect_on_socket(s, _inverter_slave)
                 # Publish at most once per interval
                 if latest and now - last_proc >= POLL_INTERVAL:
                     _handle_reading(latest, st)
@@ -1104,13 +1160,30 @@ def _detect_inverter() -> tuple:
         # fall back to 0x11 (the official inverter address for all generations).
         slave = _inverter_slave if _inverter_slave else 0x11
 
+        # If the listen loop is active (_inverter_slave known), it will have
+        # already triggered _detect_on_socket() on its own socket. Wait up to
+        # 4 seconds for that to complete before falling back to a new connection.
+        # This avoids two concurrent TCP connections which confuse the dongle.
+        if _inverter_slave:
+            for _ in range(8):
+                if _inverter_profile:
+                    break
+                time.sleep(0.5)
+
+        if _inverter_profile:
+            # In-socket detection already populated cache — use it.
+            return slave, _inverter_profile, _inverter_model
+
+        # Listen loop not yet active or detection timed out — open a fresh
+        # short-lived connection (only safe at startup before listen loop runs).
         try:
-            regs   = _hr_read(slave, 0, 22, timeout=5.0)
+            regs    = _hr_read(slave, 0, 22, timeout=5.0)
             raw_dtc = regs[0]
             arm_fw  = regs[21]
             profile, model = _classify_model(raw_dtc, arm_fw)
             log.warning(
-                "Inverter detected: slave=0x%02x DTC=0x%04x ARM_fw=%d → %s (%s)",
+                "Inverter detected (fresh connection): "
+                "slave=0x%02x DTC=0x%04x ARM_fw=%d → %s (%s)",
                 slave, raw_dtc, arm_fw, model, profile)
         except Exception as exc:
             log.warning("Inverter detection failed: %s", exc)
