@@ -1586,26 +1586,27 @@ function _renderBattModule(idx) {
   </div>`;
 
   // Cell voltage grid
-  const cellGrid = `<div class="bdd-section-lbl">Cell Voltages (mV)</div>
+  const fmtV = mv => mv ? (mv/1000).toFixed(1)+'V' : '—';
+  const cellGrid = `<div class="bdd-section-lbl">Cell Voltages</div>
   <div class="bdd-cells">${cells.map((v,i) => {
     const diff = v - mean;
     const col  = v === 0 ? '#5a7a9e'
                : diff < -60 ? '#f87171'
                : diff < -30 ? '#fb923c'
                : '#4ade80';
-    return `<div class="bdd-cell" title="Cell ${i+1}: ${v} mV">
+    return `<div class="bdd-cell" title="Cell ${i+1}: ${fmtV(v)}">
       <span class="bdd-cell-dot" style="background:${col}"></span>
       <div class="bdd-cell-idx">C${i+1}</div>
-      <div class="bdd-cell-mv">${v||'—'}</div>
+      <div class="bdd-cell-mv">${fmtV(v)}</div>
     </div>`;
   }).join('')}</div>`;
 
-  // Voltage stats
+  // Voltage stats — spread kept in mV (small differences lose meaning at 0.1V resolution)
   const dCol = delta > 80 ? '#f87171' : delta > 40 ? '#fb923c' : '#4ade80';
   const voltRow = valid.length ? `<div class="bdd-volt-row">
-    <div class="bdd-volt-stat"><span>Min</span><b>${minV} mV</b></div>
-    <div class="bdd-volt-stat"><span>Max</span><b>${maxV} mV</b></div>
-    <div class="bdd-volt-stat"><span>Mean</span><b>${Math.round(mean)} mV</b></div>
+    <div class="bdd-volt-stat"><span>Min</span><b>${fmtV(minV)}</b></div>
+    <div class="bdd-volt-stat"><span>Max</span><b>${fmtV(maxV)}</b></div>
+    <div class="bdd-volt-stat"><span>Mean</span><b>${fmtV(Math.round(mean))}</b></div>
     <div class="bdd-volt-stat"><span>Spread</span><b style="color:${dCol}">${delta} mV</b></div>
   </div>` : '';
 
