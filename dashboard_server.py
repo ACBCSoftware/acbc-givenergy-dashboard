@@ -523,6 +523,17 @@ def _crc16(data: bytes) -> bytes:
             crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
     return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
+def _bms_crc16(func: int, base: int, count: int) -> bytes:
+    """CRC16-Modbus, MSB-first, over func+base+count only (no slave byte).
+    This is the Gen2/LV-battery convention — verified against the known Gen2
+    poke CRC (d1d5 for IR(0,60)@0x32)."""
+    crc = 0xFFFF
+    for b in bytes([func]) + base.to_bytes(2, "big") + count.to_bytes(2, "big"):
+        crc ^= b
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+    return bytes([(crc >> 8) & 0xFF, crc & 0xFF])   # MSB-first
+
 def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> bytes:
     """Build a GivEnergy transparent request frame.
     Uses LSB-first CRC over slave+func+base+count (Gen3/AIO convention).
@@ -1616,6 +1627,116 @@ def get_logs():
 @app.route("/api/colours")
 def get_colours():
     return jsonify(CHART_COLORS)
+
+
+# ── Battery BMS detail (on-demand, not polled or stored) ──────────────────────
+
+def _signed10(raw: int):
+    """Decode a raw uint16 BMS temperature register (0.1 °C, signed).
+    Returns None for the empty-slot sentinel (≤ −270 °C)."""
+    val = (raw - 65536) if raw > 32767 else raw
+    t   = val / 10.0
+    return None if t <= -270 else round(t, 1)
+
+def _read_battery_module(s: socket.socket, slave: int) -> "dict | None":
+    """Request IR(60, 60) from one LV battery module and decode the response.
+    Uses the Gen2/LV-battery CRC convention (MSB-first, no slave in CRC).
+    Returns a decoded dict or None if the module does not respond."""
+    base, count = 60, 60
+    crc     = _bms_crc16(0x04, base, count)
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, 0x04]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+
+    s.sendall(frame)
+    buf      = bytearray()
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            chunk = s.recv(4096)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        buf.extend(chunk)
+        for f in _pop_data_frames(buf):
+            if len(f) < 44 or f[7] != 0x02:
+                continue
+            if f[26] != slave or f[27] != 0x04:
+                continue
+            rx_base  = (f[38] << 8) | f[39]
+            rx_count = (f[40] << 8) | f[41]
+            if rx_base != base or rx_count != count:
+                continue
+            if len(f) < 42 + count * 2:
+                continue
+
+            def g(n: int) -> int:
+                o = 42 + n * 2
+                return (f[o] << 8) | f[o + 1]
+
+            num_cells = g(37)                       # IR97
+            if not 1 <= num_cells <= 24:
+                num_cells = 16
+            cells_mv = [g(i) for i in range(num_cells)]
+
+            # Temperatures: IR76-79 = offsets 16-19 (4 group readings)
+            t_groups = [_signed10(g(16 + i)) for i in range(4)]
+            t_groups = [t for t in t_groups if t is not None]
+
+            soc = g(40)                             # IR100
+            return {
+                "slave":       f"0x{slave:02X}",
+                "soc":         soc if 0 <= soc <= 100 else None,
+                "cells_mv":    cells_mv,
+                "t_groups":    t_groups,
+                "t_mosfet":    _signed10(g(21)),    # IR81 BMS PCB temp
+                "t_max":       _signed10(g(43)),    # IR103
+                "t_min":       _signed10(g(44)),    # IR104
+                "cycles":      g(36),               # IR96
+                "num_cells":   num_cells,
+                "bms_fw":      g(38),               # IR98
+                "warning":     g(34),               # IR94 warning bytes (0 = healthy)
+                "status_ok":   g(34) == 0,
+            }
+    return None
+
+@app.route("/api/battery")
+def api_battery():
+    """On-demand BMS read from battery module(s).  Not polled or stored.
+    Opens a fresh socket (the listen loop reconnects within a few seconds).
+    Returns per-module cell voltages, temps, SOC, cycles and health flags."""
+    if _inverter_profile in ("three_phase_aio", "gateway_aio"):
+        return jsonify({
+            "ok": False, "unsupported": True,
+            "error": "Battery cell detail is not available on AIO/gateway inverters.",
+        })
+    num     = max(1, NUM_BATTERIES)
+    modules = []
+    try:
+        s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=10)
+        s.settimeout(5)
+        try:
+            for i in range(num):
+                slave = 0x32 + i
+                m = _read_battery_module(s, slave)
+                if m:
+                    m["module"] = i + 1
+                    modules.append(m)
+                else:
+                    log.warning("BMS: no response from slave 0x%02x (module %d)", slave, i + 1)
+                    break   # further modules are also absent
+        finally:
+            s.close()
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+    if not modules:
+        return jsonify({"ok": False,
+                        "error": "No battery modules responded — check num_batteries in settings."})
+    return jsonify({"ok": True, "modules": modules})
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():

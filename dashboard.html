@@ -361,6 +361,51 @@ html,body{
 }
 .tile{cursor:pointer;transition:opacity .15s}
 .tile:active{opacity:.7}
+/* ── Battery detail modal ───────────────────────── */
+#batt-modal{display:none;position:fixed;inset:0;z-index:200;
+  background:rgba(6,13,28,.88);align-items:center;justify-content:center}
+#batt-modal.open{display:flex}
+#bdd-box{background:var(--bg-top);border:1px solid var(--border);border-radius:18px;
+  width:min(420px,95vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+#bdd-header{display:flex;align-items:center;padding:16px 18px 12px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+#bdd-header-title{flex:1;font-size:.9rem;font-weight:700;color:var(--text)}
+#bdd-close{background:none;border:none;color:var(--muted);font-size:1.2rem;
+  cursor:pointer;padding:0 2px;line-height:1}
+#bdd-tabs{display:flex;gap:6px;padding:10px 16px 0;flex-shrink:0}
+.bdd-tab{background:rgba(255,255,255,.06);border:1px solid var(--border);
+  border-radius:10px;padding:6px 14px;font-size:.78rem;color:var(--muted);cursor:pointer}
+.bdd-tab.active{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
+#bdd-body{overflow-y:auto;padding:14px 16px 18px;flex:1}
+.bdd-status-row{display:flex;align-items:center;gap:14px;margin-bottom:12px;
+  padding:10px 12px;background:rgba(255,255,255,.04);border-radius:10px}
+.bdd-health{font-size:.8rem;font-weight:700}
+.bdd-health.ok  {color:#4ade80}
+.bdd-health.warn{color:#fb923c}
+.bdd-health.fault{color:#f87171}
+.bdd-stat{font-size:.78rem;color:var(--muted)}
+.bdd-stat b{color:var(--text)}
+.bdd-section-lbl{font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.5px;margin:10px 0 6px}
+.bdd-cells{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:10px}
+.bdd-cell{background:rgba(255,255,255,.05);border-radius:7px;padding:6px 4px 5px;
+  text-align:center;border:1px solid transparent;transition:border-color .2s}
+.bdd-cell-dot{width:9px;height:9px;border-radius:50%;margin:0 auto 4px;display:block}
+.bdd-cell-idx{font-size:.58rem;color:var(--muted);opacity:.6;line-height:1}
+.bdd-cell-mv{font-size:.66rem;font-weight:600;color:var(--text);
+  font-variant-numeric:tabular-nums;line-height:1.3}
+.bdd-volt-row{display:flex;gap:8px;justify-content:space-between;
+  padding:8px 12px;background:rgba(255,255,255,.04);border-radius:8px;margin-bottom:10px}
+.bdd-volt-stat{text-align:center;font-size:.75rem}
+.bdd-volt-stat span{display:block;color:var(--muted);font-size:.65rem}
+.bdd-temps{font-size:.76rem;color:var(--muted);line-height:1.8}
+.bdd-temps b{color:var(--text)}
+.bdd-meta{font-size:.65rem;color:var(--muted);opacity:.6;margin-top:10px;text-align:right}
+.bdd-spinner{text-align:center;color:var(--muted);padding:30px;font-size:.85rem}
+/* Make battery bar tappable */
+#bat-section{cursor:pointer}
+#bat-section:active{opacity:.8}
+#bat-tap-hint{font-size:.6rem;color:var(--muted);opacity:.5;text-align:center;margin-top:1px}
 /* ── Control confirmation modal ─────────────────── */
 #ctrl-confirm{display:none;position:fixed;inset:0;z-index:200;
   background:rgba(6,13,28,.88);align-items:center;justify-content:center}
@@ -496,6 +541,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <div id="bat-pct">—%</div>
     </div>
     <div id="bat-detail">Battery · connecting…</div>
+    <div id="bat-tap-hint">tap for cell detail</div>
   </div>
 
   <!-- Daily totals -->
@@ -531,6 +577,18 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button id="pw-submit">Unlock</button>
       </div>
       <div id="pw-error"></div>
+    </div>
+  </div>
+
+  <!-- Battery detail modal -->
+  <div id="batt-modal">
+    <div id="bdd-box">
+      <div id="bdd-header">
+        <span id="bdd-header-title">🔋 Battery Detail</span>
+        <button id="bdd-close">&#10005;</button>
+      </div>
+      <div id="bdd-tabs"></div>
+      <div id="bdd-body"><div class="bdd-spinner">Loading…</div></div>
     </div>
   </div>
 
@@ -1470,6 +1528,111 @@ $('ctrl-btn').addEventListener('click', () => {
 
 $('ctrl-back').addEventListener('click', () => showView('live'));
 $('logs-back').addEventListener('click', () => showView('control'));
+
+// ── Battery detail modal ───────────────────────────────────────────────────────
+let _battModules = [];
+let _battActiveIdx = 0;
+
+function openBattModal() {
+  $('batt-modal').classList.add('open');
+  $('bdd-tabs').innerHTML = '';
+  $('bdd-body').innerHTML = '<div class="bdd-spinner">Reading battery modules…</div>';
+  fetch('/api/battery', {cache:'no-store'})
+    .then(r => r.json())
+    .then(data => {
+      if (!data.ok) {
+        $('bdd-body').innerHTML =
+          `<div class="bdd-spinner" style="color:var(--muted)">${data.error || 'Read failed'}</div>`;
+        return;
+      }
+      _battModules = data.modules || [];
+      _battActiveIdx = 0;
+      _renderBattTabs();
+      _renderBattModule(_battActiveIdx);
+    })
+    .catch(e => {
+      $('bdd-body').innerHTML =
+        `<div class="bdd-spinner" style="color:#f87171">Error: ${e.message}</div>`;
+    });
+}
+
+function _renderBattTabs() {
+  if (_battModules.length <= 1) { $('bdd-tabs').innerHTML = ''; return; }
+  $('bdd-tabs').innerHTML = _battModules.map((m,i) =>
+    `<button class="bdd-tab${i===_battActiveIdx?' active':''}"
+      onclick="_battActiveIdx=${i};_renderBattTabs();_renderBattModule(${i})">
+      Module ${m.module}</button>`
+  ).join('');
+}
+
+function _renderBattModule(idx) {
+  const m = _battModules[idx];
+  if (!m) return;
+  const cells = m.cells_mv || [];
+  const valid = cells.filter(v => v > 0);
+  const mean  = valid.length ? valid.reduce((a,b)=>a+b,0)/valid.length : 0;
+  const minV  = valid.length ? Math.min(...valid) : 0;
+  const maxV  = valid.length ? Math.max(...valid) : 0;
+  const delta = maxV - minV;
+
+  // Health badge
+  const hClass = m.status_ok ? 'ok' : (m.warning & 0xFF00 ? 'fault' : 'warn');
+  const hLabel = m.status_ok ? '● Healthy' : (hClass==='fault' ? '● Fault' : '⚠ Warning');
+  const statusRow = `<div class="bdd-status-row">
+    <span class="bdd-health ${hClass}">${hLabel}</span>
+    <span class="bdd-stat">SOC <b>${m.soc != null ? m.soc+'%' : '—'}</b></span>
+    <span class="bdd-stat">Cycles <b>${m.cycles ?? '—'}</b></span>
+    <span class="bdd-stat">FW <b>${m.bms_fw ?? '—'}</b></span>
+  </div>`;
+
+  // Cell voltage grid
+  const cellGrid = `<div class="bdd-section-lbl">Cell Voltages (mV)</div>
+  <div class="bdd-cells">${cells.map((v,i) => {
+    const diff = v - mean;
+    const col  = v === 0 ? '#5a7a9e'
+               : diff < -60 ? '#f87171'
+               : diff < -30 ? '#fb923c'
+               : '#4ade80';
+    return `<div class="bdd-cell" title="Cell ${i+1}: ${v} mV">
+      <span class="bdd-cell-dot" style="background:${col}"></span>
+      <div class="bdd-cell-idx">C${i+1}</div>
+      <div class="bdd-cell-mv">${v||'—'}</div>
+    </div>`;
+  }).join('')}</div>`;
+
+  // Voltage stats
+  const dCol = delta > 80 ? '#f87171' : delta > 40 ? '#fb923c' : '#4ade80';
+  const voltRow = valid.length ? `<div class="bdd-volt-row">
+    <div class="bdd-volt-stat"><span>Min</span><b>${minV} mV</b></div>
+    <div class="bdd-volt-stat"><span>Max</span><b>${maxV} mV</b></div>
+    <div class="bdd-volt-stat"><span>Mean</span><b>${Math.round(mean)} mV</b></div>
+    <div class="bdd-volt-stat"><span>Spread</span><b style="color:${dCol}">${delta} mV</b></div>
+  </div>` : '';
+
+  // Temperatures
+  let tempHtml = '';
+  if (m.t_groups && m.t_groups.length) {
+    const groupLabels = ['C1–4','C5–8','C9–12','C13–16'];
+    const tPairs = m.t_groups.map((t,i) =>
+      `<b>${t}°C</b>&thinsp;<span style="font-size:.65rem">${groupLabels[i]||''}</span>`
+    ).join(' &nbsp; ');
+    tempHtml = `<div class="bdd-section-lbl">Temperatures</div>
+    <div class="bdd-temps">${tPairs}`;
+    if (m.t_mosfet != null) tempHtml += ` &nbsp; <b>${m.t_mosfet}°C</b>&thinsp;<span style="font-size:.65rem">BMS PCB</span>`;
+    if (m.t_max != null && m.t_min != null)
+      tempHtml += `<br>Range&nbsp;<b>${m.t_min}°C</b> – <b>${m.t_max}°C</b>`;
+    tempHtml += `</div>`;
+  }
+
+  $('bdd-body').innerHTML = statusRow + cellGrid + voltRow + tempHtml +
+    `<div class="bdd-meta">Slave ${m.slave} · ${cells.length} cells · live read</div>`;
+}
+
+$('bdd-close').addEventListener('click', () => $('batt-modal').classList.remove('open'));
+$('batt-modal').addEventListener('click', e => {
+  if (e.target === $('batt-modal')) $('batt-modal').classList.remove('open');
+});
+$('bat-section').addEventListener('click', openBattModal);
 
 // ── Activity log ──────────────────────────────────────────────────────────────
 const LOG_ICON = { command:'⚙️', error:'⚠️', fault:'🔴', status:'🔵', info:'ℹ️' };
