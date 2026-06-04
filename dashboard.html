@@ -1602,8 +1602,10 @@ function _renderBattModule(idx) {
   }).join('')}</div>`;
 
   // Voltage stats — spread kept in mV (small differences lose meaning at 0.1V resolution)
+  const totalV = valid.reduce((a,b) => a+b, 0);
   const dCol = delta > 80 ? '#f87171' : delta > 40 ? '#fb923c' : '#4ade80';
   const voltRow = valid.length ? `<div class="bdd-volt-row">
+    <div class="bdd-volt-stat"><span>Total</span><b>${fmtV(totalV)}</b></div>
     <div class="bdd-volt-stat"><span>Min</span><b>${fmtV(minV)}</b></div>
     <div class="bdd-volt-stat"><span>Max</span><b>${fmtV(maxV)}</b></div>
     <div class="bdd-volt-stat"><span>Mean</span><b>${fmtV(Math.round(mean))}</b></div>
