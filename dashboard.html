@@ -1586,7 +1586,7 @@ function _renderBattModule(idx) {
   </div>`;
 
   // Cell voltage grid
-  const fmtV = mv => mv ? (mv/1000).toFixed(1)+'V' : '—';
+  const fmtV = mv => mv ? (mv/1000).toFixed(3)+'V' : '—';
   const cellGrid = `<div class="bdd-section-lbl">Cell Voltages</div>
   <div class="bdd-cells">${cells.map((v,i) => {
     const diff = v - mean;
