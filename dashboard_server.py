@@ -554,6 +554,8 @@ _POKE_REQUESTS = [
     # ~5 minutes during its cloud sync cycle — we listen passively for those frames.
     # Heartbeats every ~3 min keep the watchdog alive between cloud sync cycles.
 ]
+# Slave byte is at frame offset 26 — build a direct lookup for adaptive poking.
+_POKE_BY_SLAVE: dict[int, bytes] = {poke[26]: poke for poke in _POKE_REQUESTS}
 
 def _pop_data_frames(buf: bytearray):
     """Pull complete GivEnergy frames out of `buf` (each starts 0x59 0x59, total
@@ -766,11 +768,17 @@ def _run_poll(st: dict):
         time.sleep(POLL_INTERVAL)
 
 def _send_pokes(s):
-    """Send the read-request frame for every known slave address so both Gen2
-    (0x32) and Gen3 (0x11) inverters are triggered; each ignores the one not
-    addressed to it."""
-    for poke in _POKE_REQUESTS:
-        s.sendall(poke)
+    """Send IR read-request frame(s) to trigger an inverter response.
+    Adaptive: once the responding slave is known (_inverter_slave set from the
+    first decoded frame), only that slave's poke is sent.  This stops the Gen2
+    dongle receiving unexpected slave-address frames every 10 s, which is one of
+    the triggers for the occasional 75 s broadcast drop.
+    Discovery mode (slave not yet seen): send all frames until one responds."""
+    if _inverter_slave in _POKE_BY_SLAVE:
+        s.sendall(_POKE_BY_SLAVE[_inverter_slave])
+    else:
+        for poke in _POKE_REQUESTS:
+            s.sendall(poke)
 
 def _detect_on_socket(s, slave: int) -> None:
     """Read HR[0]+HR[21] on an already-open listen socket to detect the inverter
