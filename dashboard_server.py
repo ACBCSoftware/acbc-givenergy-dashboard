@@ -1007,9 +1007,14 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
 
 
+_DONGLE_BUSY_CODE  = 0x43  # GivEnergy Modbus exception: dongle handling another request
+_WRITE_MAX_ATTEMPTS = 7    # 1 initial attempt + 6 retries (matches psylsph behaviour)
+
+
 def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
     """Write a single holding register.  Verifies the echo response.
-    Raises on timeout or echo mismatch."""
+    Retries up to 6× on exception code 67 (dongle busy).
+    Raises on timeout, echo mismatch, or exhausted retries."""
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, 0x06]) + reg.to_bytes(2, "big") + value.to_bytes(2, "big")
@@ -1018,35 +1023,50 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
     length  = len(payload) + 2
     frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
-    s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
-    s.settimeout(timeout)
-    try:
-        s.sendall(frame)
-        buf = bytearray()
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                chunk = s.recv(4096)
-            except socket.timeout:
-                break
-            if not chunk:
-                break
-            buf.extend(chunk)
-            for f in _pop_data_frames(buf):
-                if len(f) < 44 or f[7] != 0x02:
-                    continue
-                if f[27] != 0x06:
-                    continue
-                echo_reg = (f[38] << 8) | f[39]
-                echo_val = (f[40] << 8) | f[41]
-                if echo_reg != reg or echo_val != value:
-                    raise ValueError(
-                        f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
-                        f"(expected reg={reg} val={value})")
-                return
-    finally:
-        s.close()
-    raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
+    for attempt in range(_WRITE_MAX_ATTEMPTS):
+        if attempt:
+            log.warning("HR write: dongle busy, retrying in 2s (attempt %d/%d) …",
+                        attempt + 1, _WRITE_MAX_ATTEMPTS)
+            time.sleep(2)
+        s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+        s.settimeout(timeout)
+        try:
+            s.sendall(frame)
+            buf = bytearray()
+            deadline = time.time() + timeout
+            busy = False
+            while time.time() < deadline:
+                try:
+                    chunk = s.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                for f in _pop_data_frames(buf):
+                    if len(f) < 29 or f[7] != 0x02:
+                        continue
+                    # Exception response: inner_func = request func | 0x80
+                    if f[27] == 0x86 and f[28] == _DONGLE_BUSY_CODE:
+                        busy = True
+                        break
+                    if len(f) < 42 or f[27] != 0x06:
+                        continue
+                    echo_reg = (f[38] << 8) | f[39]
+                    echo_val = (f[40] << 8) | f[41]
+                    if echo_reg != reg or echo_val != value:
+                        raise ValueError(
+                            f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
+                            f"(expected reg={reg} val={value})")
+                    return  # success
+                if busy:
+                    break
+        finally:
+            s.close()
+        if not busy:
+            raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
+    raise OSError(f"HR write: dongle still busy after {_WRITE_MAX_ATTEMPTS} attempts "
+                  f"(reg={reg} val={value})")
 
 
 # ── Generation / profile detection ────────────────────────────────────────────
