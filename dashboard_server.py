@@ -318,8 +318,8 @@ _gateway_soc: int = 0
 # If a zero reading hasn't persisted for this many consecutive polls it is
 # treated as a blip and the last known good value is shown instead.
 _DEBOUNCE = {
-    "home_w":    3,   # 3 × poll_interval = 30 s before a zero is believed
-    "solar_w":   3,
+    "home_w":    12,  # 12 × poll_interval = 120 s — home never truly reads 0
+    "solar_w":   3,   #  3 × poll_interval =  30 s — night zeros last for hours so still stored
     "battery_w": 3,
 }
 _zero_streak: dict = {}
@@ -654,8 +654,8 @@ def _handle_reading(data: dict, st: dict):
     """Process one fresh reading (from either mode): log to DB, smooth, publish
     to the cache, log recovery, and track inverter status changes + purging."""
     global _cached, _error
-    _log_snapshot(data)              # raw values to DB
-    data = _smooth(data)             # suppress brief zero-blips for display
+    data = _smooth(data)             # suppress zero-blips before DB write and display
+    _log_snapshot(data)              # smoothed values to DB
     with _lock:
         _cached = data
         _error  = ""
