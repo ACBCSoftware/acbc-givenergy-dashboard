@@ -389,7 +389,7 @@ def _build_from_input_page(g) -> dict:
         "grid_w":              abs(grid_w_raw),
         "grid_importing":      grid_w_raw < 0,
         "grid_exporting":      grid_w_raw > 0,
-        "soc":        g(59),                          # BATTERY_PERCENT
+        "soc":        max(0, min(100, g(59))),            # BATTERY_PERCENT — clamp uint16 to valid %
         "v_battery":  g(50) / 100,                    # V_BATTERY
         "t_battery":  g(56) / 10,                     # TEMP_BATTERY
         "t_heatsink": g(41) / 10,                     # TEMP_INVERTER_HEATSINK
@@ -1903,7 +1903,8 @@ def api_hourly():
         # Hourly averages for SOC + temperatures
         avg_rows = conn.execute("""
             SELECT CAST(strftime('%H', ts,'unixepoch','localtime') AS INTEGER) AS hr,
-                   AVG(soc) AS soc, AVG(t_battery) AS tb, AVG(t_heatsink) AS th
+                   AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END) AS soc,
+                   AVG(t_battery) AS tb, AVG(t_heatsink) AS th
             FROM snapshots
             WHERE date(ts,'unixepoch','localtime') = ?
             GROUP BY hr
