@@ -42,6 +42,17 @@ poll_interval_mins = 30
 enabled   = yes
 keep_days = 7
 
+[colours]
+; Chart bar and line colours (hex, e.g. #f59e0b). Defaults shown.
+; Change via the Settings screen in the dashboard — no need to edit this file.
+solar    = #f59e0b
+home     = #38bdf8
+grid_in  = #f87171
+grid_out = #4ade80
+bat_chg  = #818cf8
+bat_dis  = #c084fc
+soc      = #fbbf24
+
 [admin]
 ; SHA-256 hash of the settings-page password.
 ; Default password is:  password

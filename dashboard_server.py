@@ -88,6 +88,24 @@ CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
+_COLOUR_DEFAULTS: dict[str, str] = {
+    "solar":    "#f59e0b",
+    "home":     "#38bdf8",
+    "grid_in":  "#f87171",
+    "grid_out": "#4ade80",
+    "bat_chg":  "#818cf8",
+    "bat_dis":  "#c084fc",
+    "soc":      "#fbbf24",
+}
+CHART_COLORS: dict[str, str] = {
+    k: _cfg.get("colours", k, fallback=v)
+    for k, v in _COLOUR_DEFAULTS.items()
+}
+
+def _valid_hex(v: str) -> bool:
+    return (isinstance(v, str) and len(v) == 7 and v[0] == "#"
+            and all(c in "0123456789abcdefABCDEF" for c in v[1:]))
+
 def _authorised():
     """Check X-Admin-Password header against stored hash."""
     pw = request.headers.get("X-Admin-Password", "")
@@ -1587,6 +1605,10 @@ def get_logs():
     out.sort(key=lambda x: x["ts"], reverse=True)
     return jsonify(out[:limit])
 
+@app.route("/api/colours")
+def get_colours():
+    return jsonify(CHART_COLORS)
+
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
     if not _authorised():
@@ -1610,6 +1632,7 @@ def get_settings():
         "last_backup":         _last_backup_info()[1] or "none yet",
         "check_for_updates":   CHECK_UPDATES,
         "app_version":         APP_VERSION,
+        "chart_colors":        CHART_COLORS,
         # API key is intentionally never returned to the browser
     })
 
@@ -1619,7 +1642,7 @@ def save_settings():
     global DATA_RETENTION_DAYS, MET_API_KEY, MET_GEOHASH, _last_weather_ts
     global ADMIN_HASH, WEATHER_POLL_MINS
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
-    global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES
+    global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -1665,6 +1688,14 @@ def save_settings():
         MET_API_KEY = new_key;  cfg.set("weather", "met_api_key", MET_API_KEY); _last_weather_ts = 0
     if "weather_geohash" in data:
         MET_GEOHASH = data["weather_geohash"].strip(); cfg.set("weather", "geohash", MET_GEOHASH); _last_weather_ts = 0
+
+    if isinstance(data.get("chart_colors"), dict):
+        if not cfg.has_section("colours"): cfg.add_section("colours")
+        for k, default_v in _COLOUR_DEFAULTS.items():
+            v = str(data["chart_colors"].get(k, "")).strip()
+            if _valid_hex(v):
+                CHART_COLORS[k] = v
+                cfg.set("colours", k, v)
 
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:

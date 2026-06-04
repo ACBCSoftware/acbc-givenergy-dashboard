@@ -361,6 +361,24 @@ html,body{
 }
 .tile{cursor:pointer;transition:opacity .15s}
 .tile:active{opacity:.7}
+/* ── Control confirmation modal ─────────────────── */
+#ctrl-confirm{display:none;position:fixed;inset:0;z-index:200;
+  background:rgba(6,13,28,.88);align-items:center;justify-content:center}
+#ctrl-confirm.open{display:flex}
+#cc-box{background:var(--bg-top);border:1px solid var(--border);
+  border-radius:18px;padding:26px 22px;width:min(300px,88vw);
+  display:flex;flex-direction:column;gap:14px}
+#cc-title{font-size:.88rem;font-weight:700;color:var(--text);text-align:center}
+#cc-desc{font-size:.82rem;color:var(--muted);text-align:center;line-height:1.5}
+#cc-btn-row{display:flex;gap:10px;margin-top:2px}
+.cc-btn{flex:1;border-radius:12px;border:1px solid;padding:12px;
+  font-size:.85rem;font-weight:600;cursor:pointer;transition:all .15s}
+#cc-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
+#cc-confirm{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
+#cc-confirm:active{background:rgba(245,158,11,.4)}
+/* Chart colour pickers */
+input[type="color"].color-swatch{width:44px!important;height:34px!important;
+  padding:2px 4px!important;border-radius:8px!important;cursor:pointer!important}
 </style>
 </head>
 <body>
@@ -516,6 +534,18 @@ html,body{
     </div>
   </div>
 
+  <!-- Control confirmation modal -->
+  <div id="ctrl-confirm">
+    <div id="cc-box">
+      <div id="cc-title">Confirm change</div>
+      <div id="cc-desc"></div>
+      <div id="cc-btn-row">
+        <button class="cc-btn" id="cc-cancel">Cancel</button>
+        <button class="cc-btn" id="cc-confirm">Confirm</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Settings panel -->
   <div id="settings-panel">
     <div id="sett-top-row">
@@ -589,6 +619,17 @@ html,body{
         <div class="sett-row"><label>New password</label><input id="s-newpw" type="password" placeholder="New password"></div>
         <div class="sett-row"><label>Confirm</label><input id="s-confirmpw" type="password" placeholder="Confirm password"></div>
       </div>
+      <div class="sett-section">
+        <div class="sett-heading">Chart Colours</div>
+        <div class="sett-hint">Colours used for history and hourly chart bars, and the SOC line.</div>
+        <div class="sett-row"><label>Solar bars</label><input id="s-col-solar"    type="color" class="color-swatch" value="#f59e0b"></div>
+        <div class="sett-row"><label>Home bars</label><input id="s-col-home"     type="color" class="color-swatch" value="#38bdf8"></div>
+        <div class="sett-row"><label>Grid In bars</label><input id="s-col-grid_in"  type="color" class="color-swatch" value="#f87171"></div>
+        <div class="sett-row"><label>Grid Out bars</label><input id="s-col-grid_out" type="color" class="color-swatch" value="#4ade80"></div>
+        <div class="sett-row"><label>Bat Chg bars</label><input id="s-col-bat_chg"  type="color" class="color-swatch" value="#818cf8"></div>
+        <div class="sett-row"><label>Bat Dis bars</label><input id="s-col-bat_dis"  type="color" class="color-swatch" value="#c084fc"></div>
+        <div class="sett-row"><label>SOC % line</label><input id="s-col-soc"     type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
       <button id="sett-save">Save Settings</button>
       <div id="sett-msg"></div>
     </div>
@@ -614,19 +655,19 @@ html,body{
       <div class="ctrl-section">
         <div class="ctrl-heading">Operating Mode</div>
         <div class="ctrl-actions">
-          <button class="ctrl-btn" id="btn-mode-dynamic" onclick="ctrlCmd('set_mode_dynamic')">
+          <button class="ctrl-btn" id="btn-mode-dynamic" onclick="ctrlConfirmCmd('Set Dynamic (Eco) mode','set_mode_dynamic')">
             &#9728; Dynamic (Eco)
           </button>
-          <button class="ctrl-btn" id="btn-mode-storage" onclick="ctrlCmd('set_mode_storage')">
+          <button class="ctrl-btn" id="btn-mode-storage" onclick="ctrlConfirmCmd('Set Storage mode','set_mode_storage')">
             &#128190; Storage
           </button>
         </div>
         <div class="ctrl-heading" style="margin-top:4px">Export behaviour</div>
         <div class="ctrl-actions">
-          <button class="ctrl-btn" id="btn-mode-demand" onclick="ctrlCmd('set_discharge_mode',{value:1})">
+          <button class="ctrl-btn" id="btn-mode-demand" onclick="ctrlConfirmCmd('Set Demand Only mode','set_discharge_mode',{value:1})">
             &#127968; Demand only
           </button>
-          <button class="ctrl-btn" id="btn-mode-export" onclick="ctrlCmd('set_discharge_mode',{value:0})">
+          <button class="ctrl-btn" id="btn-mode-export" onclick="ctrlConfirmCmd('Set Export Excess mode','set_discharge_mode',{value:0})">
             &#9650; Export excess
           </button>
         </div>
@@ -640,8 +681,8 @@ html,body{
       <div class="ctrl-section">
         <div class="ctrl-heading">Charging</div>
         <div class="ctrl-actions">
-          <button class="ctrl-btn green" onclick="ctrlCmd('enable_charge')">&#9650; Enable Charge</button>
-          <button class="ctrl-btn red"   onclick="ctrlCmd('disable_charge')">&#9660; Disable Charge</button>
+          <button class="ctrl-btn green" onclick="ctrlConfirmCmd('Enable Charge','enable_charge')">&#9650; Enable Charge</button>
+          <button class="ctrl-btn red"   onclick="ctrlConfirmCmd('Disable Charge','disable_charge')">&#9660; Disable Charge</button>
         </div>
         <div class="ctrl-row">
           <span class="ctrl-label">Status</span>
@@ -654,7 +695,7 @@ html,body{
         <div class="ctrl-slider-wrap">
           <input type="range" class="ctrl-slider" id="sl-charge-target" min="4" max="100" value="50"
             oninput="$('cv-charge-target').textContent=this.value+'%'">
-          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlApply('set_charge_target_soc','sl-charge-target')">Set</button>
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmApply('Set charge target SOC','set_charge_target_soc','sl-charge-target')">Set</button>
         </div>
         <div class="ctrl-row">
           <span class="ctrl-label">Charge power limit</span>
@@ -663,19 +704,19 @@ html,body{
         <div class="ctrl-slider-wrap">
           <input type="range" class="ctrl-slider" id="sl-charge-limit" min="0" max="50" value="32"
             oninput="ctrlLimitLabel('charge')">
-          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('charge')">Set</button>
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set charge power limit','charge')">Set</button>
         </div>
         <div class="ctrl-heading" style="margin-top:4px">Charge Slots</div>
         <div id="charge-slots-container"></div>
-        <button class="ctrl-btn amber" onclick="ctrlSaveSlots('charge')" style="margin-top:4px">Save Charge Slots</button>
+        <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all charge slots','charge')" style="margin-top:4px">Save Charge Slots</button>
       </div>
 
       <!-- Discharge -->
       <div class="ctrl-section">
         <div class="ctrl-heading">Discharging</div>
         <div class="ctrl-actions">
-          <button class="ctrl-btn green" onclick="ctrlCmd('enable_discharge')">&#9650; Enable Discharge</button>
-          <button class="ctrl-btn red"   onclick="ctrlCmd('disable_discharge')">&#9660; Disable Discharge</button>
+          <button class="ctrl-btn green" onclick="ctrlConfirmCmd('Enable Discharge','enable_discharge')">&#9650; Enable Discharge</button>
+          <button class="ctrl-btn red"   onclick="ctrlConfirmCmd('Disable Discharge','disable_discharge')">&#9660; Disable Discharge</button>
         </div>
         <div class="ctrl-row">
           <span class="ctrl-label">Status</span>
@@ -688,7 +729,7 @@ html,body{
         <div class="ctrl-slider-wrap">
           <input type="range" class="ctrl-slider" id="sl-soc-reserve" min="4" max="100" value="15"
             oninput="$('cv-soc-reserve').textContent=this.value+'%'">
-          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlApply('set_soc_reserve','sl-soc-reserve')">Set</button>
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmApply('Set SOC reserve','set_soc_reserve','sl-soc-reserve')">Set</button>
         </div>
         <div class="ctrl-row">
           <span class="ctrl-label">Discharge power limit</span>
@@ -697,11 +738,11 @@ html,body{
         <div class="ctrl-slider-wrap">
           <input type="range" class="ctrl-slider" id="sl-discharge-limit" min="0" max="50" value="32"
             oninput="ctrlLimitLabel('discharge')">
-          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlSetLimit('discharge')">Set</button>
+          <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set discharge power limit','discharge')">Set</button>
         </div>
         <div class="ctrl-heading" style="margin-top:4px">Discharge Slots</div>
         <div id="discharge-slots-container"></div>
-        <button class="ctrl-btn amber" onclick="ctrlSaveSlots('discharge')" style="margin-top:4px">Save Discharge Slots</button>
+        <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all discharge slots','discharge')" style="margin-top:4px">Save Discharge Slots</button>
       </div>
 
       <div id="ctrl-msg"></div>
@@ -1360,7 +1401,7 @@ function _renderSlots(type, slots, profile) {
             style="flex:1">
           <span id="${pfx}${n}-soc-val" style="font-size:.8rem;min-width:36px">${slot.target_soc}%</span>
           <button class="ctrl-btn amber ctrl-btn-sm"
-            onclick="ctrlCmd('set_charge_slot_soc',{slot:${n},value:parseInt($('${pfx}${n}-soc').value)})">Set</button>
+            onclick="ctrlConfirmCmd('Set Slot ${n} SOC target','set_charge_slot_soc',{slot:${n},value:parseInt($('${pfx}${n}-soc').value)})">Set</button>
         </div>
       </div>`;
     }
@@ -1380,6 +1421,41 @@ async function ctrlSaveSlots(type) {
     }
   }
 }
+
+// ── Control confirmation modal ────────────────────────────────────────────────
+let _confirmFn = null;
+
+function _showConfirm(label, fn) {
+  _confirmFn = fn;
+  $('cc-desc').textContent = label;
+  $('ctrl-confirm').classList.add('open');
+}
+function ctrlConfirmCmd(label, cmd, params) {
+  _showConfirm(label, () => ctrlCmd(cmd, params || {}));
+}
+function ctrlConfirmApply(label, cmd, sliderId) {
+  _showConfirm(label, () => ctrlApply(cmd, sliderId));
+}
+function ctrlConfirmLimit(label, type) {
+  _showConfirm(label, () => ctrlSetLimit(type));
+}
+function ctrlConfirmSlots(label, type) {
+  _showConfirm(label, () => ctrlSaveSlots(type));
+}
+$('cc-confirm').addEventListener('click', () => {
+  $('ctrl-confirm').classList.remove('open');
+  if (_confirmFn) { const f = _confirmFn; _confirmFn = null; f(); }
+});
+$('cc-cancel').addEventListener('click', () => {
+  $('ctrl-confirm').classList.remove('open');
+  _confirmFn = null;
+});
+$('ctrl-confirm').addEventListener('click', e => {
+  if (e.target === $('ctrl-confirm')) {
+    $('ctrl-confirm').classList.remove('open');
+    _confirmFn = null;
+  }
+});
 
 // Reuse same password modal — ctrl-btn triggers it with 'control' destination
 let _ctrlDest = 'settings';
@@ -1544,6 +1620,13 @@ async function loadSettings() {
       ? 'Key is set — paste new key to change' : 'Paste API key';
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
+    if (s.chart_colors) {
+      ['solar','home','grid_in','grid_out','bat_chg','bat_dis','soc'].forEach(k => {
+        const el = $('s-col-'+k);
+        if (el && s.chart_colors[k]) el.value = s.chart_colors[k];
+      });
+      applyChartColors(s.chart_colors);
+    }
   } catch(e) {}
 }
 
@@ -1572,6 +1655,15 @@ $('sett-save').addEventListener('click', async () => {
     weather_api_key:     $('s-wxkey').value.trim(),
     weather_poll_mins:   parseInt($('s-wxpoll').value) || 30,
     new_password:        newPw,
+    chart_colors: {
+      solar:   $('s-col-solar').value,
+      home:    $('s-col-home').value,
+      grid_in: $('s-col-grid_in').value,
+      grid_out:$('s-col-grid_out').value,
+      bat_chg: $('s-col-bat_chg').value,
+      bat_dis: $('s-col-bat_dis').value,
+      soc:     $('s-col-soc').value,
+    },
   };
   try {
     const r   = await fetch('/api/settings', {method:'POST', headers:_settHeaders(), body:JSON.stringify(body)});
@@ -1580,6 +1672,7 @@ $('sett-save').addEventListener('click', async () => {
     if (res.ok) {
       if (newPw) _adminPw = newPw;   // keep session in sync with new password
       _weatherConfigured = res.weather_configured;
+      applyChartColors(body.chart_colors);
       $('sett-msg').style.color = '#4ade80';
       $('sett-msg').textContent = '✓ Saved';
       $('s-wxkey').value = ''; $('s-newpw').value = ''; $('s-confirmpw').value = '';
@@ -1596,6 +1689,11 @@ $('sett-save').addEventListener('click', async () => {
 });
 
 async function initApp() {
+  // Fetch chart colours before any chart draws (no auth needed)
+  try {
+    const cr = await fetch('/api/colours', { cache:'no-store' });
+    if (cr.ok) applyChartColors(await cr.json());
+  } catch(e) {}
   // Probe weather without needing auth — if it responds OK weather is configured
   try {
     const r = await fetch('/api/weather', { cache:'no-store' });
@@ -1635,6 +1733,22 @@ poll();
 initApp();
 
 // ── History ───────────────────────────────────────────────────────────────────
+let SOC_LINE_COLOR = '#fbbf24';  // hourly chart SOC line — overridden by /api/colours
+
+function applyChartColors(c) {
+  const keyMap = { solar_kwh:'solar', home_kwh:'home', grid_in_kwh:'grid_in',
+                   grid_out_kwh:'grid_out', bat_chg_kwh:'bat_chg', bat_dis_kwh:'bat_dis' };
+  SERIES_DEF.forEach(sd => { const k = keyMap[sd.key]; if (k && c[k]) sd.color = c[k]; });
+  if (c.soc) SOC_LINE_COLOR = c.soc;
+  // Sync the sdot colour swatches in history + hourly series buttons
+  SERIES_DEF.forEach(sd => {
+    document.querySelectorAll(`[data-s="${sd.key}"] .sdot, [data-hs="${sd.key}"] .sdot`)
+      .forEach(el => { el.style.background = sd.color; });
+  });
+  const socSdot = document.querySelector('#hourly-soc-btn .sdot');
+  if (socSdot) socSdot.style.background = SOC_LINE_COLOR;
+}
+
 const SERIES_DEF = [
   { key:'solar_kwh',    label:'Solar',    color:'#f59e0b' },
   { key:'home_kwh',     label:'Home',     color:'#38bdf8' },
@@ -2086,11 +2200,11 @@ function drawHourlyChart() {
       pts.push({ x: LPAD + gi*gW + gW/2, y: PT + cH - (h.soc/100)*cH, soc: h.soc, gi });
     });
     if (pts.length > 1) {
-      c.strokeStyle = '#fbbf24'; c.lineWidth = 2; c.setLineDash([]);
+      c.strokeStyle = SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
       c.beginPath();
       pts.forEach((p,i) => i===0 ? c.moveTo(p.x,p.y) : c.lineTo(p.x,p.y));
       c.stroke();
-      c.fillStyle = '#fbbf24';
+      c.fillStyle = SOC_LINE_COLOR;
       pts.forEach(p => { c.beginPath(); c.arc(p.x,p.y,2.4,0,Math.PI*2); c.fill(); });
       // Inline % labels every 3 hours so the SOC is readable without an axis
       c.font = 'bold '+fs+'px sans-serif'; c.textAlign='center'; c.textBaseline='bottom';
@@ -2099,7 +2213,7 @@ function drawHourlyChart() {
           c.fillStyle='rgba(8,14,28,0.7)';
           const t = p.soc+'%'; const w = c.measureText(t).width+4;
           c.fillRect(p.x-w/2, p.y-fs-6, w, fs+3);
-          c.fillStyle='#fbbf24';
+          c.fillStyle=SOC_LINE_COLOR;
           c.fillText(t, p.x, p.y-4);
         }
       });
