@@ -1840,7 +1840,8 @@ def _validate_rule(data: dict) -> dict:
     start = _snap_hhmm(data.get("start", ""))
     end   = _snap_hhmm(data.get("end", ""))
     if start == end:
-        raise ValueError("Start and end must differ (use 00:00–00:00 spanning is not allowed)")
+        raise ValueError("The schedule runs in 30-minute blocks — the end must be at "
+                         "least one block after the start (e.g. 12:30–13:00).")
     days_mask = int(data.get("days_mask", 127))
     if not 1 <= days_mask <= 127:
         raise ValueError("days_mask must select at least one day (1–127)")

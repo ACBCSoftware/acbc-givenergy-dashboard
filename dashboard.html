@@ -932,9 +932,10 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         </select>
       </div>
       <div class="se-times">
-        <div class="se-field"><label>From</label><input type="time" id="se-start" step="1800" value="00:30"></div>
-        <div class="se-field"><label>To</label><input type="time" id="se-end" step="1800" value="04:30"></div>
+        <div class="se-field"><label>From</label><select id="se-start"></select></div>
+        <div class="se-field"><label>To</label><select id="se-end"></select></div>
       </div>
+      <div class="sched-hint" style="margin-top:-4px">Times run in 30-minute blocks. The end must be at least one block after the start.</div>
       <div class="se-field">
         <label>Days</label>
         <div class="se-days" id="se-days"></div>
@@ -1894,14 +1895,24 @@ function seActionChanged() {
   $('se-soc-field').style.display = $('se-action').value === 'charge' ? '' : 'none';
 }
 
+// Build the 48 half-hour options (00:00 … 23:30) into a <select>, selecting `val`.
+function _fillTimeSelect(el, val) {
+  let html = '';
+  for (let m = 0; m < 1440; m += 30) {
+    const t = `${String(Math.floor(m/60)).padStart(2,'0')}:${m%60 ? '30' : '00'}`;
+    html += `<option value="${t}"${t === val ? ' selected' : ''}>${t}</option>`;
+  }
+  el.innerHTML = html;
+}
+
 function openEditor(id) {
   _editingId = id ?? null;
   const rl = _editingId != null ? _schedRules.find(r => r.id === _editingId) : null;
   $('se-title').textContent      = rl ? 'Edit rule' : 'Add rule';
   $('se-delete').style.display   = rl ? '' : 'none';
   $('se-action').value           = rl ? rl.action : 'charge';
-  $('se-start').value            = rl ? rl.start  : '00:30';
-  $('se-end').value              = rl ? rl.end    : '04:30';
+  _fillTimeSelect($('se-start'), rl ? rl.start : '00:30');
+  _fillTimeSelect($('se-end'),   rl ? rl.end   : '04:30');
   const soc = (rl && rl.target_soc != null) ? rl.target_soc : 100;
   $('se-soc').value              = soc;
   $('se-soc-val').textContent    = soc + '%';
