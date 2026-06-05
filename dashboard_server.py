@@ -582,15 +582,22 @@ def _make_poke(slave: int, func: int = 0x04, base: int = 0, count: int = 60) -> 
 _POKE_REQUESTS = [
     bytes.fromhex("59590001001c010241423132333447353637000000000000000832040000003cd1d5"),
     bytes.fromhex("59590001001c010241423132333447353637000000000000000811040000003cf28b"),
-    # Gateway AIO (DTC 0x70xx) does NOT receive active pokes for base=1600/1780.
-    # Actively requesting those pages returns different/wrong data vs the unsolicited
-    # cloud-sync broadcast (confirmed from David's AIO wire testing).
-    # The gateway pushes base=1600 (live power) and base=1780 (SOC) unsolicited every
-    # ~5 minutes during its cloud sync cycle — we listen passively for those frames.
-    # Heartbeats every ~3 min keep the watchdog alive between cloud sync cycles.
 ]
 # Slave byte is at frame offset 26 — build a direct lookup for adaptive poking.
 _POKE_BY_SLAVE: dict[int, bytes] = {poke[26]: poke for poke in _POKE_REQUESTS}
+
+# Gateway AIO (DTC 0x70xx) active pokes (slave 0x11, Gen3/AIO LSB-first CRC).
+# David's --aio wire capture (05 Jun 2026) proved that actively polling IR(1600,60)
+# every 10s and IR(1780,60) every ~60s returns FRESH data on every poke (battery
+# charge taper + solar decline tracked in real time) — overturning the earlier
+# "active polling returns stale data" assumption. So the gateway is now polled like
+# any other inverter, gated on the detected gateway_aio profile in _send_pokes().
+#   base 1600 → live power page (decoded by _build_from_gateway_page)
+#   base 1780 → per-unit SOC (IR1801, cached in _gateway_soc)
+_GATEWAY_POKE_1600 = _make_poke(0x11, 0x04, 1600, 60)
+_GATEWAY_POKE_1780 = _make_poke(0x11, 0x04, 1780, 60)
+_GATEWAY_SOC_POKE_SECS = 55          # how often to poke base=1780 for SOC
+_last_soc_poke = 0.0
 
 def _pop_data_frames(buf: bytearray):
     """Pull complete GivEnergy frames out of `buf` (each starts 0x59 0x59, total
@@ -808,7 +815,18 @@ def _send_pokes(s):
     first decoded frame), only that slave's poke is sent.  This stops the Gen2
     dongle receiving unexpected slave-address frames every 10 s, which is one of
     the triggers for the occasional 75 s broadcast drop.
-    Discovery mode (slave not yet seen): send all frames until one responds."""
+    Discovery mode (slave not yet seen): send all frames until one responds.
+    Gateway AIO (once detected): poke its base=1600 live page every interval and
+    base=1780 SOC every ~60s, instead of the base=0 page (which it answers with
+    all-zeros)."""
+    global _last_soc_poke
+    if _inverter_profile == "gateway_aio":
+        s.sendall(_GATEWAY_POKE_1600)
+        now = time.time()
+        if now - _last_soc_poke >= _GATEWAY_SOC_POKE_SECS:
+            s.sendall(_GATEWAY_POKE_1780)
+            _last_soc_poke = now
+        return
     if _inverter_slave in _POKE_BY_SLAVE:
         s.sendall(_POKE_BY_SLAVE[_inverter_slave])
     else:
@@ -904,16 +922,24 @@ def _run_listen(st: dict):
                                 st["hb_seen"] = True
                             continue
                         d = _decode_listen_frame(frame)
+                        # Record the responding slave and detect the model from the
+                        # first input-register response, on this socket (so later
+                        # _detect_inverter() hits cache and never opens a 2nd TCP conn).
+                        # Triggered on ANY IR response — including a gateway's all-zero
+                        # base=0 page — so gateway_aio is detected promptly and its
+                        # base=1600 pokes can start, rather than waiting ~5 min for the
+                        # first unsolicited cloud-sync frame. Guarded to real inverter
+                        # slaves (0x11 inverter, 0x32 Gen2) so a stray meter/BMS frame
+                        # in a cloud-sync burst can't mis-set the slave.
+                        if (_inverter_slave == 0 and frame[7] == 0x02
+                                and len(frame) > 27 and frame[27] == 0x04
+                                and frame[26] in (0x11, 0x32)):
+                            _inverter_slave = frame[26]
+                            if not _inverter_profile:
+                                _detect_on_socket(s, _inverter_slave)
                         if d:
                             latest = d
                             last_frame = now
-                            # First valid frame: record slave and detect model on
-                            # this socket so _detect_inverter() hits cache later
-                            # and never needs to open a second TCP connection.
-                            if _inverter_slave == 0 and len(frame) > 26:
-                                _inverter_slave = frame[26]
-                                if not _inverter_profile:
-                                    _detect_on_socket(s, _inverter_slave)
                 # Publish at most once per interval
                 if latest and now - last_proc >= POLL_INTERVAL:
                     _handle_reading(latest, st)

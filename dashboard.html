@@ -115,6 +115,10 @@ html,body{
 /* Scheduler status: green when active, red when off (set from /api/data) */
 #sched-btn.sched-on{  color:#4ade80; opacity:.95 }
 #sched-btn.sched-off{ color:#f87171; opacity:.7 }
+/* v1.8: scheduler hidden from users pending UAT. The icon is the only entry
+   point, so hiding it disables access while leaving all scheduler code, screens,
+   API and engine intact. To re-enable: delete this one rule. */
+#sched-btn{ display:none !important }
 
 /* ── Control panel ────────────────────────────── */
 #ctrl-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
