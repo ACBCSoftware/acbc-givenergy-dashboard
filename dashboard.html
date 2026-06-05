@@ -1717,7 +1717,7 @@ function _renderBattModule(idx) {
   const hLabel = m.status_ok ? '● Healthy' : (hClass==='fault' ? '● Fault' : '⚠ Warning');
   const statusRow = `<div class="bdd-status-row">
     <span class="bdd-health ${hClass}">${hLabel}</span>
-    <span class="bdd-stat">SOC <b>${m.soc != null ? m.soc+'%' : '—'}</b></span>
+    <span class="bdd-stat">SOC <b>${liveData && liveData.soc != null ? liveData.soc+'%' : (m.soc != null ? m.soc+'%' : '—')}</b></span>
     <span class="bdd-stat">Cycles <b>${m.cycles ?? '—'}</b></span>
     <span class="bdd-stat">FW <b>${m.bms_fw ?? '—'}</b></span>
   </div>`;
