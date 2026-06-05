@@ -15,6 +15,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 .pytest_cache/
+*.spec          # PyInstaller spec files (e.g. gen3-capture.spec)
 
 # ─── Installer / packaging output ─────────────────────────────────────
 Output/
