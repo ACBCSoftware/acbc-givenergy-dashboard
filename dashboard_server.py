@@ -912,12 +912,6 @@ def _run_listen(st: dict):
                 # dongle then never has two sockets at once → no contention, no drops,
                 # and the dongle reliably echoes the writes (it won't on the broadcast
                 # socket). Infrequent (only on a block change), recovers in one cycle.
-                # Apply any queued scheduler writes, with the listen socket left OPEN
-                # (the 0x32 broadcast slave only answers while listen is live). Runs in
-                # this thread so writes are serialised with the recv loop. Gated on
-                # detection so the cached profile/slave are ready (no probe needed).
-                if _sched_pending_waiting() and _inverter_profile in _SCHED_SLOT:
-                    _sched_apply_now()
                 # Read whatever has arrived
                 try:
                     chunk = s.recv(8192)
@@ -1640,12 +1634,12 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 
 # ── Scheduler engine (app-held 48 half-hour block reconciler) ─────────────────
 # Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state /
-# _sched_compute_writes) is pure and unit-tested. The scheduler thread only DECIDES
-# what should be true and queues it; the listen loop applies it (_sched_apply_now)
-# using the SAME path the manual controls use — _hr_write to the detected slave with
-# the listen socket left OPEN — but FAIL-FAST on 'dongle busy' (attempts=1). The old
-# 75s drops came from sustained busy-retry hammering, not from writing itself; failing
-# fast + retrying on the next 15s cycle avoids it. Writes happen only while master is on.
+# _sched_compute_writes) is pure and unit-tested. The scheduler thread evaluates the
+# block every 15s and applies changes itself (_sched_apply) using the SAME pattern the
+# manual controls use — _hr_write to the detected slave (0x32 on Gen2) from the scheduler
+# thread while the listen loop keeps receiving concurrently. Writes are PACED and
+# FAIL-FAST on 'dongle busy' (attempts=1): the old 75s drops came from sustained busy-
+# retry hammering, not the writing. Failures retry on the next 15s cycle. Master on only.
 
 # Action precedence when several rules cover the same block.
 _SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
@@ -1744,51 +1738,44 @@ def _sched_compute_writes(desired: dict):
     return slave, w, summary
 
 
-def _sched_pending_waiting() -> bool:
-    """Cheap check used by the listen loop: is a scheduler apply queued?"""
-    return _sched_pending is not None
+_SCHED_WRITE_GAP   = 1.0     # seconds between writes — the Gen2 dongle needs a moment
+                            # to finish one write before accepting the next (back-to-back
+                            # writes collide → 'busy' on the 2nd).
+_sched_applied_sig = None
+_sched_was_enabled = False
+_CLEANUP_DESIRED   = {"mode": "cleanup"}
+_CLEANUP_SIG       = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
-def _sched_apply_now() -> None:
-    """Apply the queued desired state using the SAME path the manual controls use and
-    which is confirmed working on the Gen2: `_hr_write` to the detected slave with the
-    listen loop left OPEN. Called from the listen loop so the writes are serialised with
-    the listen recv (no concurrent dongle access). Each write FAILS FAST on busy
-    (attempts=1) — no 14s retry hammering, which is what used to disrupt the stream.
-    On any failure it leaves _sched_applied_sig unchanged, so the scheduler thread
-    re-queues and we retry the whole apply on a later cycle (writes are idempotent
-    absolute sets, so a partial apply self-heals)."""
-    global _sched_applied_sig, _sched_pending
-    with _sched_pending_lock:
-        desired = _sched_pending
-        _sched_pending = None
-    if desired is None:
-        return
+def _sched_apply(desired: dict) -> None:
+    """Apply a desired state the SAME way a manual control button does — the pattern
+    confirmed to work on the Gen2: _hr_write to the detected slave (0x32) from THIS
+    (scheduler) thread, while the listen loop keeps receiving CONCURRENTLY in its own
+    thread. That matters: the 0x32 broadcast slave only services writes while its listen
+    stream is actively being read, so the write must not block the listen recv (which is
+    why doing it inside the listen loop failed). Writes are PACED (_SCHED_WRITE_GAP apart)
+    and FAIL FAST on busy (attempts=1) — the sustained busy-retry hammering is what used
+    to cause 75s drops. On any failure _sched_applied_sig is left unchanged so the 15s
+    loop re-applies (writes are idempotent absolute sets, so a partial apply self-heals)."""
+    global _sched_applied_sig
     try:
         slave, writes, summary = _sched_compute_writes(desired)
-        for reg, val in writes:
-            _hr_write(slave, reg, val, attempts=1)    # fail fast — no busy-retry hammering
+        for i, (reg, val) in enumerate(writes):
+            if i:
+                time.sleep(_SCHED_WRITE_GAP)
+            _hr_write(slave, reg, val, attempts=1)
     except Exception as exc:
         log.warning("Scheduler apply failed (will retry): %s", exc)
-        return                                        # applied_sig unchanged → re-queued
+        return                                        # applied_sig unchanged → retried
     _sched_applied_sig = json.dumps(desired, sort_keys=True)
     _log_control("scheduler", desired, True, "Scheduler: " + summary)
     log.warning("Scheduler applied: %s", summary)
 
-# Hand-off between the scheduler thread (decides what should be true) and the listen
-# loop (owns the socket, performs the writes). Single-slot: latest desired wins.
-_sched_pending       = None
-_sched_pending_lock  = threading.Lock()
-_sched_applied_sig   = None
-_sched_was_enabled   = False
-_CLEANUP_DESIRED     = {"mode": "cleanup"}
-_CLEANUP_SIG         = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
-
 def _scheduler_loop():
-    """Evaluate the active block every 15s and queue the desired state for the listen
-    loop to apply (see _sched_apply_now). Queues on signature change and on startup,
-    so a reboot self-corrects within one block. Master-off triggers a one-shot cleanup,
-    then hands the inverter back. This thread NEVER writes to the inverter itself."""
-    global _sched_was_enabled, _sched_applied_sig, _sched_pending
+    """Evaluate the active block every 15s and, on a change (or at startup so a reboot
+    self-corrects within one block), apply it via _sched_apply — in THIS thread, so the
+    writes run concurrently with the listen loop (the pattern that works on the Gen2).
+    Master-off triggers a one-shot cleanup, then hands the inverter back."""
+    global _sched_was_enabled, _sched_applied_sig
     while True:
         try:
             want = None
@@ -1804,9 +1791,13 @@ def _scheduler_loop():
                     _sched_applied_sig = None         # re-enabling later re-applies fresh
                 else:
                     want = _CLEANUP_DESIRED
-            if want is not None and json.dumps(want, sort_keys=True) != _sched_applied_sig:
-                with _sched_pending_lock:
-                    _sched_pending = want
+            # Only apply once the inverter is detected ON THE LISTEN SOCKET. Calling into
+            # _detect_inverter before that triggers a fresh-socket probe that collides with
+            # the live listen stream, fails, and caches an 'unknown' result permanently.
+            if (want is not None
+                    and json.dumps(want, sort_keys=True) != _sched_applied_sig
+                    and _inverter_profile in _SCHED_SLOT):
+                _sched_apply(want)
         except Exception as exc:
             log.error("Scheduler loop: %s", exc)
         time.sleep(15)
