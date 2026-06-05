@@ -354,6 +354,12 @@ html,body{
   -webkit-overflow-scrolling:touch;
 }
 #hourly-canvas{display:block;height:100%}   /* width set by JS for scrolling */
+#power-canvas{display:none;flex:1;height:100%;cursor:crosshair}
+#chart-mode-toggle{display:flex;background:rgba(0,0,0,0.35);border-radius:11px;padding:2px;flex-shrink:0}
+.cmode-btn{background:transparent;border:none;border-radius:9px;padding:3px 10px;
+  font-size:.78rem;color:var(--muted);cursor:pointer;white-space:nowrap;transition:all .15s}
+.cmode-btn.active{background:rgba(255,255,255,0.13);color:var(--text)}
+#power-series-row{display:none;flex-wrap:wrap;gap:5px}
 .hstile{
   flex:1;min-width:54px;background:var(--card);border:1px solid var(--border);
   border-radius:8px;padding:5px 4px;text-align:center;
@@ -1003,6 +1009,17 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           <span id="hourly-nav-label">—</span>
           <button class="hnav-btn" id="hourly-next">&#8250;</button>
         </div>
+        <div id="chart-mode-toggle">
+          <button id="mode-bars-btn" class="cmode-btn active">Bars</button>
+          <button id="mode-power-btn" class="cmode-btn">Power</button>
+        </div>
+      </div>
+      <div id="power-series-row">
+        <button class="sbtn active" data-ps="solar_w"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
+        <button class="sbtn active" data-ps="home_w"><span class="sdot" style="background:#38bdf8"></span>Home</button>
+        <button class="sbtn active" data-ps="battery_w"><span class="sdot" style="background:#c084fc"></span>Battery</button>
+        <button class="sbtn active" data-ps="grid_w"><span class="sdot" style="background:#f87171"></span>Grid</button>
+        <button class="sbtn active" id="power-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
       </div>
       <div id="hourly-series-row">
         <button class="sbtn active" data-hs="solar_kwh"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
@@ -1017,6 +1034,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     <div id="hourly-chart-wrap">
       <canvas id="hourly-axis"></canvas>
       <div id="hourly-scroll"><canvas id="hourly-canvas"></canvas></div>
+      <canvas id="power-canvas"></canvas>
     </div>
   </div>
 
@@ -2246,7 +2264,7 @@ function showView(v) {
   if (v==='control')  loadControlState();
   if (v==='logs')     loadLogs();
   if (v==='schedule') loadSchedules();
-  if (v==='hourly')   requestAnimationFrame(drawHourlyChart);
+  if (v==='hourly')   requestAnimationFrame(powerMode ? drawPowerChart : drawHourlyChart);
 }
 
 function setPeriod(p) {
@@ -2496,7 +2514,7 @@ $('hist-canvas').addEventListener('click', () => {
 
 window.addEventListener('resize', () => {
   if (currentView==='history') drawHistChart();
-  if (currentView==='hourly')  drawHourlyChart();
+  if (currentView==='hourly') { if (powerMode) drawPowerChart(); else drawHourlyChart(); }
 });
 
 // ── Hourly breakdown ──────────────────────────────────────────────────────────
@@ -2523,7 +2541,7 @@ async function loadHourly() {
   const today = new Date(); today.setHours(0,0,0,0);
   const shown = new Date(hourlyDay + 'T00:00:00');
   $('hourly-next').disabled = shown >= today;
-  drawHourlyChart();
+  if (powerMode) loadPowerData(); else drawHourlyChart();
 }
 
 function _hourlyDateLabel(day) {
@@ -2696,6 +2714,314 @@ function drawHourlyChart() {
     scrollEl.scrollLeft = Math.max(0, target);
   }
 }
+
+// ── Power time-series chart ───────────────────────────────────────────────────
+let powerMode    = false;
+let powerData    = [];
+let _powerDay    = '';
+let powerActive  = new Set(['solar_w','home_w','battery_w','grid_w']);
+let powerShowSoc = true;
+let _powerCross  = null;   // {x} CSS pixels from canvas left
+
+const POWER_SERIES = [
+  { key:'solar_w',   colorPos:'#f59e0b', colorNeg:null,      posLbl:null,          negLbl:null       },
+  { key:'home_w',    colorPos:'#38bdf8', colorNeg:null,      posLbl:null,          negLbl:null       },
+  { key:'battery_w', colorPos:'#c084fc', colorNeg:'#818cf8', posLbl:'Discharging', negLbl:'Charging' },
+  { key:'grid_w',    colorPos:'#f87171', colorNeg:'#4ade80', posLbl:'Import',      negLbl:'Export'   },
+];
+
+function setPowerMode(on) {
+  powerMode = on;
+  $('mode-bars-btn').classList.toggle('active', !on);
+  $('mode-power-btn').classList.toggle('active',  on);
+  $('hourly-axis').style.display    = on ? 'none' : '';
+  $('hourly-scroll').style.display  = on ? 'none' : '';
+  $('power-canvas').style.display   = on ? 'block' : 'none';
+  $('hourly-series-row').style.display = on ? 'none' : '';
+  $('power-series-row').style.display  = on ? 'flex' : 'none';
+  if (on) {
+    if (_powerDay !== hourlyDay) loadPowerData();
+    else requestAnimationFrame(drawPowerChart);
+  } else {
+    requestAnimationFrame(drawHourlyChart);
+  }
+}
+
+async function loadPowerData() {
+  if (!hourlyDay) return;
+  try {
+    const r = await fetch('/api/power?day=' + encodeURIComponent(hourlyDay), {cache:'no-store'});
+    const d = await r.json();
+    powerData = d.ok ? d.points : [];
+    _powerDay = hourlyDay;
+  } catch(e) { powerData = []; _powerDay = ''; }
+  drawPowerChart();
+}
+
+function _roundRectPath(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x+r, y);
+  c.lineTo(x+w-r, y); c.quadraticCurveTo(x+w, y, x+w, y+r);
+  c.lineTo(x+w, y+h-r); c.quadraticCurveTo(x+w, y+h, x+w-r, y+h);
+  c.lineTo(x+r, y+h); c.quadraticCurveTo(x, y+h, x, y+h-r);
+  c.lineTo(x, y+r); c.quadraticCurveTo(x, y, x+r, y);
+  c.closePath();
+}
+
+function _axisLabel(w) {
+  if (w === 0) return '0';
+  const a = Math.abs(w);
+  if (a < 950) return Math.round(w) + '';
+  return (w/1000).toFixed(1) + 'k';
+}
+
+function drawPowerChart() {
+  const canv = $('power-canvas');
+  if (!canv) return;
+  const dpr = Math.min(window.devicePixelRatio||1, 2);
+  const W   = canv.clientWidth;
+  const H   = canv.clientHeight;
+  if (!W || !H) return;
+
+  canv.width  = W * dpr;
+  canv.height = H * dpr;
+  const c = canv.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, W, H);
+
+  if (!powerData.length) {
+    c.fillStyle = 'rgba(150,180,220,0.4)';
+    c.font = '13px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText('No data for this day', W/2, H/2);
+    return;
+  }
+
+  const PL = 36, PR = powerShowSoc ? 34 : 6, PT = 10, PB = 22;
+  const plotW = W - PL - PR;
+  const plotH = H - PT - PB;
+  const fs = Math.max(9, Math.min(11, Math.round(H/40)));
+
+  // Y scale
+  let maxV = 0, minV = 0;
+  powerData.forEach(d => {
+    POWER_SERIES.forEach(s => {
+      if (!powerActive.has(s.key)) return;
+      const v = d[s.key] || 0;
+      if (v > maxV) maxV = v;
+      if (v < minV) minV = v;
+    });
+  });
+  const scale = niceMax(Math.max(maxV, Math.abs(minV), 100));
+  const hasNeg = minV < -10;
+  const topV   = scale;
+  const botV   = hasNeg ? -niceMax(Math.abs(minV)) : 0;
+  const yRange = topV - botV;
+
+  function yPx(v) { return PT + plotH * (topV - v) / yRange; }
+  function xPx(t) { return PL + (t - dayStart) / 86400 * plotW; }
+
+  const dayStart = new Date(hourlyDay + 'T00:00:00').getTime() / 1000;
+  const yZero = yPx(0);
+
+  // Faint vertical gridlines every 3 h
+  c.strokeStyle = 'rgba(255,255,255,0.07)'; c.lineWidth = 1; c.setLineDash([]);
+  for (let h = 3; h < 24; h += 3) {
+    const x = PL + (h/24) * plotW;
+    c.beginPath(); c.moveTo(x, PT); c.lineTo(x, PT+plotH); c.stroke();
+  }
+
+  // Horizontal grid + zero line
+  const ticks = 4;
+  const step  = topV / ticks;
+  for (let i = 1; i <= ticks; i++) {
+    const y = yPx(i * step);
+    c.strokeStyle = 'rgba(255,255,255,0.07)'; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(PL, y); c.lineTo(PL+plotW, y); c.stroke();
+    if (hasNeg) {
+      const yn = yPx(-i * step);
+      if (yn <= PT + plotH + 1) {
+        c.beginPath(); c.moveTo(PL, yn); c.lineTo(PL+plotW, yn); c.stroke();
+      }
+    }
+  }
+  // Zero line (brighter)
+  c.strokeStyle = 'rgba(255,255,255,0.22)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(PL, yZero); c.lineTo(PL+plotW, yZero); c.stroke();
+
+  // Y axis labels (left)
+  c.fillStyle = 'rgba(150,180,220,0.65)'; c.font = fs+'px sans-serif';
+  c.textAlign = 'right'; c.textBaseline = 'middle';
+  c.fillText('0', PL-3, yZero);
+  for (let i = 1; i <= ticks; i++) {
+    const v = i * step;
+    c.fillText(_axisLabel(v),  PL-3, yPx(v));
+    if (hasNeg) {
+      const yn = yPx(-v);
+      if (yn <= PT + plotH + 1) c.fillText(_axisLabel(-v), PL-3, yn);
+    }
+  }
+
+  // Series fills
+  POWER_SERIES.forEach(s => {
+    if (!powerActive.has(s.key)) return;
+    const pts = powerData.map(d => ({ x: xPx(d.t), y: yPx(d[s.key]||0) }));
+    if (pts.length < 2) return;
+
+    const fillArea = (clipY, clipH, color) => {
+      if (clipH <= 0) return;
+      c.save();
+      c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
+      c.beginPath();
+      c.moveTo(pts[0].x, yZero);
+      pts.forEach(p => c.lineTo(p.x, p.y));
+      c.lineTo(pts[pts.length-1].x, yZero);
+      c.closePath();
+      c.fillStyle = color;
+      c.fill();
+      c.restore();
+    };
+
+    // Positive area (above zero — y < yZero)
+    fillArea(PT, yZero - PT, s.colorPos + 'aa');
+    // Negative area (below zero — y > yZero), only if series can go negative
+    if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
+
+    // Series outline
+    c.beginPath();
+    pts.forEach((p, i) => i===0 ? c.moveTo(p.x, p.y) : c.lineTo(p.x, p.y));
+    c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
+    c.stroke();
+  });
+
+  // SOC right-axis line
+  if (powerShowSoc) {
+    const socPts = powerData.filter(d => d.soc != null);
+    if (socPts.length > 1) {
+      c.strokeStyle = SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+      c.beginPath();
+      socPts.forEach((d, i) => {
+        const x = xPx(d.t);
+        const y = PT + plotH - (d.soc/100) * plotH;
+        i===0 ? c.moveTo(x, y) : c.lineTo(x, y);
+      });
+      c.stroke();
+    }
+    // Right axis labels
+    c.fillStyle = SOC_LINE_COLOR + 'cc'; c.font = fs+'px sans-serif';
+    c.textAlign = 'left'; c.textBaseline = 'middle';
+    for (let pct = 0; pct <= 100; pct += 25) {
+      const y = PT + plotH - (pct/100) * plotH;
+      c.fillText(pct+'%', PL+plotW+3, y);
+    }
+  }
+
+  // X axis time labels
+  c.fillStyle = 'rgba(150,180,220,0.65)'; c.font = fs+'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  for (let h = 0; h <= 24; h += 3) {
+    const x = PL + (h/24) * plotW;
+    c.fillText(String(h).padStart(2,'0')+':00', x, PT+plotH+5);
+  }
+
+  // Crosshair
+  if (_powerCross !== null) {
+    const cx = _powerCross;
+    const t  = dayStart + (cx - PL) / plotW * 86400;
+    let bi = 0, bd = Infinity;
+    powerData.forEach((d, i) => { const dt=Math.abs(d.t-t); if(dt<bd){bd=dt;bi=i;} });
+    const d  = powerData[bi];
+    const sx = xPx(d.t);
+
+    // Hairline
+    c.strokeStyle = 'rgba(255,255,255,0.38)'; c.lineWidth = 1; c.setLineDash([4,3]);
+    c.beginPath(); c.moveTo(sx, PT); c.lineTo(sx, PT+plotH); c.stroke();
+    c.setLineDash([]);
+
+    // Dot on zero-line
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.beginPath(); c.arc(sx, yZero, 3, 0, Math.PI*2); c.fill();
+
+    // Tooltip content
+    const timeStr = new Date(d.t*1000).toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+    const lines = [{ text: timeStr, bold: true, color: 'rgba(220,235,255,0.95)' }];
+    POWER_SERIES.forEach(s => {
+      if (!powerActive.has(s.key)) return;
+      const v = d[s.key] || 0;
+      let label = s.key === 'solar_w'   ? 'Solar'
+                : s.key === 'home_w'    ? 'Home'
+                : s.key === 'battery_w' ? (v<0 ? 'Charging' : v>0 ? 'Discharging' : 'Battery')
+                :                         (v<0 ? 'Exporting' : v>0 ? 'Importing' : 'Grid');
+      const col  = s.key === 'battery_w' ? (v<0 ? s.colorNeg : s.colorPos)
+                 : s.key === 'grid_w'    ? (v<0 ? s.colorNeg : s.colorPos)
+                 : s.colorPos;
+      lines.push({ text: label + ': ' + fmtW(Math.abs(v)), bold: false, color: col+'ee' });
+    });
+    if (powerShowSoc) lines.push({ text:'Battery %: '+(d.soc||0)+'%', bold:false, color:SOC_LINE_COLOR });
+
+    c.font = fs+'px sans-serif';
+    const tPad  = 7, tLineH = fs + 5;
+    const tW    = Math.max(...lines.map(l => c.measureText(l.text).width)) + tPad*2;
+    const tH    = lines.length * tLineH + tPad;
+    let tx = sx + 10;
+    if (tx + tW > W - 4) tx = sx - tW - 10;
+    const ty = PT + 8;
+
+    c.fillStyle = 'rgba(8,14,28,0.88)';
+    _roundRectPath(c, tx, ty, tW, tH, 6);
+    c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.12)'; c.lineWidth = 1;
+    _roundRectPath(c, tx, ty, tW, tH, 6);
+    c.stroke();
+
+    c.textAlign = 'left'; c.textBaseline = 'top';
+    lines.forEach((l, i) => {
+      c.font = (l.bold ? 'bold ' : '') + fs + 'px sans-serif';
+      c.fillStyle = l.color;
+      c.fillText(l.text, tx+tPad, ty+tPad/2 + i*tLineH);
+    });
+  }
+}
+
+// Mode toggle buttons
+$('mode-bars-btn').addEventListener('click',  () => { if (powerMode)  setPowerMode(false); });
+$('mode-power-btn').addEventListener('click', () => { if (!powerMode) setPowerMode(true);  });
+
+// Power series toggles
+document.querySelectorAll('#power-series-row .sbtn[data-ps]').forEach(b =>
+  b.addEventListener('click', () => {
+    const k = b.dataset.ps;
+    if (powerActive.has(k)) powerActive.delete(k); else powerActive.add(k);
+    b.classList.toggle('active', powerActive.has(k));
+    drawPowerChart();
+  }));
+
+$('power-soc-btn').addEventListener('click', () => {
+  powerShowSoc = !powerShowSoc;
+  $('power-soc-btn').classList.toggle('active', powerShowSoc);
+  drawPowerChart();
+});
+
+// Crosshair — mouse
+$('power-canvas').addEventListener('mousemove', e => {
+  if (!powerMode || !powerData.length) return;
+  const r = $('power-canvas').getBoundingClientRect();
+  _powerCross = e.clientX - r.left;
+  drawPowerChart();
+});
+$('power-canvas').addEventListener('mouseleave', () => { _powerCross = null; drawPowerChart(); });
+
+// Crosshair — touch (keep visible until next touch elsewhere)
+$('power-canvas').addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!powerMode || !powerData.length) return;
+  const r = $('power-canvas').getBoundingClientRect();
+  _powerCross = e.touches[0].clientX - r.left;
+  drawPowerChart();
+}, { passive: false });
+$('power-canvas').addEventListener('touchend', e => {
+  // keep crosshair at last position so user can read it
+  e.preventDefault();
+}, { passive: false });
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});

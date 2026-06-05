@@ -2467,6 +2467,35 @@ def api_hourly():
 
     return jsonify({"ok": True, "day": day, "hours": hours})
 
+@app.route("/api/power")
+def api_power():
+    """Per-minute averaged power (W) for a single day.
+    Signed: battery charging and grid export are negative (cost to user)."""
+    day = request.args.get("day", "")
+    if not day:
+        return jsonify({"ok": False, "error": "day required"}), 400
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT
+                (ts / 60) * 60                                          AS t,
+                ROUND(AVG(solar_w))                                     AS solar_w,
+                ROUND(AVG(home_w))                                      AS home_w,
+                ROUND(AVG(CASE WHEN battery_charging = 1
+                               THEN -CAST(battery_w AS REAL)
+                               ELSE  CAST(battery_w AS REAL) END))     AS battery_w,
+                ROUND(AVG(CASE WHEN grid_importing = 1
+                               THEN  CAST(grid_w AS REAL)
+                               ELSE -CAST(grid_w AS REAL) END))        AS grid_w,
+                ROUND(AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END)) AS soc
+            FROM snapshots
+            WHERE date(ts, 'unixepoch', 'localtime') = ?
+            GROUP BY ts / 60
+            ORDER BY t
+        """, (day,)).fetchall()
+
+    return jsonify({"ok": True, "day": day, "points": [dict(r) for r in rows]})
+
 @app.route("/")
 def index():
     return send_from_directory(str(Path(__file__).parent), "dashboard.html")
