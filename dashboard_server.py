@@ -2024,68 +2024,77 @@ def _signed10(raw: int):
 
 def _read_battery_module(s: socket.socket, slave: int) -> "dict | None":
     """Request IR(60, 60) from one LV battery module and decode the response.
-    Uses the Gen2/LV-battery CRC convention (MSB-first, no slave in CRC).
-    Returns a decoded dict or None if the module does not respond."""
+    CRC handling (the fix for Gen3 — confirmed against givenergy_modbus v2.0.4, which
+    reads every device with one slave-inclusive CRC): try the **slave-inclusive LSB-first**
+    CRC first — Gen3 strictly validates CRC and silently drops wrong-CRC frames, and Gen2
+    accepts it too — then fall back to the legacy **MSB-first, no-slave** BMS CRC (the Gen2
+    listen-poke convention) in case a module only answers that. Returns a decoded dict or
+    None if the module responds to neither."""
     base, count = 60, 60
-    crc     = _bms_crc16(0x04, base, count)
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, 0x04]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
-    payload = serial + padding + inner + crc
-    length  = len(payload) + 2
-    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+    crc_variants = (
+        _crc16(inner),                  # slave-inclusive LSB-first (Gen3 + Gen2)
+        _bms_crc16(0x04, base, count),  # legacy MSB-first, no slave (Gen2-only)
+    )
 
-    s.sendall(frame)
-    buf      = bytearray()
-    deadline = time.time() + 5.0
-    while time.time() < deadline:
-        try:
-            chunk = s.recv(4096)
-        except socket.timeout:
-            break
-        if not chunk:
-            break
-        buf.extend(chunk)
-        for f in _pop_data_frames(buf):
-            if len(f) < 44 or f[7] != 0x02:
-                continue
-            if f[26] != slave or f[27] != 0x04:
-                continue
-            rx_base  = (f[38] << 8) | f[39]
-            rx_count = (f[40] << 8) | f[41]
-            if rx_base != base or rx_count != count:
-                continue
-            if len(f) < 42 + count * 2:
-                continue
+    for crc in crc_variants:
+        payload = serial + padding + inner + crc
+        length  = len(payload) + 2
+        frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+        s.sendall(frame)
+        buf      = bytearray()
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for f in _pop_data_frames(buf):
+                if len(f) < 44 or f[7] != 0x02:
+                    continue
+                if f[26] != slave or f[27] != 0x04:
+                    continue
+                rx_base  = (f[38] << 8) | f[39]
+                rx_count = (f[40] << 8) | f[41]
+                if rx_base != base or rx_count != count:
+                    continue
+                if len(f) < 42 + count * 2:
+                    continue
 
-            def g(n: int) -> int:
-                o = 42 + n * 2
-                return (f[o] << 8) | f[o + 1]
+                def g(n: int) -> int:
+                    o = 42 + n * 2
+                    return (f[o] << 8) | f[o + 1]
 
-            num_cells = g(37)                       # IR97
-            if not 1 <= num_cells <= 24:
-                num_cells = 16
-            cells_mv = [g(i) for i in range(num_cells)]
+                num_cells = g(37)                       # IR97
+                if not 1 <= num_cells <= 24:
+                    num_cells = 16
+                cells_mv = [g(i) for i in range(num_cells)]
 
-            # Temperatures: IR76-79 = offsets 16-19 (4 group readings)
-            t_groups = [_signed10(g(16 + i)) for i in range(4)]
-            t_groups = [t for t in t_groups if t is not None]
+                # Temperatures: IR76-79 = offsets 16-19 (4 group readings)
+                t_groups = [_signed10(g(16 + i)) for i in range(4)]
+                t_groups = [t for t in t_groups if t is not None]
 
-            soc = g(40)                             # IR100
-            return {
-                "slave":       f"0x{slave:02X}",
-                "soc":         soc if 0 <= soc <= 100 else None,
-                "cells_mv":    cells_mv,
-                "t_groups":    t_groups,
-                "t_mosfet":    _signed10(g(21)),    # IR81 BMS PCB temp
-                "t_max":       _signed10(g(43)),    # IR103
-                "t_min":       _signed10(g(44)),    # IR104
-                "cycles":      g(36),               # IR96
-                "num_cells":   num_cells,
-                "bms_fw":      g(38),               # IR98
-                "warning":     g(34),               # IR94 warning bytes (0 = healthy)
-                "status_ok":   g(34) == 0,
-            }
+                soc = g(40)                             # IR100
+                return {
+                    "slave":       f"0x{slave:02X}",
+                    "soc":         soc if 0 <= soc <= 100 else None,
+                    "cells_mv":    cells_mv,
+                    "t_groups":    t_groups,
+                    "t_mosfet":    _signed10(g(21)),    # IR81 BMS PCB temp
+                    "t_max":       _signed10(g(43)),    # IR103
+                    "t_min":       _signed10(g(44)),    # IR104
+                    "cycles":      g(36),               # IR96
+                    "num_cells":   num_cells,
+                    "bms_fw":      g(38),               # IR98
+                    "warning":     g(34),               # IR94 warning bytes (0 = healthy)
+                    "status_ok":   g(34) == 0,
+                }
+        # no decodable response with this CRC — try the next variant
     return None
 
 @app.route("/api/battery")
