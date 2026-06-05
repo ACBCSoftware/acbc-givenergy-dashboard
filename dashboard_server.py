@@ -902,19 +902,6 @@ def _run_listen(st: dict):
             s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=15)
             s.settimeout(3)
             while True:
-                # Exclusive write window: if the scheduler needs the dongle, step aside —
-                # close our socket so it's the sole client, wait until it releases, then
-                # reconnect. Infrequent (a block change); recovers on the next cycle.
-                if _listen_yield_req.is_set():
-                    try:
-                        s.close()
-                    except Exception:
-                        pass
-                    _listen_yielded.set()
-                    while _listen_yield_req.is_set():
-                        time.sleep(0.1)
-                    _listen_yielded.clear()
-                    break                              # reconnect the listen socket
                 now = time.time()
                 # Trigger a fresh response every POLL_INTERVAL (and once at start)
                 if now - last_poke >= POLL_INTERVAL:
@@ -1645,9 +1632,10 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 # _sched_compute_writes) is pure and unit-tested. The scheduler thread evaluates the
 # block every 15s and applies changes itself (_sched_apply) using the SAME pattern the
 # manual controls use — _hr_write to the detected slave (0x32 on Gen2) from the scheduler
-# thread while the listen loop keeps receiving concurrently. Writes are PACED and
-# FAIL-FAST on 'dongle busy' (attempts=1): the old 75s drops came from sustained busy-
-# retry hammering, not the writing. Failures retry on the next 15s cycle. Master on only.
+# thread while the listen loop keeps receiving concurrently (writing to 0x11, or with the
+# listen socket closed, returns 'dongle busy' — confirmed on the Pi). DELTA writes (only
+# changed registers) keep an apply to ~1–4 writes. Failures retry on the next 15s cycle.
+# Master on only.
 
 # Action precedence when several rules cover the same block.
 _SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
@@ -1704,13 +1692,13 @@ def _sched_compute_writes(desired: dict):
     scratch and clears it when idle, so slot 1 stays free for other integrations.
     The register writes are absolute sets, so re-applying the whole list is idempotent
     (a partially-applied list self-heals on the next retry). Raises on unsupported HW."""
-    _, profile, model = _detect_inverter()
+    slave, profile, model = _detect_inverter()
     if profile not in _SCHED_SLOT:
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
-    # Writes run inside an EXCLUSIVE window (listen loop paused) on a dedicated socket,
-    # so they target the universal inverter address 0x11 — the 0x32 broadcast slave only
-    # answers while the listen stream is live, which it isn't during the window.
-    slave = 0x11
+    # Write to the SAME slave the manual control buttons use — the detected broadcast
+    # slave (0x32 on this Gen2) with the listen loop left OPEN. Confirmed on the Pi:
+    # writes to 0x32/listen-open succeed reliably, even back-to-back; 0x11/listen-closed
+    # returns 'dongle busy'.
     slot = _SCHED_SLOT[profile]                       # 1-based
     c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
     d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
@@ -1747,9 +1735,8 @@ def _sched_compute_writes(desired: dict):
     return slave, w, summary
 
 
-_SCHED_WRITE_GAP   = 1.0     # seconds between writes — the Gen2 dongle needs a moment
-                            # to finish one write before accepting the next (back-to-back
-                            # writes collide → 'busy' on the 2nd).
+_SCHED_WRITE_GAP   = 0.5     # small gap between writes (manual control works back-to-back;
+                            # a little spacing is just belt-and-braces).
 _sched_applied_sig  = None        # signature of the last successfully-applied desired
 _sched_applied_regs: dict = {}    # reg → last value we wrote, for delta writes
 _sched_was_enabled  = False
@@ -1757,20 +1744,15 @@ _sched_last_status  = "idle"      # surfaced on /api/data: idle | applying | sum
 _CLEANUP_DESIRED    = {"mode": "cleanup"}
 _CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
-# Exclusive-window handshake with the listen loop. The single-client dongle can't service
-# our writes while the listen loop is also polling it, so the scheduler asks the listen
-# loop to step aside (close its socket) for the duration of an apply.
-_listen_yield_req = threading.Event()   # scheduler → "pause, I need the dongle"
-_listen_yielded   = threading.Event()   # listen    → "paused, the dongle is yours"
-
 def _sched_apply(desired: dict) -> None:
-    """Apply a desired state inside an EXCLUSIVE window. The Gen2 dongle is single-client,
-    so the scheduler signals the listen loop to pause (_listen_yield_req), waits for it to
-    confirm it has closed its socket (_listen_yielded), then writes to 0x11 on a dedicated
-    connection, then releases (listen resumes). Only registers whose value differs from
-    what we last wrote are sent (DELTA) — a block change is usually 1–4 writes, so the odds
-    of the whole apply landing in one gap are far better. On failure _sched_applied_sig is
-    left unchanged so the 15s loop retries (writes are idempotent absolute sets)."""
+    """Apply a desired state EXACTLY like a manual control button — _hr_write to the
+    detected slave (0x32 on this Gen2) with the listen loop left OPEN, from this (scheduler)
+    thread, concurrently with the listen loop. Confirmed on the Pi: that combination writes
+    reliably; writing to 0x11 or with the listen socket closed returns 'dongle busy'.
+    Only registers whose value differs from what we last wrote are sent (DELTA) — usually
+    1–4 writes per block change. On failure _sched_applied_sig is left unchanged so the 15s
+    loop retries (writes are idempotent absolute sets, and the delta means a retry only
+    re-sends what hasn't landed yet)."""
     global _sched_applied_sig, _sched_last_status
     try:
         slave, writes, summary = _sched_compute_writes(desired)
@@ -1784,24 +1766,20 @@ def _sched_apply(desired: dict) -> None:
         return                                        # already in the wanted state
 
     _sched_last_status = "applying"
-    _listen_yielded.clear()
-    _listen_yield_req.set()                           # ask the listen loop to step aside
-    yielded = _listen_yielded.wait(timeout=8)
     ok = True
     try:
-        if yielded:
-            time.sleep(1.0)                           # let the dongle settle after listen closed
         for i, (reg, val) in enumerate(pending):
             if i:
                 time.sleep(_SCHED_WRITE_GAP)
-            _hr_write(slave, reg, val, attempts=2)
+            _hr_write(slave, reg, val)                # default 7 attempts — IDENTICAL to the
+                                                      # manual controls, which write reliably;
+                                                      # the dongle-busy is intermittent so the
+                                                      # wider retry window catches a free moment
             _sched_applied_regs[reg] = val            # remember what we wrote (delta state)
     except Exception as exc:
         ok = False
         _sched_last_status = "busy — will retry"
         log.warning("Scheduler apply failed (will retry): %s", exc)
-    finally:
-        _listen_yield_req.clear()                     # release → listen reconnects
 
     if ok:
         _sched_applied_sig = json.dumps(desired, sort_keys=True)

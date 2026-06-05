@@ -1,82 +1,69 @@
-r"""Exclusive-write-window coordination test.
-
-Models the real Gen2 failure mode the Rust simulator does NOT: a single-client dongle
-that returns 'busy' for a write UNLESS the listen loop has stepped aside. Proves the
-scheduler's exclusive window (_listen_yield_req / _listen_yielded handshake) acquires
-sole access so writes land, that delta-writes skip unchanged registers, and that the
-handshake always releases (no deadlock).
+r"""Scheduler apply test: writes to the detected slave (manual-control path), delta writes,
+status reporting, and retry-on-failure. No exclusive window — the live Pi proved writes
+succeed to the detected slave (0x32) with the listen loop OPEN, so the scheduler just does
+what the manual controls do.
 
 Run: venv\Scripts\python.exe tests\test_scheduler_window.py
 """
-import os, sys, threading, time
+import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dashboard_server as ds  # noqa: E402
 
-ds._SCHED_WRITE_GAP = 0.0                       # no inter-write pacing delay in the test
-ds._detect_inverter = lambda: (0x32, "single_phase_2slot", "Gen2")
+ds._SCHED_WRITE_GAP = 0.0
+ds.time.sleep = lambda *_: None                       # no real delays in the test
+ds._detect_inverter = lambda: (0x32, "single_phase_2slot", "Gen2")   # detected broadcast slave
 
-# ── Fake single-client dongle: a write only succeeds while the scheduler holds the
-#    exclusive window (yield_req set by the apply thread — race-free in the test) ──
 written = []
-def fake_dongle_write(slave, reg, val, timeout=5.0, attempts=7):
-    if not ds._listen_yield_req.is_set():
-        raise OSError("dongle busy (no exclusive window)")    # the real failure mode
-    written.append((slave, reg, val))
-ds._hr_write = fake_dongle_write
-
-# ── Fake listen loop: honours the yield handshake (set yielded when asked, clear on release) ──
-_stop = threading.Event()
-def fake_listen():
-    while not _stop.is_set():
-        if ds._listen_yield_req.is_set():
-            ds._listen_yielded.set()            # "closed my socket, dongle is yours"
-            while ds._listen_yield_req.is_set() and not _stop.is_set():
-                time.sleep(0.02)
-            ds._listen_yielded.clear()          # released → "reconnecting"
-        time.sleep(0.02)
-threading.Thread(target=fake_listen, daemon=True).start()
+def ok_write(slave, reg, val, timeout=5.0, attempts=7):
+    written.append((slave, reg, val, attempts))
+ds._hr_write = ok_write
 
 def reset():
     written.clear()
     ds._sched_applied_sig = None
     ds._sched_applied_regs = {}
 
-# 1) Charge apply lands because the window grabs exclusive access
+# 1) Charge writes to the DETECTED slave 0x32 (not 0x11), slot 1 untouched, status set
 reset()
 ds._sched_apply({"mode": "charge", "target_soc": 90, "start": "00:30", "end": "04:30"})
-print("charge writes:", [(hex(s), r, v) for s, r, v in written])
-assert (0x11, 31, 30) in written and (0x11, 32, 430) in written and (0x11, 96, 1) in written
-assert all(s == 0x11 for s, _, _ in written), "writes must target 0x11 in the window"
-assert all(r not in (94, 95, 56, 57) for _, r, _ in written), "slot 1 untouched"
-assert ds._sched_applied_sig is not None, "apply succeeded → applied_sig set"
-assert not ds._listen_yield_req.is_set(), "window released (no deadlock)"
+print("charge writes:", [(hex(s), r, v, a) for s, r, v, a in written])
+assert all(s == 0x32 for s, *_ in written), "must write to the detected slave 0x32"
+assert (0x32, 31, 30, 7) in written and (0x32, 32, 430, 7) in written and (0x32, 96, 1, 7) in written
+assert all(r not in (94, 95, 56, 57) for _, r, _, _ in written), "slot 1 untouched"
+assert ds._sched_applied_sig is not None
+assert ds._sched_last_status.startswith("Charge to 90%")
 
-# 2) Delta — re-applying the SAME state writes nothing
-n_before = len(written)
+# 2) Delta — identical re-apply writes nothing
+n = len(written)
 ds._sched_apply({"mode": "charge", "target_soc": 90, "start": "00:30", "end": "04:30"})
-print("writes after identical re-apply:", len(written) - n_before)
-assert len(written) == n_before, "delta should skip unchanged registers"
+assert len(written) == n, "delta should skip unchanged registers"
 
-# 3) Changing state writes only the registers that DIFFER from what we last wrote.
-#    After charge, applied_regs = {116:90, 31:30, 32:430, 96:1, 44:0, 45:0}. Baseline
-#    wants 31,32,44,45 = 0, 96 = 0, 59 = 1, 27 = 1. So 44/45 are already 0 (skip), and
-#    31,32,96,59,27 must be written.
+# 3) Changing to baseline writes only the registers that differ
 written.clear()
 ds._sched_apply({"mode": "baseline"})
-regs = {r for _, r, _ in written}
+regs = {r for _, r, _, _ in written}
 print("baseline delta wrote regs:", sorted(regs))
 assert regs == {27, 31, 32, 59, 96}, f"unexpected delta set: {sorted(regs)}"
-assert 44 not in regs and 45 not in regs, "regs already at 0 must be skipped by delta"
 
-# 4) Window still releases even when a write fails (no deadlock)
+# 4) A failed write leaves it un-applied (retry) and records busy status; delta means the
+#    retry only re-sends what hasn't landed yet.
 reset()
-def always_busy(slave, reg, val, timeout=5.0, attempts=7):
-    raise OSError("busy")
-ds._hr_write = always_busy
-ds._sched_apply({"mode": "hold"})
-assert ds._sched_applied_sig is None, "failed apply leaves it un-applied (retry)"
-assert not ds._listen_yield_req.is_set(), "window released even on failure (no deadlock)"
-print("failure path released window cleanly")
+calls = {"n": 0}
+def busy_after_two(slave, reg, val, timeout=5.0, attempts=7):
+    calls["n"] += 1
+    if calls["n"] >= 3:
+        raise OSError("dongle busy")
+    ds._sched_applied_regs[reg] = val                 # first two land
+ds._hr_write = busy_after_two
+ds._sched_apply({"mode": "charge", "target_soc": 80, "start": "01:00", "end": "05:00"})
+assert ds._sched_applied_sig is None, "partial/failed apply must stay un-applied (retry)"
+assert ds._sched_last_status == "busy — will retry"
+landed = len(ds._sched_applied_regs)
+print("first attempt landed", landed, "regs before busy")
+# retry: only the un-landed registers are re-sent
+ds._hr_write = lambda s, r, v, timeout=5.0, attempts=7: ds._sched_applied_regs.__setitem__(r, v)
+ds._sched_apply({"mode": "charge", "target_soc": 80, "start": "01:00", "end": "05:00"})
+assert ds._sched_applied_sig is not None, "retry completes the apply"
+print("retry completed the apply")
 
-_stop.set()
-print("\nEXCLUSIVE-WINDOW TEST PASSED — sole access, delta writes, clean release")
+print("\nAPPLY TEST PASSED — detected slave, delta, status, retry-completes")
