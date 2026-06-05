@@ -907,9 +907,17 @@ def _run_listen(st: dict):
                 if now - last_poke >= POLL_INTERVAL:
                     _send_pokes(s)
                     last_poke = now
-                # Apply any pending scheduler writes on THIS socket — cooperative,
-                # no second connection, so the listen stream stays stable.
-                _sched_drain_pending(s, buf)
+                # Pending scheduler writes: close the listen socket, apply them on a
+                # clean dedicated connection, then reconnect listen. The single-client
+                # dongle then never has two sockets at once → no contention, no drops,
+                # and the dongle reliably echoes the writes (it won't on the broadcast
+                # socket). Infrequent (only on a block change), recovers in one cycle.
+                # Apply any queued scheduler writes, with the listen socket left OPEN
+                # (the 0x32 broadcast slave only answers while listen is live). Runs in
+                # this thread so writes are serialised with the recv loop. Gated on
+                # detection so the cached profile/slave are ready (no probe needed).
+                if _sched_pending_waiting() and _inverter_profile in _SCHED_SLOT:
+                    _sched_apply_now()
                 # Read whatever has arrived
                 try:
                     chunk = s.recv(8192)
@@ -1101,9 +1109,13 @@ _DONGLE_BUSY_CODE  = 0x43  # GivEnergy Modbus exception: dongle handling another
 _WRITE_MAX_ATTEMPTS = 7    # 1 initial attempt + 6 retries (matches psylsph behaviour)
 
 
-def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
+def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
+              attempts: int = _WRITE_MAX_ATTEMPTS) -> None:
     """Write a single holding register.  Verifies the echo response.
-    Retries up to 6× on exception code 67 (dongle busy).
+    Retries on exception code 67 (dongle busy) up to `attempts` times (default 7,
+    as the manual controls use). The scheduler passes attempts=1 to FAIL FAST: the
+    sustained busy-retry hammering is what disrupted the Gen2 listen stream, so it
+    aborts on busy and lets the 15s re-queue try again instead.
     Raises on timeout, echo mismatch, or exhausted retries."""
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
@@ -1113,10 +1125,10 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
     length  = len(payload) + 2
     frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
-    for attempt in range(_WRITE_MAX_ATTEMPTS):
+    for attempt in range(attempts):
         if attempt:
             log.warning("HR write: dongle busy, retrying in 2s (attempt %d/%d) …",
-                        attempt + 1, _WRITE_MAX_ATTEMPTS)
+                        attempt + 1, attempts)
             time.sleep(2)
         s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
         s.settimeout(timeout)
@@ -1155,7 +1167,7 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0) -> None:
             s.close()
         if not busy:
             raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
-    raise OSError(f"HR write: dongle still busy after {_WRITE_MAX_ATTEMPTS} attempts "
+    raise OSError(f"HR write: dongle still busy after {attempts} attempt(s) "
                   f"(reg={reg} val={value})")
 
 
@@ -1629,9 +1641,11 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 # ── Scheduler engine (app-held 48 half-hour block reconciler) ─────────────────
 # Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state /
 # _sched_compute_writes) is pure and unit-tested. The scheduler thread only DECIDES
-# what should be true; the listen loop performs the register writes on its own socket
-# (_sched_drain_pending → _hr_write_on), so there is never a competing connection to
-# disrupt the Gen2 listen stream. Writes happen only while the master switch is on.
+# what should be true and queues it; the listen loop applies it (_sched_apply_now)
+# using the SAME path the manual controls use — _hr_write to the detected slave with
+# the listen socket left OPEN — but FAIL-FAST on 'dongle busy' (attempts=1). The old
+# 75s drops came from sustained busy-retry hammering, not from writing itself; failing
+# fast + retrying on the next 15s cycle avoids it. Writes happen only while master is on.
 
 # Action precedence when several rules cover the same block.
 _SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
@@ -1691,6 +1705,9 @@ def _sched_compute_writes(desired: dict):
     slave, profile, model = _detect_inverter()
     if profile not in _SCHED_SLOT:
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
+    # Write to the DETECTED slave (0x32 on Gen2) with the listen loop OPEN — the exact
+    # path the manual control buttons use and which is confirmed to work. (0x32 only
+    # answers while its broadcast/listen stream is live, so we must NOT close listen.)
     slot = _SCHED_SLOT[profile]                       # 1-based
     c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
     d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
@@ -1727,51 +1744,19 @@ def _sched_compute_writes(desired: dict):
     return slave, w, summary
 
 
-class _DongleBusy(Exception):
-    """Inverter dongle returned the 'busy' exception (0x43) — retry on a later cycle."""
+def _sched_pending_waiting() -> bool:
+    """Cheap check used by the listen loop: is a scheduler apply queued?"""
+    return _sched_pending is not None
 
-
-def _hr_write_on(sock, buf: bytearray, slave: int, reg: int, value: int,
-                 timeout: float = 3.0) -> None:
-    """Write a single holding register over an EXISTING socket (the listen loop's),
-    reading the echo inline via the shared frame buffer. Opening NO second connection
-    is the whole point: it keeps inverter access serialised through one socket, so the
-    Gen2 listen stream is never disrupted. Raises _DongleBusy on the busy exception,
-    ValueError on echo mismatch, TimeoutError if no echo arrives."""
-    inner   = bytes([slave, 0x06]) + reg.to_bytes(2, "big") + value.to_bytes(2, "big")
-    payload = b"AB1234G567" + b"\x00" * 7 + b"\x08" + inner + _crc16(inner)
-    frame   = b"\x59\x59\x00\x01" + (len(payload) + 2).to_bytes(2, "big") + b"\x01\x02" + payload
-    sock.sendall(frame)
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            chunk = sock.recv(4096)
-        except socket.timeout:
-            continue
-        if not chunk:
-            raise ConnectionError("socket closed during scheduler write")
-        buf.extend(chunk)
-        for f in _pop_data_frames(buf):
-            if len(f) < 29 or f[7] != 0x02:
-                continue
-            if f[27] == 0x86 and f[28] == _DONGLE_BUSY_CODE:
-                raise _DongleBusy(f"reg={reg}")
-            if len(f) < 42 or f[27] != 0x06:
-                continue                              # not a write echo (e.g. live broadcast)
-            echo_reg = (f[38] << 8) | f[39]
-            echo_val = (f[40] << 8) | f[41]
-            if echo_reg == reg and echo_val == value:
-                return
-            raise ValueError(f"scheduler write echo mismatch reg={echo_reg} val={echo_val} "
-                             f"(expected reg={reg} val={value})")
-    raise TimeoutError(f"scheduler write echo timeout reg={reg} val={value}")
-
-
-def _sched_drain_pending(sock, buf: bytearray) -> None:
-    """Called by the listen loop each cycle. If the scheduler thread has queued a
-    desired state, apply its writes on THIS socket and record the result. On busy or
-    failure it leaves _sched_applied_sig unchanged so the scheduler thread re-queues
-    and we retry on a later cycle (writes are idempotent absolute sets)."""
+def _sched_apply_now() -> None:
+    """Apply the queued desired state using the SAME path the manual controls use and
+    which is confirmed working on the Gen2: `_hr_write` to the detected slave with the
+    listen loop left OPEN. Called from the listen loop so the writes are serialised with
+    the listen recv (no concurrent dongle access). Each write FAILS FAST on busy
+    (attempts=1) — no 14s retry hammering, which is what used to disrupt the stream.
+    On any failure it leaves _sched_applied_sig unchanged, so the scheduler thread
+    re-queues and we retry the whole apply on a later cycle (writes are idempotent
+    absolute sets, so a partial apply self-heals)."""
     global _sched_applied_sig, _sched_pending
     with _sched_pending_lock:
         desired = _sched_pending
@@ -1780,18 +1765,11 @@ def _sched_drain_pending(sock, buf: bytearray) -> None:
         return
     try:
         slave, writes, summary = _sched_compute_writes(desired)
-    except Exception as exc:
-        log.warning("Scheduler: %s", exc)
-        return
-    try:
         for reg, val in writes:
-            _hr_write_on(sock, buf, slave, reg, val)
-    except _DongleBusy:
-        log.info("Scheduler: dongle busy — will retry next cycle")
-        return                                        # applied_sig unchanged → re-queued
+            _hr_write(slave, reg, val, attempts=1)    # fail fast — no busy-retry hammering
     except Exception as exc:
-        log.warning("Scheduler apply failed: %s", exc)
-        return
+        log.warning("Scheduler apply failed (will retry): %s", exc)
+        return                                        # applied_sig unchanged → re-queued
     _sched_applied_sig = json.dumps(desired, sort_keys=True)
     _log_control("scheduler", desired, True, "Scheduler: " + summary)
     log.warning("Scheduler applied: %s", summary)
@@ -1806,12 +1784,10 @@ _CLEANUP_DESIRED     = {"mode": "cleanup"}
 _CLEANUP_SIG         = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
 def _scheduler_loop():
-    """Evaluate the active block every 15s and hand the desired state to the listen
-    loop (which performs the writes on its own socket — see _sched_drain_pending).
-    Queues on signature change and on startup, so a reboot self-corrects within one
-    block. Master-off triggers a one-shot cleanup, then hands the inverter back.
-    This thread NEVER writes to the inverter itself — that is what stopped the Gen2
-    listen stream from being disrupted by competing sockets."""
+    """Evaluate the active block every 15s and queue the desired state for the listen
+    loop to apply (see _sched_apply_now). Queues on signature change and on startup,
+    so a reboot self-corrects within one block. Master-off triggers a one-shot cleanup,
+    then hands the inverter back. This thread NEVER writes to the inverter itself."""
     global _sched_was_enabled, _sched_applied_sig, _sched_pending
     while True:
         try:
