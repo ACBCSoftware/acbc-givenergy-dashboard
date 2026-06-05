@@ -83,7 +83,7 @@ systemd service that starts on boot.
 #### Option A — Installer (recommended)
 
 1. Install [Python 3.11+](https://python.org/downloads/) — **tick "Add Python to PATH"** during setup.
-2. Download and run **`GivEnergy-Dashboard-Setup-v1.1.exe`**.
+2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v1.8.exe`**.
 3. The installer will:
    - Create a Python virtual environment
    - Install all required packages
