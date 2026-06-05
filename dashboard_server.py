@@ -1611,7 +1611,11 @@ def api_data():
     with _lock:
         if not _cached:
             return jsonify({"ok": False, "error": _error or "Starting up..."}), 503
-        return jsonify(_cached)
+        data = dict(_cached)
+    # Scheduler on/off is a status flag (not a control), so it rides on the
+    # unauthenticated live feed to drive the header indicator.
+    data["scheduler_active"] = SCHEDULER_ENABLED
+    return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
 def get_control():

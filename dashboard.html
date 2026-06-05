@@ -112,6 +112,9 @@ html,body{
   user-select:none;
 }
 #ctrl-btn:hover, #sched-btn:hover{ opacity:.9 }
+/* Scheduler status: green when active, red when off (set from /api/data) */
+#sched-btn.sched-on{  color:#4ade80; opacity:.95 }
+#sched-btn.sched-off{ color:#f87171; opacity:.7 }
 
 /* ── Control panel ────────────────────────────── */
 #ctrl-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
@@ -765,14 +768,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         </div>
       </div>
 
-      <!-- Schedule entry -->
-      <div class="ctrl-section">
-        <button class="ctrl-btn" onclick="showView('schedule')">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-2px;margin-right:6px"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.5V8l2.4 1.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          Schedule
-        </button>
-      </div>
-
       <!-- Mode -->
       <div class="ctrl-section">
         <div class="ctrl-heading">Operating Mode</div>
@@ -1298,6 +1293,7 @@ function updateBatFill(soc) {
 function applyData(d) {
   liveData  = d;
   liveFlows = getFlows(d);
+  setSchedIcon(d.scheduler_active);
 
   const solarOn = d.solar_w   > 20;
   const batOn   = d.battery_w > 20;
@@ -1825,6 +1821,15 @@ function _schedHeaders() {
   return { 'Content-Type':'application/json', 'X-Admin-Password':_adminPw };
 }
 
+// Header clock icon reflects scheduler state: green = on, red = off.
+function setSchedIcon(active) {
+  if (active === undefined || active === null) return;
+  const el = $('sched-btn');
+  el.classList.toggle('sched-on',  !!active);
+  el.classList.toggle('sched-off', !active);
+  el.title = active ? 'Schedule (active)' : 'Schedule (off)';
+}
+
 function _daysText(mask) {
   if (mask === 127) return 'Every day';
   if (mask === 31)  return 'Weekdays';
@@ -1945,9 +1950,10 @@ async function toggleRule(id, enabled) {
 async function _saveSchedConfig() {
   await fetch('/api/schedules/config', { method:'POST', headers:_schedHeaders(),
     body: JSON.stringify({ master_enabled: $('sched-master').checked, baseline: $('sched-baseline').value }) });
+  setSchedIcon($('sched-master').checked);   // reflect immediately, don't wait for next poll
 }
 
-$('sched-back').addEventListener('click', () => showView('control'));
+$('sched-back').addEventListener('click', () => showView('live'));
 $('sched-add').addEventListener('click', () => openEditor(null));
 $('sched-master').addEventListener('change', _saveSchedConfig);
 $('sched-baseline').addEventListener('change', _saveSchedConfig);
