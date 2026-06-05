@@ -902,16 +902,24 @@ def _run_listen(st: dict):
             s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=15)
             s.settimeout(3)
             while True:
+                # Exclusive write window: if the scheduler needs the dongle, step aside —
+                # close our socket so it's the sole client, wait until it releases, then
+                # reconnect. Infrequent (a block change); recovers on the next cycle.
+                if _listen_yield_req.is_set():
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                    _listen_yielded.set()
+                    while _listen_yield_req.is_set():
+                        time.sleep(0.1)
+                    _listen_yielded.clear()
+                    break                              # reconnect the listen socket
                 now = time.time()
                 # Trigger a fresh response every POLL_INTERVAL (and once at start)
                 if now - last_poke >= POLL_INTERVAL:
                     _send_pokes(s)
                     last_poke = now
-                # Pending scheduler writes: close the listen socket, apply them on a
-                # clean dedicated connection, then reconnect listen. The single-client
-                # dongle then never has two sockets at once → no contention, no drops,
-                # and the dongle reliably echoes the writes (it won't on the broadcast
-                # socket). Infrequent (only on a block change), recovers in one cycle.
                 # Read whatever has arrived
                 try:
                     chunk = s.recv(8192)
@@ -1696,12 +1704,13 @@ def _sched_compute_writes(desired: dict):
     scratch and clears it when idle, so slot 1 stays free for other integrations.
     The register writes are absolute sets, so re-applying the whole list is idempotent
     (a partially-applied list self-heals on the next retry). Raises on unsupported HW."""
-    slave, profile, model = _detect_inverter()
+    _, profile, model = _detect_inverter()
     if profile not in _SCHED_SLOT:
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
-    # Write to the DETECTED slave (0x32 on Gen2) with the listen loop OPEN — the exact
-    # path the manual control buttons use and which is confirmed to work. (0x32 only
-    # answers while its broadcast/listen stream is live, so we must NOT close listen.)
+    # Writes run inside an EXCLUSIVE window (listen loop paused) on a dedicated socket,
+    # so they target the universal inverter address 0x11 — the 0x32 broadcast slave only
+    # answers while the listen stream is live, which it isn't during the window.
+    slave = 0x11
     slot = _SCHED_SLOT[profile]                       # 1-based
     c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
     d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
@@ -1741,34 +1750,64 @@ def _sched_compute_writes(desired: dict):
 _SCHED_WRITE_GAP   = 1.0     # seconds between writes — the Gen2 dongle needs a moment
                             # to finish one write before accepting the next (back-to-back
                             # writes collide → 'busy' on the 2nd).
-_sched_applied_sig = None
-_sched_was_enabled = False
-_CLEANUP_DESIRED   = {"mode": "cleanup"}
-_CLEANUP_SIG       = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
+_sched_applied_sig  = None        # signature of the last successfully-applied desired
+_sched_applied_regs: dict = {}    # reg → last value we wrote, for delta writes
+_sched_was_enabled  = False
+_sched_last_status  = "idle"      # surfaced on /api/data: idle | applying | summary | error
+_CLEANUP_DESIRED    = {"mode": "cleanup"}
+_CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
+
+# Exclusive-window handshake with the listen loop. The single-client dongle can't service
+# our writes while the listen loop is also polling it, so the scheduler asks the listen
+# loop to step aside (close its socket) for the duration of an apply.
+_listen_yield_req = threading.Event()   # scheduler → "pause, I need the dongle"
+_listen_yielded   = threading.Event()   # listen    → "paused, the dongle is yours"
 
 def _sched_apply(desired: dict) -> None:
-    """Apply a desired state the SAME way a manual control button does — the pattern
-    confirmed to work on the Gen2: _hr_write to the detected slave (0x32) from THIS
-    (scheduler) thread, while the listen loop keeps receiving CONCURRENTLY in its own
-    thread. That matters: the 0x32 broadcast slave only services writes while its listen
-    stream is actively being read, so the write must not block the listen recv (which is
-    why doing it inside the listen loop failed). Writes are PACED (_SCHED_WRITE_GAP apart)
-    and FAIL FAST on busy (attempts=1) — the sustained busy-retry hammering is what used
-    to cause 75s drops. On any failure _sched_applied_sig is left unchanged so the 15s
-    loop re-applies (writes are idempotent absolute sets, so a partial apply self-heals)."""
-    global _sched_applied_sig
+    """Apply a desired state inside an EXCLUSIVE window. The Gen2 dongle is single-client,
+    so the scheduler signals the listen loop to pause (_listen_yield_req), waits for it to
+    confirm it has closed its socket (_listen_yielded), then writes to 0x11 on a dedicated
+    connection, then releases (listen resumes). Only registers whose value differs from
+    what we last wrote are sent (DELTA) — a block change is usually 1–4 writes, so the odds
+    of the whole apply landing in one gap are far better. On failure _sched_applied_sig is
+    left unchanged so the 15s loop retries (writes are idempotent absolute sets)."""
+    global _sched_applied_sig, _sched_last_status
     try:
         slave, writes, summary = _sched_compute_writes(desired)
-        for i, (reg, val) in enumerate(writes):
+    except Exception as exc:
+        _sched_last_status = f"error: {exc}"
+        log.warning("Scheduler apply failed (will retry): %s", exc)
+        return
+    pending = [(r, v) for r, v in writes if _sched_applied_regs.get(r) != v]   # delta
+    if not pending:
+        _sched_applied_sig = json.dumps(desired, sort_keys=True)
+        return                                        # already in the wanted state
+
+    _sched_last_status = "applying"
+    _listen_yielded.clear()
+    _listen_yield_req.set()                           # ask the listen loop to step aside
+    yielded = _listen_yielded.wait(timeout=8)
+    ok = True
+    try:
+        if yielded:
+            time.sleep(1.0)                           # let the dongle settle after listen closed
+        for i, (reg, val) in enumerate(pending):
             if i:
                 time.sleep(_SCHED_WRITE_GAP)
-            _hr_write(slave, reg, val, attempts=1)
+            _hr_write(slave, reg, val, attempts=2)
+            _sched_applied_regs[reg] = val            # remember what we wrote (delta state)
     except Exception as exc:
+        ok = False
+        _sched_last_status = "busy — will retry"
         log.warning("Scheduler apply failed (will retry): %s", exc)
-        return                                        # applied_sig unchanged → retried
-    _sched_applied_sig = json.dumps(desired, sort_keys=True)
-    _log_control("scheduler", desired, True, "Scheduler: " + summary)
-    log.warning("Scheduler applied: %s", summary)
+    finally:
+        _listen_yield_req.clear()                     # release → listen reconnects
+
+    if ok:
+        _sched_applied_sig = json.dumps(desired, sort_keys=True)
+        _sched_last_status = summary
+        _log_control("scheduler", desired, True, "Scheduler: " + summary)
+        log.warning("Scheduler applied: %s", summary)
 
 def _scheduler_loop():
     """Evaluate the active block every 15s and, on a change (or at startup so a reboot
@@ -1821,6 +1860,7 @@ def api_data():
     # Scheduler on/off is a status flag (not a control), so it rides on the
     # unauthenticated live feed to drive the header indicator.
     data["scheduler_active"] = SCHEDULER_ENABLED
+    data["scheduler_status"] = _sched_last_status
     return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
