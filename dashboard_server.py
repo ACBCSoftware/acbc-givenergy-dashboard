@@ -1597,6 +1597,152 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     raise ValueError(f"Unknown command: {command}")
 
 
+# ── Scheduler engine (app-held 48 half-hour block reconciler) ─────────────────
+# Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state)
+# is pure and unit-tested; only _sched_apply_desired / _sched_cleanup touch the
+# inverter, and the loop only runs writes while the master switch is on.
+
+# Action precedence when several rules cover the same block.
+_SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
+
+def _hhmm_to_min(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+def _block_contains(start: str, end: str, t_min: int) -> bool:
+    """Does the [start, end) window contain minute-of-day t_min?
+    Supports windows that wrap past midnight (start > end)."""
+    s, e = _hhmm_to_min(start), _hhmm_to_min(end)
+    if s == e:
+        return False
+    if s < e:
+        return s <= t_min < e
+    return t_min >= s or t_min < e          # wraps midnight
+
+def _sched_desired_state(rules: list, weekday: int, t_min: int) -> dict:
+    """Pure: pick the winning action for this moment, else baseline.
+    `rules` are /api/schedules-shaped dicts; weekday Mon=0 … Sun=6 (matches days_mask)."""
+    winner = None
+    for r in rules:
+        if not r.get("enabled", True):
+            continue
+        if not (r["days_mask"] & (1 << weekday)):
+            continue
+        if not _block_contains(r["start"], r["end"], t_min):
+            continue
+        if winner is None or _SCHED_PRECEDENCE[r["action"]] > _SCHED_PRECEDENCE[winner["action"]]:
+            winner = r
+    if winner is None:
+        return {"mode": "baseline"}
+    if winner["action"] == "charge":
+        return {"mode": "charge", "target_soc": winner["target_soc"],
+                "start": winner["start"], "end": winner["end"]}
+    if winner["action"] == "export":
+        return {"mode": "export", "start": winner["start"], "end": winner["end"]}
+    return {"mode": "hold"}
+
+def _sched_load_rules() -> list:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT action, start_hhmm, end_hhmm, days_mask, target_soc "
+            "FROM schedules WHERE enabled=1").fetchall()
+    return [{"enabled": True, "action": r["action"], "start": r["start_hhmm"],
+             "end": r["end_hhmm"], "days_mask": r["days_mask"],
+             "target_soc": r["target_soc"]} for r in rows]
+
+def _sched_apply_desired(desired: dict) -> str:
+    """Translate desired state into inverter writes. Returns a summary string.
+    Uses the profile's reserved (last) slot as scratch; clears it when not needed
+    so slot 1 stays free for other integrations. Raises on unsupported inverters."""
+    slave, profile, model = _detect_inverter()
+    if profile not in _SCHED_SLOT:
+        raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
+    slot = _SCHED_SLOT[profile]                       # 1-based
+    c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
+    d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
+
+    def wr(reg, val): _hr_write(slave, reg, val)
+    def set_charge(s, e):    wr(c_start, _hhmm_to_bcd(s)); wr(c_end, _hhmm_to_bcd(e))
+    def set_discharge(s, e): wr(d_start, _hhmm_to_bcd(s)); wr(d_end, _hhmm_to_bcd(e))
+    def clear_charge():    set_charge("00:00", "00:00")
+    def clear_discharge(): set_discharge("00:00", "00:00")
+
+    mode = desired["mode"]
+    if mode == "charge":
+        wr(_HR["CHARGE_TARGET_SOC"], desired["target_soc"])
+        set_charge(desired["start"], desired["end"])
+        wr(_HR["ENABLE_CHARGE"], 1)
+        clear_discharge()
+        return f"Charge to {desired['target_soc']}% ({desired['start']}–{desired['end']})"
+    if mode == "export":
+        set_discharge(desired["start"], desired["end"])
+        wr(_HR["BATTERY_POWER_MODE"], 0)              # 0 = max power / export
+        wr(_HR["ENABLE_DISCHARGE"], 1)
+        clear_charge()
+        return f"Export ({desired['start']}–{desired['end']})"
+    if mode == "hold":
+        wr(_HR["ENABLE_CHARGE"], 0)
+        wr(_HR["ENABLE_DISCHARGE"], 0)
+        clear_charge(); clear_discharge()
+        return "Hold charge (no discharge)"
+    # baseline — clear our scratch slots, then assert the chosen normal mode
+    clear_charge(); clear_discharge()
+    wr(_HR["ENABLE_CHARGE"], 0)
+    if SCHEDULER_BASELINE == "storage":
+        wr(_HR["ENABLE_DISCHARGE"], 0)
+        return "Baseline: Storage (hold charge)"
+    wr(_HR["ENABLE_DISCHARGE"], 1)
+    wr(_HR["BATTERY_POWER_MODE"], 1)                  # 1 = demand / self-use
+    return "Baseline: Eco"
+
+def _sched_cleanup():
+    """Run when the scheduler is switched off: clear our scratch slots and stop
+    any forced charge, leaving the rest of the inverter as the user left it."""
+    slave, profile, model = _detect_inverter()
+    if profile not in _SCHED_SLOT:
+        return
+    slot = _SCHED_SLOT[profile]
+    c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
+    d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
+    for reg in (c_start, c_end, d_start, d_end):
+        _hr_write(slave, reg, 0)
+    _hr_write(slave, _HR["ENABLE_CHARGE"], 0)
+
+_sched_last_sig    = None
+_sched_was_enabled = False
+
+def _scheduler_loop():
+    """Apply the active block's instruction whenever the desired state changes
+    (and on startup, so a reboot self-corrects within one block). Gated by the
+    master switch; ticks every 15s so a half-hour boundary is caught quickly."""
+    global _sched_last_sig, _sched_was_enabled
+    while True:
+        delay = 15
+        try:
+            if SCHEDULER_ENABLED:
+                now = time.localtime()
+                block_min = ((now.tm_hour * 60 + now.tm_min) // 30) * 30
+                desired   = _sched_desired_state(_sched_load_rules(), now.tm_wday, block_min)
+                sig = json.dumps(desired, sort_keys=True)
+                if sig != _sched_last_sig:
+                    msg = _sched_apply_desired(desired)
+                    _log_control("scheduler", desired, True, "Scheduler: " + msg)
+                    log.warning("Scheduler applied: %s", msg)
+                    _sched_last_sig = sig
+                _sched_was_enabled = True
+            else:
+                if _sched_was_enabled:                # just turned off — tidy up
+                    _sched_cleanup()
+                    _log_control("scheduler", {}, True, "Scheduler off — cleared scratch slots")
+                    log.warning("Scheduler disabled — scratch slots cleared")
+                    _sched_was_enabled = False
+                _sched_last_sig = None                # re-enabling re-applies from scratch
+        except Exception as exc:
+            log.error("Scheduler loop: %s", exc)
+            delay = 60                                # back off on error (don't spam)
+        time.sleep(delay)
+
+
 # ── Flask app ──────────────────────────────────────────────────────────────────
 # Passing instance_path explicitly stops Flask from calling its auto-discovery
 # (auto_find_instance_path → pkgutil.get_loader), which an older Flask removed-
@@ -2265,6 +2411,9 @@ if __name__ == "__main__":
 
     t = threading.Thread(target=_data_loop, daemon=True)
     t.start()
+
+    # Scheduler block engine — inert until the master switch is enabled.
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
 
     # Delayed first update check — runs 30s after startup so the inverter
     # connection settles before we make an outbound request.
