@@ -82,6 +82,42 @@ def test_wrap_midnight_charge_picked():
     assert ds._sched_desired_state(rules, TUE, 30)["mode"] == "charge"
 
 
+# ── _sched_compute_writes (hardware register mapping) ─────────────────────────
+def _gen2():
+    ds._detect_inverter = lambda: (0x32, "single_phase_2slot", "Gen2")  # reserved slot 2
+
+def test_compute_charge_uses_slot2_never_slot1():
+    _gen2()
+    _, w, _ = ds._sched_compute_writes({"mode": "charge", "target_soc": 90,
+                                        "start": "00:30", "end": "04:30"})
+    assert (116, 90) in w and (31, 30) in w and (32, 430) in w and (96, 1) in w
+    assert all(reg not in (94, 95, 56, 57) for reg, _ in w)   # slot 1 untouched
+
+def test_compute_export():
+    _gen2()
+    _, w, _ = ds._sched_compute_writes({"mode": "export", "start": "16:00", "end": "19:00"})
+    assert (44, 1600) in w and (45, 1900) in w and (27, 0) in w and (59, 1) in w \
+        and (31, 0) in w and (32, 0) in w
+
+def test_compute_cleanup():
+    _gen2()
+    _, w, _ = ds._sched_compute_writes({"mode": "cleanup"})
+    assert w == [(31, 0), (32, 0), (44, 0), (45, 0), (96, 0)]
+
+def test_compute_baseline_eco():
+    _gen2(); ds.SCHEDULER_BASELINE = "eco"
+    _, w, _ = ds._sched_compute_writes({"mode": "baseline"})
+    assert (96, 0) in w and (59, 1) in w and (27, 1) in w
+
+def test_compute_rejects_three_phase():
+    ds._detect_inverter = lambda: (0x11, "three_phase_aio", "AIO")
+    try:
+        ds._sched_compute_writes({"mode": "baseline"})
+        assert False, "should have raised"
+    except RuntimeError:
+        pass
+
+
 def _run():
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

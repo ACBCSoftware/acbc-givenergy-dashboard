@@ -907,6 +907,9 @@ def _run_listen(st: dict):
                 if now - last_poke >= POLL_INTERVAL:
                     _send_pokes(s)
                     last_poke = now
+                # Apply any pending scheduler writes on THIS socket — cooperative,
+                # no second connection, so the listen stream stays stable.
+                _sched_drain_pending(s, buf)
                 # Read whatever has arrived
                 try:
                     chunk = s.recv(8192)
@@ -1624,9 +1627,11 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 
 
 # ── Scheduler engine (app-held 48 half-hour block reconciler) ─────────────────
-# Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state)
-# is pure and unit-tested; only _sched_apply_desired / _sched_cleanup touch the
-# inverter, and the loop only runs writes while the master switch is on.
+# Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state /
+# _sched_compute_writes) is pure and unit-tested. The scheduler thread only DECIDES
+# what should be true; the listen loop performs the register writes on its own socket
+# (_sched_drain_pending → _hr_write_on), so there is never a competing connection to
+# disrupt the Gen2 listen stream. Writes happen only while the master switch is on.
 
 # Action precedence when several rules cover the same block.
 _SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
@@ -1676,97 +1681,159 @@ def _sched_load_rules() -> list:
              "end": r["end_hhmm"], "days_mask": r["days_mask"],
              "target_soc": r["target_soc"]} for r in rows]
 
-def _sched_apply_desired(desired: dict) -> str:
-    """Translate desired state into inverter writes. Returns a summary string.
-    Uses the profile's reserved (last) slot as scratch; clears it when not needed
-    so slot 1 stays free for other integrations. Raises on unsupported inverters."""
+def _sched_compute_writes(desired: dict):
+    """Pure-ish: translate a desired-state dict into (slave, [(reg,val),...], summary).
+    Does NO socket I/O beyond the cached _detect_inverter() — the listen loop performs
+    the actual writes on its own socket. Uses the profile's reserved (last) slot as
+    scratch and clears it when idle, so slot 1 stays free for other integrations.
+    The register writes are absolute sets, so re-applying the whole list is idempotent
+    (a partially-applied list self-heals on the next retry). Raises on unsupported HW."""
     slave, profile, model = _detect_inverter()
     if profile not in _SCHED_SLOT:
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
     slot = _SCHED_SLOT[profile]                       # 1-based
     c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
     d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
-
-    def wr(reg, val): _hr_write(slave, reg, val)
-    def set_charge(s, e):    wr(c_start, _hhmm_to_bcd(s)); wr(c_end, _hhmm_to_bcd(e))
-    def set_discharge(s, e): wr(d_start, _hhmm_to_bcd(s)); wr(d_end, _hhmm_to_bcd(e))
-    def clear_charge():    set_charge("00:00", "00:00")
-    def clear_discharge(): set_discharge("00:00", "00:00")
-
+    bcd = _hhmm_to_bcd
     mode = desired["mode"]
+
     if mode == "charge":
-        wr(_HR["CHARGE_TARGET_SOC"], desired["target_soc"])
-        set_charge(desired["start"], desired["end"])
-        wr(_HR["ENABLE_CHARGE"], 1)
-        clear_discharge()
-        return f"Charge to {desired['target_soc']}% ({desired['start']}–{desired['end']})"
-    if mode == "export":
-        set_discharge(desired["start"], desired["end"])
-        wr(_HR["BATTERY_POWER_MODE"], 0)              # 0 = max power / export
-        wr(_HR["ENABLE_DISCHARGE"], 1)
-        clear_charge()
-        return f"Export ({desired['start']}–{desired['end']})"
-    if mode == "hold":
-        wr(_HR["ENABLE_CHARGE"], 0)
-        wr(_HR["ENABLE_DISCHARGE"], 0)
-        clear_charge(); clear_discharge()
-        return "Hold charge (no discharge)"
-    # baseline — clear our scratch slots, then assert the chosen normal mode
-    clear_charge(); clear_discharge()
-    wr(_HR["ENABLE_CHARGE"], 0)
-    if SCHEDULER_BASELINE == "storage":
-        wr(_HR["ENABLE_DISCHARGE"], 0)
-        return "Baseline: Storage (hold charge)"
-    wr(_HR["ENABLE_DISCHARGE"], 1)
-    wr(_HR["BATTERY_POWER_MODE"], 1)                  # 1 = demand / self-use
-    return "Baseline: Eco"
+        w = [(_HR["CHARGE_TARGET_SOC"], desired["target_soc"]),
+             (c_start, bcd(desired["start"])), (c_end, bcd(desired["end"])),
+             (_HR["ENABLE_CHARGE"], 1),
+             (d_start, 0), (d_end, 0)]
+        summary = f"Charge to {desired['target_soc']}% ({desired['start']}–{desired['end']})"
+    elif mode == "export":
+        w = [(d_start, bcd(desired["start"])), (d_end, bcd(desired["end"])),
+             (_HR["BATTERY_POWER_MODE"], 0),          # 0 = max power / export
+             (_HR["ENABLE_DISCHARGE"], 1),
+             (c_start, 0), (c_end, 0)]
+        summary = f"Export ({desired['start']}–{desired['end']})"
+    elif mode == "hold":
+        w = [(_HR["ENABLE_CHARGE"], 0), (_HR["ENABLE_DISCHARGE"], 0),
+             (c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0)]
+        summary = "Hold charge (no discharge)"
+    elif mode == "cleanup":                           # master switched off
+        w = [(c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0), (_HR["ENABLE_CHARGE"], 0)]
+        summary = "Off — cleared scratch slots"
+    else:                                             # baseline
+        w = [(c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0), (_HR["ENABLE_CHARGE"], 0)]
+        if SCHEDULER_BASELINE == "storage":
+            w.append((_HR["ENABLE_DISCHARGE"], 0))
+            summary = "Baseline: Storage (hold charge)"
+        else:
+            w += [(_HR["ENABLE_DISCHARGE"], 1), (_HR["BATTERY_POWER_MODE"], 1)]  # 1 = demand
+            summary = "Baseline: Eco"
+    return slave, w, summary
 
-def _sched_cleanup():
-    """Run when the scheduler is switched off: clear our scratch slots and stop
-    any forced charge, leaving the rest of the inverter as the user left it."""
-    slave, profile, model = _detect_inverter()
-    if profile not in _SCHED_SLOT:
+
+class _DongleBusy(Exception):
+    """Inverter dongle returned the 'busy' exception (0x43) — retry on a later cycle."""
+
+
+def _hr_write_on(sock, buf: bytearray, slave: int, reg: int, value: int,
+                 timeout: float = 3.0) -> None:
+    """Write a single holding register over an EXISTING socket (the listen loop's),
+    reading the echo inline via the shared frame buffer. Opening NO second connection
+    is the whole point: it keeps inverter access serialised through one socket, so the
+    Gen2 listen stream is never disrupted. Raises _DongleBusy on the busy exception,
+    ValueError on echo mismatch, TimeoutError if no echo arrives."""
+    inner   = bytes([slave, 0x06]) + reg.to_bytes(2, "big") + value.to_bytes(2, "big")
+    payload = b"AB1234G567" + b"\x00" * 7 + b"\x08" + inner + _crc16(inner)
+    frame   = b"\x59\x59\x00\x01" + (len(payload) + 2).to_bytes(2, "big") + b"\x01\x02" + payload
+    sock.sendall(frame)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            continue
+        if not chunk:
+            raise ConnectionError("socket closed during scheduler write")
+        buf.extend(chunk)
+        for f in _pop_data_frames(buf):
+            if len(f) < 29 or f[7] != 0x02:
+                continue
+            if f[27] == 0x86 and f[28] == _DONGLE_BUSY_CODE:
+                raise _DongleBusy(f"reg={reg}")
+            if len(f) < 42 or f[27] != 0x06:
+                continue                              # not a write echo (e.g. live broadcast)
+            echo_reg = (f[38] << 8) | f[39]
+            echo_val = (f[40] << 8) | f[41]
+            if echo_reg == reg and echo_val == value:
+                return
+            raise ValueError(f"scheduler write echo mismatch reg={echo_reg} val={echo_val} "
+                             f"(expected reg={reg} val={value})")
+    raise TimeoutError(f"scheduler write echo timeout reg={reg} val={value}")
+
+
+def _sched_drain_pending(sock, buf: bytearray) -> None:
+    """Called by the listen loop each cycle. If the scheduler thread has queued a
+    desired state, apply its writes on THIS socket and record the result. On busy or
+    failure it leaves _sched_applied_sig unchanged so the scheduler thread re-queues
+    and we retry on a later cycle (writes are idempotent absolute sets)."""
+    global _sched_applied_sig, _sched_pending
+    with _sched_pending_lock:
+        desired = _sched_pending
+        _sched_pending = None
+    if desired is None:
         return
-    slot = _SCHED_SLOT[profile]
-    c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
-    d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
-    for reg in (c_start, c_end, d_start, d_end):
-        _hr_write(slave, reg, 0)
-    _hr_write(slave, _HR["ENABLE_CHARGE"], 0)
+    try:
+        slave, writes, summary = _sched_compute_writes(desired)
+    except Exception as exc:
+        log.warning("Scheduler: %s", exc)
+        return
+    try:
+        for reg, val in writes:
+            _hr_write_on(sock, buf, slave, reg, val)
+    except _DongleBusy:
+        log.info("Scheduler: dongle busy — will retry next cycle")
+        return                                        # applied_sig unchanged → re-queued
+    except Exception as exc:
+        log.warning("Scheduler apply failed: %s", exc)
+        return
+    _sched_applied_sig = json.dumps(desired, sort_keys=True)
+    _log_control("scheduler", desired, True, "Scheduler: " + summary)
+    log.warning("Scheduler applied: %s", summary)
 
-_sched_last_sig    = None
-_sched_was_enabled = False
+# Hand-off between the scheduler thread (decides what should be true) and the listen
+# loop (owns the socket, performs the writes). Single-slot: latest desired wins.
+_sched_pending       = None
+_sched_pending_lock  = threading.Lock()
+_sched_applied_sig   = None
+_sched_was_enabled   = False
+_CLEANUP_DESIRED     = {"mode": "cleanup"}
+_CLEANUP_SIG         = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
 def _scheduler_loop():
-    """Apply the active block's instruction whenever the desired state changes
-    (and on startup, so a reboot self-corrects within one block). Gated by the
-    master switch; ticks every 15s so a half-hour boundary is caught quickly."""
-    global _sched_last_sig, _sched_was_enabled
+    """Evaluate the active block every 15s and hand the desired state to the listen
+    loop (which performs the writes on its own socket — see _sched_drain_pending).
+    Queues on signature change and on startup, so a reboot self-corrects within one
+    block. Master-off triggers a one-shot cleanup, then hands the inverter back.
+    This thread NEVER writes to the inverter itself — that is what stopped the Gen2
+    listen stream from being disrupted by competing sockets."""
+    global _sched_was_enabled, _sched_applied_sig, _sched_pending
     while True:
-        delay = 15
         try:
+            want = None
             if SCHEDULER_ENABLED:
                 now = time.localtime()
                 block_min = ((now.tm_hour * 60 + now.tm_min) // 30) * 30
-                desired   = _sched_desired_state(_sched_load_rules(), now.tm_wday, block_min)
-                sig = json.dumps(desired, sort_keys=True)
-                if sig != _sched_last_sig:
-                    msg = _sched_apply_desired(desired)
-                    _log_control("scheduler", desired, True, "Scheduler: " + msg)
-                    log.warning("Scheduler applied: %s", msg)
-                    _sched_last_sig = sig
+                want = _sched_desired_state(_sched_load_rules(), now.tm_wday, block_min)
                 _sched_was_enabled = True
-            else:
-                if _sched_was_enabled:                # just turned off — tidy up
-                    _sched_cleanup()
-                    _log_control("scheduler", {}, True, "Scheduler off — cleared scratch slots")
-                    log.warning("Scheduler disabled — scratch slots cleared")
+            elif _sched_was_enabled:
+                # Master just switched off: apply cleanup once, then hand off (want=None).
+                if _sched_applied_sig == _CLEANUP_SIG:
                     _sched_was_enabled = False
-                _sched_last_sig = None                # re-enabling re-applies from scratch
+                    _sched_applied_sig = None         # re-enabling later re-applies fresh
+                else:
+                    want = _CLEANUP_DESIRED
+            if want is not None and json.dumps(want, sort_keys=True) != _sched_applied_sig:
+                with _sched_pending_lock:
+                    _sched_pending = want
         except Exception as exc:
             log.error("Scheduler loop: %s", exc)
-            delay = 60                                # back off on error (don't spam)
-        time.sleep(delay)
+        time.sleep(15)
 
 
 # ── Flask app ──────────────────────────────────────────────────────────────────
