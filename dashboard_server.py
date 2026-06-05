@@ -85,6 +85,15 @@ BACKUP_KEEP_DAYS = _cfg.getint("backup",     "keep_days", fallback=7)
 
 CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 
+# ── Scheduler (app-held, 48 half-hour block engine — see BACKLOG.md) ──────────
+# Master on/off + the baseline mode asserted in every unscheduled block.
+# Per-rule schedule rows live in the `schedules` DB table, not in config.
+SCHEDULER_ENABLED  = _cfg.getboolean("scheduler", "enabled", fallback=False)
+SCHEDULER_BASELINE = _cfg.get("scheduler", "baseline", fallback="eco").strip().lower()
+_SCHED_BASELINES   = ("eco", "storage")   # eco = discharge-on/grid-charge-off
+if SCHEDULER_BASELINE not in _SCHED_BASELINES:
+    SCHEDULER_BASELINE = "eco"
+
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
@@ -252,6 +261,21 @@ def init_db():
                 ts      INTEGER NOT NULL,
                 kind    TEXT    NOT NULL,   -- 'status' | 'fault' | 'info'
                 message TEXT    NOT NULL
+            )
+        """)
+        # Scheduler rules (app-held 48-block engine — see BACKLOG.md).
+        # days_mask: 7-bit, bit0=Mon … bit6=Sun (127 = every day).
+        # target_soc applies to 'charge' only (NULL otherwise).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schedules (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                action     TEXT    NOT NULL,           -- 'charge' | 'hold' | 'export'
+                start_hhmm TEXT    NOT NULL,           -- 'HH:MM' (snaps to 30-min grid)
+                end_hhmm   TEXT    NOT NULL,           -- 'HH:MM' (snaps to 30-min grid)
+                days_mask  INTEGER NOT NULL DEFAULT 127,
+                target_soc INTEGER,
+                created    INTEGER NOT NULL
             )
         """)
         # Migration: add temperature columns if upgrading from an older version
@@ -1317,6 +1341,17 @@ _SLOT_COUNT = {
     "gateway_aio":           2,
 }
 
+# Scheduler's reserved scratch slot (1-based) per profile — the LAST slot, so
+# slot 1 stays free for other integrations (Predbat, GivEnergy app). The block
+# engine rewrites this slot each Charge/Export block and clears it when idle.
+# three_phase_aio is omitted on purpose — control is read-only there, so the
+# scheduler is disabled for it.
+_SCHED_SLOT = {
+    "single_phase_2slot":    2,
+    "single_phase_extended": 10,
+    "gateway_aio":           2,
+}
+
 
 # ── State reader ──────────────────────────────────────────────────────────────
 
@@ -1595,6 +1630,126 @@ def post_control():
     command = data.get("command", "")
     params  = data.get("params", {})
     return jsonify(_execute_control(command, params))
+
+# ── Scheduler API (app-held 48-block engine — see BACKLOG.md) ─────────────────
+# Step 1: storage + CRUD only. The block-execution thread arrives in step 2.
+
+_SCHED_ACTIONS = ("charge", "hold", "export")
+
+def _snap_hhmm(s: str) -> str:
+    """Validate 'HH:MM' and snap to the 30-minute grid (00 or 30)."""
+    h, m = str(s).split(":")
+    h, m = int(h), int(m)
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"Invalid time: {s}")
+    m = 0 if m < 30 else 30
+    return f"{h:02d}:{m:02d}"
+
+def _rule_row(r) -> dict:
+    return {
+        "id":         r["id"],
+        "enabled":    bool(r["enabled"]),
+        "action":     r["action"],
+        "start":      r["start_hhmm"],
+        "end":        r["end_hhmm"],
+        "days_mask":  r["days_mask"],
+        "target_soc": r["target_soc"],
+    }
+
+def _validate_rule(data: dict) -> dict:
+    """Validate/normalise an incoming rule. Returns clean field dict or raises."""
+    action = str(data.get("action", "")).lower()
+    if action not in _SCHED_ACTIONS:
+        raise ValueError(f"Unknown action '{action}' (charge|hold|export)")
+    start = _snap_hhmm(data.get("start", ""))
+    end   = _snap_hhmm(data.get("end", ""))
+    if start == end:
+        raise ValueError("Start and end must differ (use 00:00–00:00 spanning is not allowed)")
+    days_mask = int(data.get("days_mask", 127))
+    if not 1 <= days_mask <= 127:
+        raise ValueError("days_mask must select at least one day (1–127)")
+    target_soc = None
+    if action == "charge":
+        target_soc = max(4, min(100, int(data.get("target_soc", 100))))
+    return {"action": action, "start": start, "end": end,
+            "days_mask": days_mask, "target_soc": target_soc}
+
+@app.route("/api/schedules", methods=["GET"])
+def get_schedules():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    with _db() as conn:
+        rows = [_rule_row(r) for r in conn.execute(
+            "SELECT * FROM schedules ORDER BY start_hhmm, id")]
+    return jsonify({
+        "ok":            True,
+        "master_enabled": SCHEDULER_ENABLED,
+        "baseline":       SCHEDULER_BASELINE,
+        "rules":          rows,
+    })
+
+@app.route("/api/schedules", methods=["POST"])
+def save_schedule():
+    """Create (no id) or update (id present) a single rule."""
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data = request.get_json(force=True) or {}
+    try:
+        clean = _validate_rule(data)
+    except (ValueError, KeyError, TypeError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    enabled = 1 if data.get("enabled", True) else 0
+    rid = data.get("id")
+    with _db() as conn:
+        if rid:
+            conn.execute(
+                "UPDATE schedules SET enabled=?, action=?, start_hhmm=?, end_hhmm=?, "
+                "days_mask=?, target_soc=? WHERE id=?",
+                (enabled, clean["action"], clean["start"], clean["end"],
+                 clean["days_mask"], clean["target_soc"], int(rid)))
+        else:
+            cur = conn.execute(
+                "INSERT INTO schedules (enabled, action, start_hhmm, end_hhmm, "
+                "days_mask, target_soc, created) VALUES (?,?,?,?,?,?,?)",
+                (enabled, clean["action"], clean["start"], clean["end"],
+                 clean["days_mask"], clean["target_soc"], int(time.time())))
+            rid = cur.lastrowid
+        conn.commit()
+    return jsonify({"ok": True, "id": rid})
+
+@app.route("/api/schedules/<int:rid>", methods=["DELETE"])
+def delete_schedule(rid):
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    with _db() as conn:
+        conn.execute("DELETE FROM schedules WHERE id=?", (rid,))
+        conn.commit()
+    return jsonify({"ok": True})
+
+@app.route("/api/schedules/config", methods=["POST"])
+def save_schedule_config():
+    """Set the master on/off switch and the baseline mode."""
+    global SCHEDULER_ENABLED, SCHEDULER_BASELINE
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data = request.get_json(force=True) or {}
+    cfg  = configparser.ConfigParser()
+    cfg.read(Path(__file__).parent / "config.ini")
+    if not cfg.has_section("scheduler"):
+        cfg.add_section("scheduler")
+    if "master_enabled" in data:
+        SCHEDULER_ENABLED = bool(data["master_enabled"])
+        cfg.set("scheduler", "enabled", "yes" if SCHEDULER_ENABLED else "no")
+    if "baseline" in data:
+        base = str(data["baseline"]).lower()
+        if base in _SCHED_BASELINES:
+            SCHEDULER_BASELINE = base
+            cfg.set("scheduler", "baseline", base)
+    with open(Path(__file__).parent / "config.ini", "w") as f:
+        cfg.write(f)
+    return jsonify({"ok": True,
+                    "master_enabled": SCHEDULER_ENABLED,
+                    "baseline":       SCHEDULER_BASELINE})
 
 @app.route("/api/logs")
 def get_logs():

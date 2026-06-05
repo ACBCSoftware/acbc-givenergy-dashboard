@@ -424,6 +424,61 @@ html,body{
 /* Chart colour pickers */
 input[type="color"].color-swatch{width:44px!important;height:34px!important;
   padding:2px 4px!important;border-radius:8px!important;cursor:pointer!important}
+
+/* ── Scheduler panel ────────────────────────────── */
+#sched-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#sched-top-row{display:flex;align-items:center;gap:10px;padding:14px 16px 6px}
+#sched-title{font-size:.95rem;font-weight:700;color:var(--text)}
+#sched-body{flex:1;min-height:0;overflow-y:auto;padding:6px 16px 18px}
+.sched-hint{font-size:.72rem;color:var(--muted);line-height:1.45;margin-top:6px}
+#sched-baseline{background:var(--bg-card);border:1px solid var(--border);color:var(--text);
+  border-radius:8px;padding:6px 8px;font-size:.8rem}
+/* master on/off switch */
+.sw{position:relative;display:inline-block;width:46px;height:26px}
+.sw input{opacity:0;width:0;height:0}
+.sw .track{position:absolute;inset:0;background:var(--bg-card);border:1px solid var(--border);
+  border-radius:26px;transition:.2s;cursor:pointer}
+.sw .track::before{content:"";position:absolute;height:18px;width:18px;left:3px;top:3px;
+  background:var(--muted);border-radius:50%;transition:.2s}
+.sw input:checked + .track{background:rgba(74,222,128,.25);border-color:#4ade80}
+.sw input:checked + .track::before{transform:translateX(20px);background:#4ade80}
+/* rule cards */
+.sched-rule{display:flex;align-items:center;gap:10px;background:var(--bg-card);
+  border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:8px;cursor:pointer}
+.sched-rule.off{opacity:.5}
+.sched-rule .sr-main{flex:1;min-width:0}
+.sched-rule .sr-action{font-size:.85rem;font-weight:700}
+.sched-rule .sr-when{font-size:.72rem;color:var(--muted);margin-top:2px}
+.sr-pill{display:inline-block;font-size:.62rem;font-weight:700;padding:2px 7px;border-radius:20px;
+  text-transform:uppercase;letter-spacing:.03em}
+.sr-charge{background:rgba(129,140,248,.2);color:#a5b4fc}
+.sr-hold{background:rgba(245,158,11,.2);color:#fbbf24}
+.sr-export{background:rgba(74,222,128,.2);color:#86efac}
+#sched-empty{font-size:.8rem;color:var(--muted);text-align:center;padding:16px 0}
+/* editor modal */
+#sched-editor{display:none;position:fixed;inset:0;z-index:200;
+  background:rgba(6,13,28,.88);align-items:center;justify-content:center}
+#sched-editor.open{display:flex}
+#se-box{background:var(--bg-top);border:1px solid var(--border);border-radius:18px;
+  padding:20px;width:min(340px,92vw);max-height:90vh;overflow-y:auto;
+  display:flex;flex-direction:column;gap:12px}
+#se-title{font-size:.9rem;font-weight:700;text-align:center}
+.se-field{display:flex;flex-direction:column;gap:5px}
+.se-field > label{font-size:.72rem;color:var(--muted);font-weight:600}
+.se-field select,.se-field input[type="time"]{background:var(--bg-card);border:1px solid var(--border);
+  color:var(--text);border-radius:8px;padding:8px;font-size:.85rem}
+.se-times{display:flex;gap:10px}
+.se-times .se-field{flex:1}
+.se-days{display:flex;gap:5px;flex-wrap:wrap}
+.se-day{flex:1;min-width:34px;text-align:center;font-size:.7rem;font-weight:700;padding:7px 0;
+  border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--muted);cursor:pointer;user-select:none}
+.se-day.on{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
+#se-soc-val{font-weight:700;color:var(--text)}
+#se-btn-row{display:flex;gap:10px;margin-top:4px}
+.se-btn{flex:1;border-radius:12px;border:1px solid;padding:11px;font-size:.83rem;font-weight:600;cursor:pointer}
+#se-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
+#se-save{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
+#se-delete{background:rgba(248,113,113,.15);border-color:#f87171;color:#f87171;flex:0 0 auto;padding:11px 14px}
 </style>
 </head>
 <body>
@@ -709,6 +764,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         </div>
       </div>
 
+      <!-- Schedule entry -->
+      <div class="ctrl-section">
+        <button class="ctrl-btn" onclick="showView('schedule')">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align:-2px;margin-right:6px"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.4"/><path d="M8 4.5V8l2.4 1.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Schedule
+        </button>
+      </div>
+
       <!-- Mode -->
       <div class="ctrl-section">
         <div class="ctrl-heading">Operating Mode</div>
@@ -824,6 +887,68 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
     <div id="logs-body">
       <div id="logs-empty">Loading…</div>
+    </div>
+  </div>
+
+  <!-- Schedule panel -->
+  <div id="sched-panel">
+    <div id="sched-top-row">
+      <button id="sched-back" class="hist-back-style">&#8592; Back</button>
+      <span id="sched-title">&#9201; Schedule</span>
+    </div>
+    <div id="sched-body">
+      <div class="ctrl-section" style="border-bottom:1px solid var(--border);padding-bottom:10px">
+        <div class="ctrl-row">
+          <span class="ctrl-label">Scheduler</span>
+          <label class="sw"><input type="checkbox" id="sched-master"><span class="track"></span></label>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Baseline mode</span>
+          <select id="sched-baseline">
+            <option value="eco">Eco (discharge on, no grid charge)</option>
+            <option value="storage">Storage (hold charge)</option>
+          </select>
+        </div>
+        <div class="sched-hint">When on, rules are applied at every half-hour. Times with no rule fall back to the baseline mode. The scheduler borrows the inverter's last time slot as scratch space, leaving slot&nbsp;1 free for other apps.</div>
+      </div>
+      <div class="ctrl-section">
+        <div class="ctrl-heading">Rules</div>
+        <div id="sched-list"></div>
+        <button class="ctrl-btn amber" id="sched-add" style="margin-top:4px">&#65291; Add rule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Schedule rule editor modal -->
+  <div id="sched-editor">
+    <div id="se-box">
+      <div id="se-title">Add rule</div>
+      <div class="se-field">
+        <label>Action</label>
+        <select id="se-action" onchange="seActionChanged()">
+          <option value="charge">Charge battery to target</option>
+          <option value="hold">Hold charge (no discharge)</option>
+          <option value="export">Export / force discharge</option>
+        </select>
+      </div>
+      <div class="se-times">
+        <div class="se-field"><label>From</label><input type="time" id="se-start" step="1800" value="00:30"></div>
+        <div class="se-field"><label>To</label><input type="time" id="se-end" step="1800" value="04:30"></div>
+      </div>
+      <div class="se-field">
+        <label>Days</label>
+        <div class="se-days" id="se-days"></div>
+      </div>
+      <div class="se-field" id="se-soc-field">
+        <label>Charge to <span id="se-soc-val">100%</span></label>
+        <input type="range" id="se-soc" min="4" max="100" value="100"
+          oninput="$('se-soc-val').textContent=this.value+'%'">
+      </div>
+      <div id="se-btn-row">
+        <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
+        <button class="se-btn" id="se-cancel" onclick="closeEditor()">Cancel</button>
+        <button class="se-btn" id="se-save" onclick="saveRule()">Save</button>
+      </div>
     </div>
   </div>
 
@@ -1678,6 +1803,145 @@ function _esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+// Step 1: rule storage + CRUD UI only. The half-hour block engine runs server-side.
+const SCHED_DAYS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];  // bit0=Mon … bit6=Sun
+const SR_LABEL   = { charge:'Charge', hold:'Hold', export:'Export' };
+let _schedRules  = [];
+let _editingId   = null;   // null = adding a new rule
+
+function _schedHeaders() {
+  return { 'Content-Type':'application/json', 'X-Admin-Password':_adminPw };
+}
+
+function _daysText(mask) {
+  if (mask === 127) return 'Every day';
+  if (mask === 31)  return 'Weekdays';
+  if (mask === 96)  return 'Weekends';
+  return SCHED_DAYS.filter((_, i) => mask & (1 << i)).join(', ') || 'Never';
+}
+
+async function loadSchedules() {
+  const list = $('sched-list');
+  list.innerHTML = '<div id="sched-empty">Loading…</div>';
+  try {
+    const r = await fetch('/api/schedules', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { showView('live'); return; }
+    const d = await r.json();
+    _schedRules = d.rules || [];
+    $('sched-master').checked  = !!d.master_enabled;
+    $('sched-baseline').value  = d.baseline || 'eco';
+    renderSchedules();
+  } catch(e) {
+    list.innerHTML = '<div id="sched-empty">Could not load schedule: ' + _esc(e.message) + '</div>';
+  }
+}
+
+function renderSchedules() {
+  const list = $('sched-list');
+  if (!_schedRules.length) {
+    list.innerHTML = '<div id="sched-empty">No rules yet.<br>Tap “Add rule” to create one.</div>';
+    return;
+  }
+  list.innerHTML = _schedRules.map(rl => {
+    const extra = rl.action === 'charge' ? ` to ${rl.target_soc}%` : '';
+    return `
+      <div class="sched-rule ${rl.enabled ? '' : 'off'}" onclick="openEditor(${rl.id})">
+        <div class="sr-main">
+          <div class="sr-action"><span class="sr-pill sr-${rl.action}">${SR_LABEL[rl.action]}</span>${_esc(extra)}</div>
+          <div class="sr-when">${rl.start}–${rl.end} · ${_daysText(rl.days_mask)}</div>
+        </div>
+        <label class="sw" onclick="event.stopPropagation()">
+          <input type="checkbox" ${rl.enabled ? 'checked' : ''} onchange="toggleRule(${rl.id}, this.checked)">
+          <span class="track"></span>
+        </label>
+      </div>`;
+  }).join('');
+}
+
+function _buildDayChips(mask) {
+  $('se-days').innerHTML = SCHED_DAYS.map((d, i) =>
+    `<div class="se-day ${mask & (1 << i) ? 'on' : ''}" data-bit="${i}"
+       onclick="this.classList.toggle('on')">${d[0]}</div>`).join('');
+}
+function _collectDaysMask() {
+  let mask = 0;
+  document.querySelectorAll('#se-days .se-day.on').forEach(el => mask |= (1 << +el.dataset.bit));
+  return mask;
+}
+
+function seActionChanged() {
+  $('se-soc-field').style.display = $('se-action').value === 'charge' ? '' : 'none';
+}
+
+function openEditor(id) {
+  _editingId = id ?? null;
+  const rl = _editingId != null ? _schedRules.find(r => r.id === _editingId) : null;
+  $('se-title').textContent      = rl ? 'Edit rule' : 'Add rule';
+  $('se-delete').style.display   = rl ? '' : 'none';
+  $('se-action').value           = rl ? rl.action : 'charge';
+  $('se-start').value            = rl ? rl.start  : '00:30';
+  $('se-end').value              = rl ? rl.end    : '04:30';
+  const soc = (rl && rl.target_soc != null) ? rl.target_soc : 100;
+  $('se-soc').value              = soc;
+  $('se-soc-val').textContent    = soc + '%';
+  _buildDayChips(rl ? rl.days_mask : 127);
+  seActionChanged();
+  $('sched-editor').classList.add('open');
+}
+function closeEditor() { $('sched-editor').classList.remove('open'); }
+
+async function saveRule() {
+  const mask = _collectDaysMask();
+  if (!mask) { alert('Pick at least one day.'); return; }
+  const body = {
+    action:    $('se-action').value,
+    start:     $('se-start').value,
+    end:       $('se-end').value,
+    days_mask: mask,
+    target_soc: +$('se-soc').value,
+    enabled:   true,
+  };
+  if (_editingId != null) {
+    const cur = _schedRules.find(r => r.id === _editingId);
+    body.id = _editingId;
+    if (cur) body.enabled = cur.enabled;   // editing keeps the on/off state
+  }
+  const r = await fetch('/api/schedules', { method:'POST', headers:_schedHeaders(), body:JSON.stringify(body) });
+  const d = await r.json();
+  if (!d.ok) { alert(d.error || 'Could not save rule.'); return; }
+  closeEditor();
+  loadSchedules();
+}
+
+async function deleteRule() {
+  if (_editingId == null) return;
+  if (!confirm('Delete this rule?')) return;
+  await fetch('/api/schedules/' + _editingId, { method:'DELETE', headers:{'X-Admin-Password':_adminPw} });
+  closeEditor();
+  loadSchedules();
+}
+
+async function toggleRule(id, enabled) {
+  const rl = _schedRules.find(r => r.id === id);
+  if (!rl) return;
+  await fetch('/api/schedules', { method:'POST', headers:_schedHeaders(),
+    body: JSON.stringify({ ...rl, enabled }) });
+  rl.enabled = enabled;
+  renderSchedules();
+}
+
+async function _saveSchedConfig() {
+  await fetch('/api/schedules/config', { method:'POST', headers:_schedHeaders(),
+    body: JSON.stringify({ master_enabled: $('sched-master').checked, baseline: $('sched-baseline').value }) });
+}
+
+$('sched-back').addEventListener('click', () => showView('control'));
+$('sched-add').addEventListener('click', () => openEditor(null));
+$('sched-master').addEventListener('change', _saveSchedConfig);
+$('sched-baseline').addEventListener('change', _saveSchedConfig);
+$('sched-editor').addEventListener('click', e => { if (e.target.id === 'sched-editor') closeEditor(); });
+
 // ── Settings + password ───────────────────────────────────────────────────────
 let _weatherConfigured = false;
 let _adminPw = '';   // held in memory for the session only
@@ -1940,6 +2204,7 @@ function showView(v) {
   $('settings-panel').style.display = v==='settings'? 'flex' : 'none';
   $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
+  $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
   $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
   $('weather-badge').style.display  = (live && _weatherConfigured) ? '' : 'none';
   $('ver-bar').style.display        = live         ? '' : 'none';
@@ -1948,6 +2213,7 @@ function showView(v) {
   if (v==='settings') loadSettings();
   if (v==='control')  loadControlState();
   if (v==='logs')     loadLogs();
+  if (v==='schedule') loadSchedules();
   if (v==='hourly')   requestAnimationFrame(drawHourlyChart);
 }
 
