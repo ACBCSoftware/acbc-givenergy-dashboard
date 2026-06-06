@@ -2776,10 +2776,6 @@ function setPowerMode(on) {
   $('hourly-series-row').style.display = on ? 'none' : '';
   $('power-series-row').style.display  = on ? 'flex' : 'none';
   if (on) {
-    // Try to lock orientation to landscape (works for installed PWA)
-    if (screen.orientation && screen.orientation.lock) {
-      screen.orientation.lock('landscape').catch(() => {});
-    }
     _updateRotateHint();
     if (_powerDay !== hourlyDay) loadPowerData();
     else requestAnimationFrame(drawPowerChart);
