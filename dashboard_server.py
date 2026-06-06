@@ -360,9 +360,19 @@ _DEBOUNCE = {
 _zero_streak: dict = {}
 _last_good:   dict = {}
 
+# SOC spike filter — maximum believable SOC change in one poll.
+# At max charge rate ~2600 W on a 9.5 kWh battery, SOC can change at most
+# ~0.08 % per 10 s poll.  A threshold of 5 % is ~60× the physical maximum,
+# so this will never suppress real movement while catching corrupt IR59 reads.
+_SOC_MAX_DELTA = 5
+_last_soc: int | None = None
+
 def _smooth(data: dict) -> dict:
-    """Return a copy of data with brief zero-blips suppressed."""
+    """Return a copy of data with brief zero-blips and SOC spikes suppressed."""
+    global _last_soc
     out = dict(data)
+
+    # Zero-blip debounce for power fields
     for field, needed in _DEBOUNCE.items():
         v = out.get(field) or 0
         if v == 0:
@@ -373,6 +383,17 @@ def _smooth(data: dict) -> dict:
         else:
             _zero_streak[field] = 0
             _last_good[field]   = v
+
+    # SOC spike filter — reject single-poll jumps that exceed the physical maximum
+    soc = out.get("soc")
+    if soc is not None:
+        if _last_soc is not None and abs(soc - _last_soc) > _SOC_MAX_DELTA:
+            log.warning("SOC spike suppressed: %d%% → %d%% (held at %d%%)",
+                        _last_soc, soc, _last_soc)
+            out["soc"] = _last_soc
+        else:
+            _last_soc = soc
+
     return out
 
 # ── Weather ────────────────────────────────────────────────────────────────────
