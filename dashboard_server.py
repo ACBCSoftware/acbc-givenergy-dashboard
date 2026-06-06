@@ -2485,8 +2485,8 @@ def api_power():
                                THEN -CAST(battery_w AS REAL)
                                ELSE  CAST(battery_w AS REAL) END))     AS battery_w,
                 ROUND(AVG(CASE WHEN grid_importing = 1
-                               THEN  CAST(grid_w AS REAL)
-                               ELSE -CAST(grid_w AS REAL) END))        AS grid_w,
+                               THEN -CAST(grid_w AS REAL)
+                               ELSE  CAST(grid_w AS REAL) END))        AS grid_w,
                 ROUND(AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END)) AS soc
             FROM snapshots
             WHERE date(ts, 'unixepoch', 'localtime') = ?

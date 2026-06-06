@@ -2738,7 +2738,7 @@ const POWER_SERIES = [
   { key:'solar_w',   colorPos:'#f59e0b', colorNeg:null,      posLbl:null,          negLbl:null       },
   { key:'home_w',    colorPos:'#38bdf8', colorNeg:null,      posLbl:null,          negLbl:null       },
   { key:'battery_w', colorPos:'#c084fc', colorNeg:'#818cf8', posLbl:'Discharging', negLbl:'Charging' },
-  { key:'grid_w',    colorPos:'#f87171', colorNeg:'#4ade80', posLbl:'Import',      negLbl:'Export'   },
+  { key:'grid_w',    colorPos:'#4ade80', colorNeg:'#f87171', posLbl:'Export',      negLbl:'Import'   },
 ];
 
 function _updateRotateHint() {
@@ -2979,7 +2979,7 @@ function drawPowerChart() {
       let label = s.key === 'solar_w'   ? 'Solar'
                 : s.key === 'home_w'    ? 'Home'
                 : s.key === 'battery_w' ? (v<0 ? 'Charging' : v>0 ? 'Discharging' : 'Battery')
-                :                         (v<0 ? 'Exporting' : v>0 ? 'Importing' : 'Grid');
+                :                         (v<0 ? 'Importing' : v>0 ? 'Exporting' : 'Grid');
       const col  = s.key === 'battery_w' ? (v<0 ? s.colorNeg : s.colorPos)
                  : s.key === 'grid_w'    ? (v<0 ? s.colorNeg : s.colorPos)
                  : s.colorPos;
