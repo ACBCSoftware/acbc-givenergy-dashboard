@@ -2261,7 +2261,12 @@ let histData     = [];
 let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh','bat_chg_kwh','bat_dis_kwh']);
 let currentView  = 'live';
 
+function _isTouchDevice() {
+  return window.matchMedia('(pointer: coarse)').matches || ('ontouchstart' in window);
+}
+
 function _manageOrientation(v) {
+  if (!_isTouchDevice()) return;   // desktop — no orientation enforcement at all
   const lock = (v !== 'hourly');
   // CSS overlay — always reliable regardless of device orientation API support
   document.body.classList.toggle('portrait-lock', lock);
