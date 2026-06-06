@@ -115,10 +115,6 @@ html,body{
 /* Scheduler status: green when active, red when off (set from /api/data) */
 #sched-btn.sched-on{  color:#4ade80; opacity:.95 }
 #sched-btn.sched-off{ color:#f87171; opacity:.7 }
-/* v1.8: scheduler hidden from users pending UAT. The icon is the only entry
-   point, so hiding it disables access while leaving all scheduler code, screens,
-   API and engine intact. To re-enable: delete this one rule. */
-#sched-btn{ display:none !important }
 
 /* ── Control panel ────────────────────────────── */
 #ctrl-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
@@ -486,7 +482,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 .se-day{flex:1;min-width:34px;text-align:center;font-size:.7rem;font-weight:700;padding:7px 0;
   border:1px solid var(--border);border-radius:8px;background:var(--bg-card);color:var(--muted);cursor:pointer;user-select:none}
 .se-day.on{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
-#se-soc-val{font-weight:700;color:var(--text)}
+#se-soc-val,#se-pct-val{font-weight:700;color:var(--text)}
 #se-btn-row{display:flex;gap:10px;margin-top:4px}
 .se-btn{flex:1;border-radius:12px;border:1px solid;padding:11px;font-size:.83rem;font-weight:600;cursor:pointer}
 #se-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
@@ -925,7 +921,12 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
             <option value="storage">Storage (hold charge)</option>
           </select>
         </div>
-        <div class="sched-hint">When on, rules are applied at every half-hour. Times with no rule fall back to the baseline mode. The scheduler borrows the inverter's last time slot as scratch space, leaving slot&nbsp;1 free for other apps.</div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Baseline SOC reserve <span id="sched-reserve-val">4%</span></span>
+          <input type="range" id="sched-reserve" min="4" max="100" value="4"
+            oninput="$('sched-reserve-val').textContent=this.value+'%'" onchange="_saveSchedConfig()">
+        </div>
+        <div class="sched-hint">When on, rules apply at each half-hour. Times with no rule fall back to the baseline mode. No inverter slots are modified — the scheduler sends the same commands as the manual controls. The SOC reserve is restored to the baseline value when no rule is active.</div>
       </div>
       <div class="ctrl-section">
         <div class="ctrl-heading">Rules</div>
@@ -957,9 +958,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="se-days" id="se-days"></div>
       </div>
       <div class="se-field" id="se-soc-field">
-        <label>Charge to <span id="se-soc-val">100%</span></label>
+        <label id="se-soc-label">Charge to <span id="se-soc-val">100%</span></label>
         <input type="range" id="se-soc" min="4" max="100" value="100"
           oninput="$('se-soc-val').textContent=this.value+'%'">
+      </div>
+      <div class="se-field" id="se-pct-field">
+        <label>Power limit <span id="se-pct-val">50%</span></label>
+        <input type="range" id="se-pct" min="0" max="50" value="50"
+          oninput="$('se-pct-val').textContent=this.value+'%'">
       </div>
       <div id="se-btn-row">
         <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
@@ -1880,6 +1886,9 @@ async function loadSchedules() {
     _schedRules = d.rules || [];
     $('sched-master').checked  = !!d.master_enabled;
     $('sched-baseline').value  = d.baseline || 'eco';
+    const reserve = d.baseline_soc_reserve ?? 4;
+    $('sched-reserve').value   = reserve;
+    $('sched-reserve-val').textContent = reserve + '%';
     renderSchedules();
   } catch(e) {
     list.innerHTML = '<div id="sched-empty">Could not load schedule: ' + _esc(e.message) + '</div>';
@@ -1893,7 +1902,9 @@ function renderSchedules() {
     return;
   }
   list.innerHTML = _schedRules.map(rl => {
-    const extra = rl.action === 'charge' ? ` to ${rl.target_soc}%` : '';
+    let extra = '';
+    if (rl.action === 'charge')  extra = ` to ${rl.target_soc}% · ${rl.power_pct}% power`;
+    if (rl.action === 'export')  extra = ` · stop at ${rl.target_soc}% · ${rl.power_pct}% power`;
     return `
       <div class="sched-rule ${rl.enabled ? '' : 'off'}" onclick="openEditor(${rl.id})">
         <div class="sr-main">
@@ -1920,7 +1931,15 @@ function _collectDaysMask() {
 }
 
 function seActionChanged() {
-  $('se-soc-field').style.display = $('se-action').value === 'charge' ? '' : 'none';
+  const action = $('se-action').value;
+  const showSoc = action === 'charge' || action === 'export';
+  $('se-soc-field').style.display = showSoc ? '' : 'none';
+  $('se-pct-field').style.display = (action === 'charge' || action === 'export') ? '' : 'none';
+  if (action === 'charge') {
+    $('se-soc-label').innerHTML = 'Charge to <span id="se-soc-val">' + $('se-soc').value + '%</span>';
+  } else if (action === 'export') {
+    $('se-soc-label').innerHTML = 'Stop discharging below <span id="se-soc-val">' + $('se-soc').value + '%</span>';
+  }
 }
 
 // Build the 48 half-hour options (00:00 … 23:30) into a <select>, selecting `val`.
@@ -1941,9 +1960,11 @@ function openEditor(id) {
   $('se-action').value           = rl ? rl.action : 'charge';
   _fillTimeSelect($('se-start'), rl ? rl.start : '00:30');
   _fillTimeSelect($('se-end'),   rl ? rl.end   : '04:30');
-  const soc = (rl && rl.target_soc != null) ? rl.target_soc : 100;
+  const soc = (rl && rl.target_soc != null) ? rl.target_soc : (rl && rl.action === 'export' ? 10 : 100);
   $('se-soc').value              = soc;
-  $('se-soc-val').textContent    = soc + '%';
+  const pct = (rl && rl.power_pct != null) ? rl.power_pct : 50;
+  $('se-pct').value              = pct;
+  $('se-pct-val').textContent    = pct + '%';
   _buildDayChips(rl ? rl.days_mask : 127);
   seActionChanged();
   $('sched-editor').classList.add('open');
@@ -1954,12 +1975,13 @@ async function saveRule() {
   const mask = _collectDaysMask();
   if (!mask) { alert('Pick at least one day.'); return; }
   const body = {
-    action:    $('se-action').value,
-    start:     $('se-start').value,
-    end:       $('se-end').value,
-    days_mask: mask,
+    action:     $('se-action').value,
+    start:      $('se-start').value,
+    end:        $('se-end').value,
+    days_mask:  mask,
     target_soc: +$('se-soc').value,
-    enabled:   true,
+    power_pct:  +$('se-pct').value,
+    enabled:    true,
   };
   if (_editingId != null) {
     const cur = _schedRules.find(r => r.id === _editingId);
@@ -1992,7 +2014,11 @@ async function toggleRule(id, enabled) {
 
 async function _saveSchedConfig() {
   await fetch('/api/schedules/config', { method:'POST', headers:_schedHeaders(),
-    body: JSON.stringify({ master_enabled: $('sched-master').checked, baseline: $('sched-baseline').value }) });
+    body: JSON.stringify({
+      master_enabled:       $('sched-master').checked,
+      baseline:             $('sched-baseline').value,
+      baseline_soc_reserve: +$('sched-reserve').value,
+    }) });
   setSchedIcon($('sched-master').checked);   // reflect immediately, don't wait for next poll
 }
 

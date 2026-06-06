@@ -90,6 +90,7 @@ CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 # Per-rule schedule rows live in the `schedules` DB table, not in config.
 SCHEDULER_ENABLED  = _cfg.getboolean("scheduler", "enabled", fallback=False)
 SCHEDULER_BASELINE = _cfg.get("scheduler", "baseline", fallback="eco").strip().lower()
+SCHEDULER_BASELINE_SOC_RESERVE = max(4, min(100, _cfg.getint("scheduler", "baseline_soc_reserve", fallback=4)))
 _SCHED_BASELINES   = ("eco", "storage")   # eco = discharge-on/grid-charge-off
 if SCHEDULER_BASELINE not in _SCHED_BASELINES:
     SCHEDULER_BASELINE = "eco"
@@ -291,6 +292,9 @@ def init_db():
             conn.execute("ALTER TABLE snapshots ADD COLUMN t_battery  REAL")
         if "t_heatsink" not in cols:
             conn.execute("ALTER TABLE snapshots ADD COLUMN t_heatsink REAL")
+        sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
+        if "power_pct" not in sched_cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
         conn.commit()
 
 def _log_snapshot(data):
@@ -1378,16 +1382,9 @@ _SLOT_COUNT = {
     "gateway_aio":           2,
 }
 
-# Scheduler's reserved scratch slot (1-based) per profile — the LAST slot, so
-# slot 1 stays free for other integrations (Predbat, GivEnergy app). The block
-# engine rewrites this slot each Charge/Export block and clears it when idle.
-# three_phase_aio is omitted on purpose — control is read-only there, so the
-# scheduler is disabled for it.
-_SCHED_SLOT = {
-    "single_phase_2slot":    2,
-    "single_phase_extended": 10,
-    "gateway_aio":           2,
-}
+# Profiles that support app-held scheduling (three_phase_aio is read-only for
+# writes, so it is excluded; unknown means detection hasn't run yet).
+_SCHED_PROFILES = {"single_phase_2slot", "single_phase_extended", "gateway_aio"}
 
 
 # ── State reader ──────────────────────────────────────────────────────────────
@@ -1635,14 +1632,13 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 
 
 # ── Scheduler engine (app-held 48 half-hour block reconciler) ─────────────────
-# Design in BACKLOG.md. The decision logic (_block_contains / _sched_desired_state /
-# _sched_compute_writes) is pure and unit-tested. The scheduler thread evaluates the
-# block every 15s and applies changes itself (_sched_apply) using the SAME pattern the
-# manual controls use — _hr_write to the detected slave (0x32 on Gen2) from the scheduler
-# thread while the listen loop keeps receiving concurrently (writing to 0x11, or with the
-# listen socket closed, returns 'dongle busy' — confirmed on the Pi). DELTA writes (only
-# changed registers) keep an apply to ~1–4 writes. Failures retry on the next 15s cycle.
-# Master on only.
+# The scheduler issues the same register writes as the manual control buttons —
+# no inverter slot registers are touched. Rules define charge/export/hold windows;
+# unscheduled blocks restore the baseline mode (eco or storage) including the
+# configured baseline SOC reserve. The thread evaluates the block every 15s and
+# applies changes via _hr_write to the detected slave, with the listen loop left
+# open (the combination confirmed to work on Gen2). DELTA writes (only changed
+# registers) keep a typical apply to 1–4 writes. Failures retry on the next 15s cycle.
 
 # Action precedence when several rules cover the same block.
 _SCHED_PRECEDENCE = {"export": 3, "charge": 2, "hold": 1}
@@ -1677,68 +1673,73 @@ def _sched_desired_state(rules: list, weekday: int, t_min: int) -> dict:
     if winner is None:
         return {"mode": "baseline"}
     if winner["action"] == "charge":
-        return {"mode": "charge", "target_soc": winner["target_soc"],
-                "start": winner["start"], "end": winner["end"]}
+        return {"mode": "charge",
+                "target_soc": winner["target_soc"],
+                "power_pct":  winner.get("power_pct", 50)}
     if winner["action"] == "export":
-        return {"mode": "export", "start": winner["start"], "end": winner["end"]}
+        return {"mode": "export",
+                "stop_soc":  winner.get("target_soc") or 4,
+                "power_pct": winner.get("power_pct", 50)}
     return {"mode": "hold"}
 
 def _sched_load_rules() -> list:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT action, start_hhmm, end_hhmm, days_mask, target_soc "
+            "SELECT action, start_hhmm, end_hhmm, days_mask, target_soc, power_pct "
             "FROM schedules WHERE enabled=1").fetchall()
     return [{"enabled": True, "action": r["action"], "start": r["start_hhmm"],
              "end": r["end_hhmm"], "days_mask": r["days_mask"],
-             "target_soc": r["target_soc"]} for r in rows]
+             "target_soc": r["target_soc"], "power_pct": r["power_pct"]} for r in rows]
 
 def _sched_compute_writes(desired: dict):
-    """Pure-ish: translate a desired-state dict into (slave, [(reg,val),...], summary).
-    Does NO socket I/O beyond the cached _detect_inverter() — the listen loop performs
-    the actual writes on its own socket. Uses the profile's reserved (last) slot as
-    scratch and clears it when idle, so slot 1 stays free for other integrations.
-    The register writes are absolute sets, so re-applying the whole list is idempotent
-    (a partially-applied list self-heals on the next retry). Raises on unsupported HW."""
+    """Translate a desired-state dict into (slave, [(reg,val),...], summary).
+    Issues the same register writes as the manual control buttons — no slot writes.
+    The register writes are absolute sets, so re-applying the full list is idempotent
+    (a partial apply self-heals on the next retry). Raises on unsupported hardware."""
     slave, profile, model = _detect_inverter()
-    if profile not in _SCHED_SLOT:
+    if profile not in _SCHED_PROFILES:
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
-    # Write to the SAME slave the manual control buttons use — the detected broadcast
-    # slave (0x32 on this Gen2) with the listen loop left OPEN. Confirmed on the Pi:
-    # writes to 0x32/listen-open succeed reliably, even back-to-back; 0x11/listen-closed
-    # returns 'dongle busy'.
-    slot = _SCHED_SLOT[profile]                       # 1-based
-    c_start, c_end = _CHARGE_SLOT_HR[slot - 1]
-    d_start, d_end = _DISCHARGE_SLOT_HR[slot - 1]
-    bcd = _hhmm_to_bcd
+
     mode = desired["mode"]
+    pct  = max(0, min(50, int(desired.get("power_pct", 50))))
 
     if mode == "charge":
-        w = [(_HR["CHARGE_TARGET_SOC"], desired["target_soc"]),
-             (c_start, bcd(desired["start"])), (c_end, bcd(desired["end"])),
-             (_HR["ENABLE_CHARGE"], 1),
-             (d_start, 0), (d_end, 0)]
-        summary = f"Charge to {desired['target_soc']}% ({desired['start']}–{desired['end']})"
+        target = max(4, min(100, int(desired.get("target_soc", 100))))
+        w = [(_HR["ENABLE_DISCHARGE"],       0),
+             (_HR["BATTERY_POWER_MODE"],      1),   # demand
+             (_HR["CHARGE_TARGET_SOC"],  target),
+             (_HR["BATTERY_CHARGE_LIMIT"],  pct),
+             (_HR["ENABLE_CHARGE"],          1)]
+        summary = f"Charge to {target}% at {pct}% power"
+
     elif mode == "export":
-        w = [(d_start, bcd(desired["start"])), (d_end, bcd(desired["end"])),
-             (_HR["BATTERY_POWER_MODE"], 0),          # 0 = max power / export
-             (_HR["ENABLE_DISCHARGE"], 1),
-             (c_start, 0), (c_end, 0)]
-        summary = f"Export ({desired['start']}–{desired['end']})"
+        stop = max(4, min(100, int(desired.get("stop_soc", 4))))
+        w = [(_HR["ENABLE_CHARGE"],               0),
+             (_HR["BATTERY_POWER_MODE"],           0),   # 0 = max power / export
+             (_HR["BATTERY_SOC_RESERVE"],       stop),
+             (_HR["BATTERY_DISCHARGE_LIMIT"],    pct),
+             (_HR["ENABLE_DISCHARGE"],             1)]
+        summary = f"Export at {pct}% power, stop at {stop}% SOC"
+
     elif mode == "hold":
-        w = [(_HR["ENABLE_CHARGE"], 0), (_HR["ENABLE_DISCHARGE"], 0),
-             (c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0)]
-        summary = "Hold charge (no discharge)"
-    elif mode == "cleanup":                           # master switched off
-        w = [(c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0), (_HR["ENABLE_CHARGE"], 0)]
-        summary = "Off — cleared scratch slots"
-    else:                                             # baseline
-        w = [(c_start, 0), (c_end, 0), (d_start, 0), (d_end, 0), (_HR["ENABLE_CHARGE"], 0)]
+        w = [(_HR["ENABLE_CHARGE"],    0),
+             (_HR["ENABLE_DISCHARGE"], 0)]
+        summary = "Hold charge"
+
+    else:   # baseline (also used for cleanup when master is switched off)
+        reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
         if SCHEDULER_BASELINE == "storage":
-            w.append((_HR["ENABLE_DISCHARGE"], 0))
+            w = [(_HR["ENABLE_CHARGE"],       0),
+                 (_HR["ENABLE_DISCHARGE"],     0),
+                 (_HR["BATTERY_SOC_RESERVE"], reserve)]
             summary = "Baseline: Storage (hold charge)"
-        else:
-            w += [(_HR["ENABLE_DISCHARGE"], 1), (_HR["BATTERY_POWER_MODE"], 1)]  # 1 = demand
+        else:   # eco
+            w = [(_HR["ENABLE_CHARGE"],       0),
+                 (_HR["BATTERY_POWER_MODE"],   1),   # demand
+                 (_HR["BATTERY_SOC_RESERVE"], reserve),
+                 (_HR["ENABLE_DISCHARGE"],     1)]
             summary = "Baseline: Eco"
+
     return slave, w, summary
 
 
@@ -1748,7 +1749,7 @@ _sched_applied_sig  = None        # signature of the last successfully-applied d
 _sched_applied_regs: dict = {}    # reg → last value we wrote, for delta writes
 _sched_was_enabled  = False
 _sched_last_status  = "idle"      # surfaced on /api/data: idle | applying | summary | error
-_CLEANUP_DESIRED    = {"mode": "cleanup"}
+_CLEANUP_DESIRED    = {"mode": "baseline"}
 _CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
 def _sched_apply(desired: dict) -> None:
@@ -1820,7 +1821,7 @@ def _scheduler_loop():
             # the live listen stream, fails, and caches an 'unknown' result permanently.
             if (want is not None
                     and json.dumps(want, sort_keys=True) != _sched_applied_sig
-                    and _inverter_profile in _SCHED_SLOT):
+                    and _inverter_profile in _SCHED_PROFILES):
                 _sched_apply(want)
         except Exception as exc:
             log.error("Scheduler loop: %s", exc)
@@ -1889,6 +1890,7 @@ def _rule_row(r) -> dict:
         "end":        r["end_hhmm"],
         "days_mask":  r["days_mask"],
         "target_soc": r["target_soc"],
+        "power_pct":  r["power_pct"],
     }
 
 def _validate_rule(data: dict) -> dict:
@@ -1907,8 +1909,11 @@ def _validate_rule(data: dict) -> dict:
     target_soc = None
     if action == "charge":
         target_soc = max(4, min(100, int(data.get("target_soc", 100))))
+    elif action == "export":
+        target_soc = max(4, min(100, int(data.get("target_soc", 4))))
+    power_pct = max(0, min(50, int(data.get("power_pct", 50))))
     return {"action": action, "start": start, "end": end,
-            "days_mask": days_mask, "target_soc": target_soc}
+            "days_mask": days_mask, "target_soc": target_soc, "power_pct": power_pct}
 
 @app.route("/api/schedules", methods=["GET"])
 def get_schedules():
@@ -1918,10 +1923,11 @@ def get_schedules():
         rows = [_rule_row(r) for r in conn.execute(
             "SELECT * FROM schedules ORDER BY start_hhmm, id")]
     return jsonify({
-        "ok":            True,
-        "master_enabled": SCHEDULER_ENABLED,
-        "baseline":       SCHEDULER_BASELINE,
-        "rules":          rows,
+        "ok":                     True,
+        "master_enabled":         SCHEDULER_ENABLED,
+        "baseline":               SCHEDULER_BASELINE,
+        "baseline_soc_reserve":   SCHEDULER_BASELINE_SOC_RESERVE,
+        "rules":                  rows,
     })
 
 @app.route("/api/schedules", methods=["POST"])
@@ -1940,15 +1946,15 @@ def save_schedule():
         if rid:
             conn.execute(
                 "UPDATE schedules SET enabled=?, action=?, start_hhmm=?, end_hhmm=?, "
-                "days_mask=?, target_soc=? WHERE id=?",
+                "days_mask=?, target_soc=?, power_pct=? WHERE id=?",
                 (enabled, clean["action"], clean["start"], clean["end"],
-                 clean["days_mask"], clean["target_soc"], int(rid)))
+                 clean["days_mask"], clean["target_soc"], clean["power_pct"], int(rid)))
         else:
             cur = conn.execute(
                 "INSERT INTO schedules (enabled, action, start_hhmm, end_hhmm, "
-                "days_mask, target_soc, created) VALUES (?,?,?,?,?,?,?)",
+                "days_mask, target_soc, power_pct, created) VALUES (?,?,?,?,?,?,?,?)",
                 (enabled, clean["action"], clean["start"], clean["end"],
-                 clean["days_mask"], clean["target_soc"], int(time.time())))
+                 clean["days_mask"], clean["target_soc"], clean["power_pct"], int(time.time())))
             rid = cur.lastrowid
         conn.commit()
     return jsonify({"ok": True, "id": rid})
@@ -1964,8 +1970,8 @@ def delete_schedule(rid):
 
 @app.route("/api/schedules/config", methods=["POST"])
 def save_schedule_config():
-    """Set the master on/off switch and the baseline mode."""
-    global SCHEDULER_ENABLED, SCHEDULER_BASELINE
+    """Set the master on/off switch, baseline mode, and baseline SOC reserve."""
+    global SCHEDULER_ENABLED, SCHEDULER_BASELINE, SCHEDULER_BASELINE_SOC_RESERVE
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
@@ -1981,11 +1987,16 @@ def save_schedule_config():
         if base in _SCHED_BASELINES:
             SCHEDULER_BASELINE = base
             cfg.set("scheduler", "baseline", base)
+    if "baseline_soc_reserve" in data:
+        val = max(4, min(100, int(data["baseline_soc_reserve"])))
+        SCHEDULER_BASELINE_SOC_RESERVE = val
+        cfg.set("scheduler", "baseline_soc_reserve", str(val))
     with open(Path(__file__).parent / "config.ini", "w") as f:
         cfg.write(f)
-    return jsonify({"ok": True,
-                    "master_enabled": SCHEDULER_ENABLED,
-                    "baseline":       SCHEDULER_BASELINE})
+    return jsonify({"ok":                   True,
+                    "master_enabled":        SCHEDULER_ENABLED,
+                    "baseline":              SCHEDULER_BASELINE,
+                    "baseline_soc_reserve":  SCHEDULER_BASELINE_SOC_RESERVE})
 
 @app.route("/api/logs")
 def get_logs():
