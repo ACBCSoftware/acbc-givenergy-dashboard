@@ -495,6 +495,19 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 #se-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
 #se-save{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
 #se-delete{background:rgba(248,113,113,.15);border-color:#f87171;color:#f87171;flex:0 0 auto;padding:11px 14px}
+/* ── Portrait-lock overlay ───────────────────────────────── */
+#orient-overlay{
+  display:none;position:fixed;inset:0;z-index:9000;
+  background:var(--bg-top);flex-direction:column;
+  align-items:center;justify-content:center;gap:18px;
+  pointer-events:all;
+}
+@media (orientation:landscape){
+  body.portrait-lock #orient-overlay{display:flex}
+}
+#orient-overlay .oo-icon{font-size:3rem;transform:rotate(90deg)}
+#orient-overlay .oo-msg{font-size:1rem;font-weight:600;color:var(--text);text-align:center}
+#orient-overlay .oo-sub{font-size:.8rem;color:var(--muted);text-align:center}
 </style>
 </head>
 <body>
@@ -2249,13 +2262,15 @@ let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh',
 let currentView  = 'live';
 
 function _manageOrientation(v) {
+  const lock = (v !== 'hourly');
+  // CSS overlay — always reliable regardless of device orientation API support
+  document.body.classList.toggle('portrait-lock', lock);
+  // Also try the JS lock API (belt & braces; fails silently on some devices)
   if (!screen.orientation) return;
-  if (v === 'hourly') {
-    // Hourly panel allows free rotation; setPowerMode will further lock to landscape if needed
-    try { screen.orientation.unlock(); } catch(e) {}
-  } else {
-    // Every other screen: portrait only
+  if (lock) {
     screen.orientation.lock && screen.orientation.lock('portrait').catch(() => {});
+  } else {
+    try { screen.orientation.unlock(); } catch(e) {}
   }
 }
 
@@ -3196,5 +3211,10 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) _manageOrientation(currentView);
 });
 </script>
+<div id="orient-overlay">
+  <div class="oo-icon">&#8635;</div>
+  <div class="oo-msg">Please rotate to portrait</div>
+  <div class="oo-sub">ACBC – GivEnergy Portal</div>
+</div>
 </body>
 </html>
