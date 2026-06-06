@@ -354,7 +354,7 @@ html,body{
   -webkit-overflow-scrolling:touch;
 }
 #hourly-canvas{display:block;height:100%}   /* width set by JS for scrolling */
-#power-canvas{display:none;flex:1;height:100%;cursor:crosshair;touch-action:none;user-select:none}
+#power-canvas{display:none;flex:1;min-width:0;height:100%;cursor:crosshair;touch-action:none;user-select:none}
 #chart-mode-toggle{display:flex;background:rgba(0,0,0,0.35);border-radius:11px;padding:2px;flex-shrink:0}
 .cmode-btn{background:transparent;border:none;border-radius:9px;padding:3px 10px;
   font-size:.78rem;color:var(--muted);cursor:pointer;white-space:nowrap;transition:all .15s}
@@ -2727,12 +2727,17 @@ function drawHourlyChart() {
 }
 
 // ── Power time-series chart ───────────────────────────────────────────────────
+const _PPL = 36, _PPR = 34, _PPT = 10, _PPB = 22;  // chart margin constants (shared with touch handlers)
+
 let powerMode    = false;
 let powerData    = [];
 let _powerDay    = '';
 let powerActive  = new Set(['solar_w','home_w','battery_w','grid_w']);
 let powerShowSoc = true;
-let _powerCross  = null;   // {x} CSS pixels from canvas left
+let _powerCross  = null;    // CSS px from canvas left for crosshair
+let _powerView   = { t0: 0, t1: 86400 };  // visible time window (seconds from midnight)
+let _touchPinch  = null;    // two-finger pinch state
+let _lastTapTime = 0;       // for double-tap detection
 
 const POWER_SERIES = [
   { key:'solar_w',   colorPos:'#f59e0b', colorNeg:null,      posLbl:null,          negLbl:null       },
@@ -2771,6 +2776,8 @@ function setPowerMode(on) {
     if (screen.orientation && screen.orientation.unlock) {
       try { screen.orientation.unlock(); } catch(e) {}
     }
+    _powerView = { t0: 0, t1: 86400 };
+    _powerCross = null;
     _updateRotateHint();
     requestAnimationFrame(drawHourlyChart);
   }
@@ -2784,6 +2791,7 @@ async function loadPowerData() {
     powerData = d.ok ? d.points : [];
     _powerDay = hourlyDay;
   } catch(e) { powerData = []; _powerDay = ''; }
+  _powerView = { t0: 0, t1: 86400 };  // always start at full-day view for a new date
   drawPowerChart();
 }
 
@@ -2825,12 +2833,12 @@ function drawPowerChart() {
     return;
   }
 
-  const PL = 36, PR = 34, PT = 10, PB = 22;   // PR always reserves right-axis space
+  const PL = _PPL, PR = _PPR, PT = _PPT, PB = _PPB;
   const plotW = W - PL - PR;
   const plotH = H - PT - PB;
   const fs = Math.max(9, Math.min(11, Math.round(H/40)));
 
-  // Y scale
+  // Y scale — use ALL data (not just visible range) so scale stays stable while panning
   let maxV = 0, minV = 0;
   powerData.forEach(d => {
     POWER_SERIES.forEach(s => {
@@ -2846,16 +2854,20 @@ function drawPowerChart() {
   const botV   = hasNeg ? -niceMax(Math.abs(minV)) : 0;
   const yRange = topV - botV;
 
-  function yPx(v) { return PT + plotH * (topV - v) / yRange; }
-  function xPx(t) { return PL + (t - dayStart) / 86400 * plotW; }
-
   const dayStart = new Date(hourlyDay + 'T00:00:00').getTime() / 1000;
+  function yPx(v) { return PT + plotH * (topV - v) / yRange; }
+  function xPx(t) { return PL + (t - dayStart - _powerView.t0) / (_powerView.t1 - _powerView.t0) * plotW; }
   const yZero = yPx(0);
 
-  // Faint vertical gridlines every 3 h
+  // Adaptive vertical gridlines — density based on visible range
+  const visHours = (_powerView.t1 - _powerView.t0) / 3600;
+  const hStep = visHours > 20 ? 3 : visHours > 12 ? 2 : visHours > 6 ? 1 : 0.5;
+  const h0 = _powerView.t0 / 3600, h1 = _powerView.t1 / 3600;
+  const startH = Math.ceil(h0 / hStep) * hStep;
   c.strokeStyle = 'rgba(255,255,255,0.07)'; c.lineWidth = 1; c.setLineDash([]);
-  for (let h = 3; h < 24; h += 3) {
-    const x = PL + (h/24) * plotW;
+  for (let h = startH; h <= h1 + 0.001; h += hStep) {
+    const x = xPx(dayStart + h * 3600);
+    if (x < PL || x > PL+plotW) continue;
     c.beginPath(); c.moveTo(x, PT); c.lineTo(x, PT+plotH); c.stroke();
   }
 
@@ -2944,18 +2956,46 @@ function drawPowerChart() {
     }
   }
 
-  // X axis time labels
+  // Adaptive X axis time labels
   c.fillStyle = 'rgba(150,180,220,0.65)'; c.font = fs+'px sans-serif';
   c.textAlign = 'center'; c.textBaseline = 'top';
-  for (let h = 0; h <= 24; h += 3) {
-    const x = PL + (h/24) * plotW;
-    c.fillText(String(h).padStart(2,'0')+':00', x, PT+plotH+5);
+  for (let h = startH; h <= h1 + 0.001; h += hStep) {
+    const x = xPx(dayStart + h * 3600);
+    if (x < PL - 5 || x > PL+plotW + 5) continue;
+    const totalMins = Math.round(h * 60);
+    const lh = Math.floor(totalMins / 60);
+    const lm = totalMins % 60;
+    c.fillText(String(lh).padStart(2,'0')+':'+String(lm).padStart(2,'0'), x, PT+plotH+5);
+  }
+
+  // "now" marker — dashed line on today's chart so blank future area isn't mistaken for a cut-off
+  const _todayStr = new Date().toLocaleDateString('en-CA');  // YYYY-MM-DD
+  if (hourlyDay === _todayStr) {
+    const nowSec = Math.floor(Date.now()/1000) - dayStart;
+    const nowX   = xPx(dayStart + nowSec);
+    if (nowX >= PL && nowX <= PL+plotW) {
+      c.strokeStyle = 'rgba(255,255,255,0.4)'; c.lineWidth = 1; c.setLineDash([3,4]);
+      c.beginPath(); c.moveTo(nowX, PT); c.lineTo(nowX, PT+plotH); c.stroke();
+      c.setLineDash([]);
+      c.fillStyle = 'rgba(255,255,255,0.5)'; c.font = 'bold '+(fs-1)+'px sans-serif';
+      c.textAlign = 'center'; c.textBaseline = 'bottom';
+      c.fillText('now', nowX, PT-1);
+    }
+  }
+
+  // Zoom range indicator — shown when not at full day view
+  if (_powerView.t0 > 60 || _powerView.t1 < 86340) {
+    const _fmt = s => { const h=Math.floor(s/3600), m=Math.floor((s%3600)/60); return String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'); };
+    c.fillStyle = 'rgba(150,180,220,0.45)'; c.font = 'italic '+(fs-1)+'px sans-serif';
+    c.textAlign = 'right'; c.textBaseline = 'top';
+    c.fillText(_fmt(_powerView.t0)+' – '+_fmt(_powerView.t1)+'  (dbl-tap to reset)', PL+plotW-4, PT+2);
   }
 
   // Crosshair
   if (_powerCross !== null) {
-    const cx = _powerCross;
-    const t  = dayStart + (cx - PL) / plotW * 86400;
+    const cx   = _powerCross;
+    const tSec = _powerView.t0 + (cx - PL) / plotW * (_powerView.t1 - _powerView.t0);
+    const t    = dayStart + tSec;
     let bi = 0, bd = Infinity;
     powerData.forEach((d, i) => { const dt=Math.abs(d.t-t); if(dt<bd){bd=dt;bi=i;} });
     const d  = powerData[bi];
@@ -3039,21 +3079,88 @@ $('power-canvas').addEventListener('mousemove', e => {
 });
 $('power-canvas').addEventListener('mouseleave', () => { _powerCross = null; drawPowerChart(); });
 
-// Prevent browser from intercepting touches on the chart (pinch-zoom, double-tap-zoom, scroll)
-$('power-canvas').addEventListener('touchstart', e => { e.preventDefault(); }, { passive: false });
+// Touch helpers
+function _pinchDist(e) {
+  const dx = e.touches[0].clientX - e.touches[1].clientX;
+  const dy = e.touches[0].clientY - e.touches[1].clientY;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+function _pinchMidX(e) { return (e.touches[0].clientX + e.touches[1].clientX) / 2; }
+function _applyZoom(newRange, tCenter, fracX) {
+  // Clamp range: min 15 min, max full day
+  newRange = Math.max(900, Math.min(86400, newRange));
+  let t0 = tCenter - fracX * newRange;
+  let t1 = t0 + newRange;
+  if (t0 < 0)     { t1 = Math.min(86400, newRange); t0 = 0; }
+  if (t1 > 86400) { t0 = Math.max(0, 86400 - newRange); t1 = 86400; }
+  _powerView = { t0, t1 };
+}
 
-// Crosshair — touch (keep visible until next touch elsewhere)
+// Touch: crosshair (1 finger) + pinch-zoom (2 fingers) + double-tap reset
+$('power-canvas').addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (e.touches.length === 2) {
+    _touchPinch = { d0: _pinchDist(e), midX0: _pinchMidX(e), view0: { ..._powerView } };
+    _powerCross = null;
+  } else if (e.touches.length === 1) {
+    const now = Date.now();
+    if (now - _lastTapTime < 280) {          // double-tap → reset
+      _powerView = { t0: 0, t1: 86400 }; _powerCross = null; _lastTapTime = 0;
+      drawPowerChart(); return;
+    }
+    _lastTapTime = now;
+    _touchPinch  = null;
+  }
+}, { passive: false });
+
 $('power-canvas').addEventListener('touchmove', e => {
   e.preventDefault();
   if (!powerMode || !powerData.length) return;
-  const r = $('power-canvas').getBoundingClientRect();
-  _powerCross = e.touches[0].clientX - r.left;
+  const canv = $('power-canvas');
+  const rect  = canv.getBoundingClientRect();
+  const plotW = canv.clientWidth - _PPL - _PPR;
+
+  if (e.touches.length === 2 && _touchPinch) {
+    const d       = _pinchDist(e);
+    const midX    = _pinchMidX(e);
+    const fracNow  = Math.max(0, Math.min(1, (midX - rect.left - _PPL) / plotW));
+    const fracInit = Math.max(0, Math.min(1, (_touchPinch.midX0 - rect.left - _PPL) / plotW));
+    const range0  = _touchPinch.view0.t1 - _touchPinch.view0.t0;
+    const tMid    = _touchPinch.view0.t0 + fracInit * range0;   // time under initial mid
+    _applyZoom(range0 * _touchPinch.d0 / Math.max(1, d), tMid, fracNow);
+    _powerCross = null;
+    drawPowerChart();
+  } else if (e.touches.length === 1 && !_touchPinch) {
+    _powerCross = e.touches[0].clientX - rect.left;
+    drawPowerChart();
+  }
+}, { passive: false });
+
+$('power-canvas').addEventListener('touchend', e => {
+  e.preventDefault();
+  if (e.touches.length < 2) _touchPinch = null;
+  // keep crosshair visible after lift so user can read the tooltip
+}, { passive: false });
+
+// Scroll-wheel zoom (desktop) — scroll up = zoom in, down = zoom out
+$('power-canvas').addEventListener('wheel', e => {
+  e.preventDefault();
+  if (!powerMode || !powerData.length) return;
+  const canv = $('power-canvas');
+  const rect  = canv.getBoundingClientRect();
+  const plotW = canv.clientWidth - _PPL - _PPR;
+  const fracX = Math.max(0, Math.min(1, (e.clientX - rect.left - _PPL) / plotW));
+  const range = _powerView.t1 - _powerView.t0;
+  _applyZoom(range * (e.deltaY > 0 ? 1.25 : 0.8), _powerView.t0 + fracX * range, fracX);
   drawPowerChart();
 }, { passive: false });
-$('power-canvas').addEventListener('touchend', e => {
-  // keep crosshair at last position so user can read it
-  e.preventDefault();
-}, { passive: false });
+
+// Double-click to reset zoom (desktop)
+$('power-canvas').addEventListener('dblclick', () => {
+  _powerView = { t0: 0, t1: 86400 };
+  _powerCross = null;
+  drawPowerChart();
+});
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
