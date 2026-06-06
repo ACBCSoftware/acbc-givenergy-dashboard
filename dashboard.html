@@ -360,9 +360,6 @@ html,body{
   font-size:.78rem;color:var(--muted);cursor:pointer;white-space:nowrap;transition:all .15s}
 .cmode-btn.active{background:rgba(255,255,255,0.13);color:var(--text)}
 #power-series-row{display:none;flex-wrap:wrap;gap:5px}
-#rotate-hint{display:none;align-items:center;justify-content:center;gap:6px;
-  padding:5px 8px;border-radius:8px;font-size:.78rem;color:#f59e0b;
-  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25)}
 .hstile{
   flex:1;min-width:54px;background:var(--card);border:1px solid var(--border);
   border-radius:8px;padding:5px 4px;text-align:center;
@@ -495,19 +492,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 #se-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
 #se-save{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
 #se-delete{background:rgba(248,113,113,.15);border-color:#f87171;color:#f87171;flex:0 0 auto;padding:11px 14px}
-/* ── Portrait-lock overlay ───────────────────────────────── */
-#orient-overlay{
-  display:none;position:fixed;inset:0;z-index:9000;
-  background:var(--bg-top);flex-direction:column;
-  align-items:center;justify-content:center;gap:18px;
-  pointer-events:all;
-}
-@media (orientation:landscape){
-  body.portrait-lock #orient-overlay{display:flex}
-}
-#orient-overlay .oo-icon{font-size:3rem;transform:rotate(90deg)}
-#orient-overlay .oo-msg{font-size:1rem;font-weight:600;color:var(--text);text-align:center}
-#orient-overlay .oo-sub{font-size:.8rem;color:var(--muted);text-align:center}
 </style>
 </head>
 <body>
@@ -1037,7 +1021,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="sbtn active" data-ps="grid_w"><span class="sdot" style="background:#f87171"></span>Grid</button>
         <button class="sbtn active" id="power-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
       </div>
-      <div id="rotate-hint">&#8635; Rotate device for best view</div>
       <div id="hourly-series-row">
         <button class="sbtn active" data-hs="solar_kwh"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
         <button class="sbtn active" data-hs="home_kwh"><span class="sdot" style="background:#38bdf8"></span>Home</button>
@@ -2261,24 +2244,6 @@ let histData     = [];
 let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh','bat_chg_kwh','bat_dis_kwh']);
 let currentView  = 'live';
 
-function _isTouchDevice() {
-  return window.matchMedia('(pointer: coarse)').matches || ('ontouchstart' in window);
-}
-
-function _manageOrientation(v) {
-  if (!_isTouchDevice()) return;   // desktop — no orientation enforcement at all
-  const lock = (v !== 'hourly');
-  // CSS overlay — always reliable regardless of device orientation API support
-  document.body.classList.toggle('portrait-lock', lock);
-  // Also try the JS lock API (belt & braces; fails silently on some devices)
-  if (!screen.orientation) return;
-  if (lock) {
-    screen.orientation.lock && screen.orientation.lock('portrait').catch(() => {});
-  } else {
-    try { screen.orientation.unlock(); } catch(e) {}
-  }
-}
-
 function showView(v) {
   currentView = v;
   const live = v === 'live';
@@ -2293,7 +2258,6 @@ function showView(v) {
   $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
   $('weather-badge').style.display  = (live && _weatherConfigured) ? '' : 'none';
   $('ver-bar').style.display        = live         ? '' : 'none';
-  _manageOrientation(v);
   if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
   if (v==='history') loadHistory();
   if (v==='settings') loadSettings();
@@ -2551,12 +2515,10 @@ $('hist-canvas').addEventListener('click', () => {
 window.addEventListener('resize', () => {
   if (currentView==='history') drawHistChart();
   if (currentView==='hourly') { if (powerMode) drawPowerChart(); else drawHourlyChart(); }
-  if (powerMode) _updateRotateHint();
 });
 window.addEventListener('orientationchange', () => {
   setTimeout(() => {
     if (currentView==='hourly' && powerMode) drawPowerChart();
-    _updateRotateHint();
   }, 200);  // brief delay for viewport to settle after rotation
 });
 
@@ -2778,14 +2740,6 @@ const POWER_SERIES = [
   { key:'grid_w',    colorPos:'#f87171', colorNeg:'#f87171', posLbl:'Export',      negLbl:'Import'   },
 ];
 
-function _updateRotateHint() {
-  const hint = $('rotate-hint');
-  if (!hint) return;
-  if (!powerMode) { hint.style.display = 'none'; return; }
-  const portrait = window.innerWidth < window.innerHeight;
-  hint.style.display = portrait ? 'flex' : 'none';
-}
-
 function setPowerMode(on) {
   powerMode = on;
   $('mode-bars-btn').classList.toggle('active', !on);
@@ -2796,17 +2750,11 @@ function setPowerMode(on) {
   $('hourly-series-row').style.display = on ? 'none' : '';
   $('power-series-row').style.display  = on ? 'flex' : 'none';
   if (on) {
-    _updateRotateHint();
     if (_powerDay !== hourlyDay) loadPowerData();
     else requestAnimationFrame(drawPowerChart);
   } else {
-    // Release orientation lock
-    if (screen.orientation && screen.orientation.unlock) {
-      try { screen.orientation.unlock(); } catch(e) {}
-    }
     _powerView = { t0: 0, t1: 86400 };
     _powerCross = null;
-    _updateRotateHint();
     requestAnimationFrame(drawHourlyChart);
   }
 }
@@ -3209,17 +3157,6 @@ $('power-canvas').addEventListener('dblclick', () => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
 }
-
-// Apply portrait lock immediately (startup) and whenever the PWA resumes from background
-_manageOrientation(currentView);
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) _manageOrientation(currentView);
-});
 </script>
-<div id="orient-overlay">
-  <div class="oo-icon">&#8635;</div>
-  <div class="oo-msg">Please rotate to portrait</div>
-  <div class="oo-sub">ACBC – GivEnergy Portal</div>
-</div>
 </body>
 </html>
