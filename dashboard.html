@@ -354,12 +354,15 @@ html,body{
   -webkit-overflow-scrolling:touch;
 }
 #hourly-canvas{display:block;height:100%}   /* width set by JS for scrolling */
-#power-canvas{display:none;flex:1;height:100%;cursor:crosshair}
+#power-canvas{display:none;flex:1;height:100%;cursor:crosshair;touch-action:none;user-select:none}
 #chart-mode-toggle{display:flex;background:rgba(0,0,0,0.35);border-radius:11px;padding:2px;flex-shrink:0}
 .cmode-btn{background:transparent;border:none;border-radius:9px;padding:3px 10px;
   font-size:.78rem;color:var(--muted);cursor:pointer;white-space:nowrap;transition:all .15s}
 .cmode-btn.active{background:rgba(255,255,255,0.13);color:var(--text)}
 #power-series-row{display:none;flex-wrap:wrap;gap:5px}
+#rotate-hint{display:none;align-items:center;justify-content:center;gap:6px;
+  padding:5px 8px;border-radius:8px;font-size:.78rem;color:#f59e0b;
+  background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.25)}
 .hstile{
   flex:1;min-width:54px;background:var(--card);border:1px solid var(--border);
   border-radius:8px;padding:5px 4px;text-align:center;
@@ -1021,6 +1024,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="sbtn active" data-ps="grid_w"><span class="sdot" style="background:#f87171"></span>Grid</button>
         <button class="sbtn active" id="power-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
       </div>
+      <div id="rotate-hint">&#8635; Rotate device for best view</div>
       <div id="hourly-series-row">
         <button class="sbtn active" data-hs="solar_kwh"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
         <button class="sbtn active" data-hs="home_kwh"><span class="sdot" style="background:#38bdf8"></span>Home</button>
@@ -2515,6 +2519,13 @@ $('hist-canvas').addEventListener('click', () => {
 window.addEventListener('resize', () => {
   if (currentView==='history') drawHistChart();
   if (currentView==='hourly') { if (powerMode) drawPowerChart(); else drawHourlyChart(); }
+  if (powerMode) _updateRotateHint();
+});
+window.addEventListener('orientationchange', () => {
+  setTimeout(() => {
+    if (currentView==='hourly' && powerMode) drawPowerChart();
+    _updateRotateHint();
+  }, 200);  // brief delay for viewport to settle after rotation
 });
 
 // ── Hourly breakdown ──────────────────────────────────────────────────────────
@@ -2730,6 +2741,14 @@ const POWER_SERIES = [
   { key:'grid_w',    colorPos:'#f87171', colorNeg:'#4ade80', posLbl:'Import',      negLbl:'Export'   },
 ];
 
+function _updateRotateHint() {
+  const hint = $('rotate-hint');
+  if (!hint) return;
+  if (!powerMode) { hint.style.display = 'none'; return; }
+  const portrait = window.innerWidth < window.innerHeight;
+  hint.style.display = portrait ? 'flex' : 'none';
+}
+
 function setPowerMode(on) {
   powerMode = on;
   $('mode-bars-btn').classList.toggle('active', !on);
@@ -2740,9 +2759,19 @@ function setPowerMode(on) {
   $('hourly-series-row').style.display = on ? 'none' : '';
   $('power-series-row').style.display  = on ? 'flex' : 'none';
   if (on) {
+    // Try to lock orientation to landscape (works for installed PWA)
+    if (screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock('landscape').catch(() => {});
+    }
+    _updateRotateHint();
     if (_powerDay !== hourlyDay) loadPowerData();
     else requestAnimationFrame(drawPowerChart);
   } else {
+    // Release orientation lock
+    if (screen.orientation && screen.orientation.unlock) {
+      try { screen.orientation.unlock(); } catch(e) {}
+    }
+    _updateRotateHint();
     requestAnimationFrame(drawHourlyChart);
   }
 }
@@ -2796,7 +2825,7 @@ function drawPowerChart() {
     return;
   }
 
-  const PL = 36, PR = powerShowSoc ? 34 : 6, PT = 10, PB = 22;
+  const PL = 36, PR = 34, PT = 10, PB = 22;   // PR always reserves right-axis space
   const plotW = W - PL - PR;
   const plotH = H - PT - PB;
   const fs = Math.max(9, Math.min(11, Math.round(H/40)));
@@ -2893,7 +2922,14 @@ function drawPowerChart() {
     c.stroke();
   });
 
-  // SOC right-axis line
+  // Right axis: % labels always shown; SOC line when enabled
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.font = fs+'px sans-serif';
+  for (let pct = 0; pct <= 100; pct += 25) {
+    const y = PT + plotH - (pct/100) * plotH;
+    c.fillStyle = powerShowSoc ? 'rgba(150,180,220,0.75)' : 'rgba(150,180,220,0.3)';
+    c.fillText(pct+'%', PL+plotW+4, y);
+  }
   if (powerShowSoc) {
     const socPts = powerData.filter(d => d.soc != null);
     if (socPts.length > 1) {
@@ -2905,13 +2941,6 @@ function drawPowerChart() {
         i===0 ? c.moveTo(x, y) : c.lineTo(x, y);
       });
       c.stroke();
-    }
-    // Right axis labels
-    c.fillStyle = SOC_LINE_COLOR + 'cc'; c.font = fs+'px sans-serif';
-    c.textAlign = 'left'; c.textBaseline = 'middle';
-    for (let pct = 0; pct <= 100; pct += 25) {
-      const y = PT + plotH - (pct/100) * plotH;
-      c.fillText(pct+'%', PL+plotW+3, y);
     }
   }
 
@@ -3009,6 +3038,9 @@ $('power-canvas').addEventListener('mousemove', e => {
   drawPowerChart();
 });
 $('power-canvas').addEventListener('mouseleave', () => { _powerCross = null; drawPowerChart(); });
+
+// Prevent browser from intercepting touches on the chart (pinch-zoom, double-tap-zoom, scroll)
+$('power-canvas').addEventListener('touchstart', e => { e.preventDefault(); }, { passive: false });
 
 // Crosshair — touch (keep visible until next touch elsewhere)
 $('power-canvas').addEventListener('touchmove', e => {
