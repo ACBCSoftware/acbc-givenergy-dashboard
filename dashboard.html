@@ -2248,6 +2248,17 @@ let histData     = [];
 let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh','bat_chg_kwh','bat_dis_kwh']);
 let currentView  = 'live';
 
+function _manageOrientation(v) {
+  if (!screen.orientation) return;
+  if (v === 'hourly') {
+    // Hourly panel allows free rotation; setPowerMode will further lock to landscape if needed
+    try { screen.orientation.unlock(); } catch(e) {}
+  } else {
+    // Every other screen: portrait only
+    screen.orientation.lock && screen.orientation.lock('portrait').catch(() => {});
+  }
+}
+
 function showView(v) {
   currentView = v;
   const live = v === 'live';
@@ -2262,6 +2273,7 @@ function showView(v) {
   $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
   $('weather-badge').style.display  = (live && _weatherConfigured) ? '' : 'none';
   $('ver-bar').style.display        = live         ? '' : 'none';
+  _manageOrientation(v);
   if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
   if (v==='history') loadHistory();
   if (v==='settings') loadSettings();
