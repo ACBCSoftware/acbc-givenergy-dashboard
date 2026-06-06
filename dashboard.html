@@ -1387,14 +1387,28 @@ function applyData(d) {
   $('t-import').textContent = fmtKwh(d.grid_in_today);
   $('t-export').textContent = fmtKwh(d.grid_out_today);
 
-  // Status
-  const age = Math.round(Date.now()/1000 - d.ts);
-  $('status-txt').textContent = `${d.status==='NORMAL'?'Online':(d.status||'?')} · ${age}s ago`;
+  // Status — store ts and label; the 1-s ticker (_tickAge) updates the "ago" part
+  _lastDataTs     = d.ts || 0;
+  _lastStatusLabel = d.status === 'NORMAL' ? 'Online' : (d.status || '?');
   $('dot').className = d.ok ? 'on' : 'err';
+  _tickAge();
 }
 
+// ── Status age ticker — updates "Xs ago" every second independently of poll ──
+let _lastDataTs      = 0;
+let _lastStatusLabel = 'Online';
+function _tickAge() {
+  if (!_lastDataTs) return;
+  const age = Math.round(Date.now() / 1000 - _lastDataTs);
+  $('status-txt').textContent = `${_lastStatusLabel} · ${age}s ago`;
+}
+setInterval(_tickAge, 1000);
+
 // ── Loop ────────────────────────────────────────────────────────────────────
-function loop() { tickParticles(); render(); requestAnimationFrame(loop); }
+let _loopRaf = null;
+function loop() { tickParticles(); render(); _loopRaf = requestAnimationFrame(loop); }
+function _pauseLoop()  { if (_loopRaf) { cancelAnimationFrame(_loopRaf); _loopRaf = null; } }
+function _resumeLoop() { if (!_loopRaf && currentView === 'live') _loopRaf = requestAnimationFrame(loop); }
 
 // ── Poll ────────────────────────────────────────────────────────────────────
 async function poll() {
@@ -2299,11 +2313,16 @@ if (document.fonts && document.fonts.ready) {
 
 // Re-layout when returning to the tab / resuming the PWA
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && currentView === 'live') { layout(); particles.length = 0; }
+  if (document.hidden) {
+    _pauseLoop();
+  } else if (currentView === 'live') {
+    layout(); particles.length = 0;
+    _resumeLoop();
+  }
 });
 
 layout();
-loop();
+_loopRaf = requestAnimationFrame(loop);
 poll();
 initApp();
 
