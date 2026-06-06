@@ -139,7 +139,7 @@ echo "  Stop:            sudo systemctl stop $APP_NAME"
 echo "  Restart:         sudo systemctl restart $APP_NAME"
 echo ""
 IFACE_IP=$(hostname -I | awk '{print $1}')
-echo "  Dashboard:       http://${IFACE_IP}:$(grep web_port ${INSTALL_DIR}/config.ini | awk -F= '{gsub(/ /,\"\",$2); print $2}' || echo 7890)"
+echo "  Dashboard:       http://${IFACE_IP}:$(grep web_port ${INSTALL_DIR}/config.ini | awk -F= '{gsub(/ /,"",$2); print $2}' || echo 7890)"
 echo ""
 echo -e "${YELLOW}  Default settings password: password${NC}"
 echo -e "${YELLOW}  Change it via the ⚡ Settings screen on first use.${NC}"
