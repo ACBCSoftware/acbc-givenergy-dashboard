@@ -105,6 +105,13 @@ _COLOUR_DEFAULTS: dict[str, str] = {
     "bat_chg":  "#818cf8",
     "bat_dis":  "#c084fc",
     "soc":      "#fbbf24",
+    # Power graph (separate from the bar chart above)
+    "graph_solar":   "#f59e0b",
+    "graph_home":    "#38bdf8",
+    "graph_bat_chg": "#818cf8",
+    "graph_bat_dis": "#c084fc",
+    "graph_grid":    "#f87171",
+    "graph_soc":     "#fbbf24",
 }
 CHART_COLORS: dict[str, str] = {
     k: _cfg.get("colours", k, fallback=v)

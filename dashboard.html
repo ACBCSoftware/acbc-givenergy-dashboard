@@ -747,8 +747,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Confirm</label><input id="s-confirmpw" type="password" placeholder="Confirm password"></div>
       </div>
       <div class="sett-section">
-        <div class="sett-heading">Chart Colours</div>
-        <div class="sett-hint">Colours used for history and hourly chart bars, and the SOC line.</div>
+        <div class="sett-heading">Bar Chart Colours</div>
+        <div class="sett-hint">Colours used for the history and hourly bar charts, and the SOC line.</div>
         <div class="sett-row"><label>Solar bars</label><input id="s-col-solar"    type="color" class="color-swatch" value="#f59e0b"></div>
         <div class="sett-row"><label>Home bars</label><input id="s-col-home"     type="color" class="color-swatch" value="#38bdf8"></div>
         <div class="sett-row"><label>Grid In bars</label><input id="s-col-grid_in"  type="color" class="color-swatch" value="#f87171"></div>
@@ -756,6 +756,16 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Bat Chg bars</label><input id="s-col-bat_chg"  type="color" class="color-swatch" value="#818cf8"></div>
         <div class="sett-row"><label>Bat Dis bars</label><input id="s-col-bat_dis"  type="color" class="color-swatch" value="#c084fc"></div>
         <div class="sett-row"><label>SOC % line</label><input id="s-col-soc"     type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Power Graph Colours</div>
+        <div class="sett-hint">Colours used for the Power graph (signed area chart).</div>
+        <div class="sett-row"><label>Solar</label><input id="s-col-graph_solar"   type="color" class="color-swatch" value="#f59e0b"></div>
+        <div class="sett-row"><label>Home</label><input id="s-col-graph_home"    type="color" class="color-swatch" value="#38bdf8"></div>
+        <div class="sett-row"><label>Battery charge</label><input id="s-col-graph_bat_chg" type="color" class="color-swatch" value="#818cf8"></div>
+        <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
+        <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
+        <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
       </div>
       <button id="sett-save">Save Settings</button>
       <div id="sett-msg"></div>
@@ -2101,7 +2111,8 @@ async function loadSettings() {
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
     if (s.chart_colors) {
-      ['solar','home','grid_in','grid_out','bat_chg','bat_dis','soc'].forEach(k => {
+      ['solar','home','grid_in','grid_out','bat_chg','bat_dis','soc',
+       'graph_solar','graph_home','graph_bat_chg','graph_bat_dis','graph_grid','graph_soc'].forEach(k => {
         const el = $('s-col-'+k);
         if (el && s.chart_colors[k]) el.value = s.chart_colors[k];
       });
@@ -2143,6 +2154,12 @@ $('sett-save').addEventListener('click', async () => {
       bat_chg: $('s-col-bat_chg').value,
       bat_dis: $('s-col-bat_dis').value,
       soc:     $('s-col-soc').value,
+      graph_solar:   $('s-col-graph_solar').value,
+      graph_home:    $('s-col-graph_home').value,
+      graph_bat_chg: $('s-col-graph_bat_chg').value,
+      graph_bat_dis: $('s-col-graph_bat_dis').value,
+      graph_grid:    $('s-col-graph_grid').value,
+      graph_soc:     $('s-col-graph_soc').value,
     },
   };
   try {
@@ -2213,7 +2230,8 @@ poll();
 initApp();
 
 // ── History ───────────────────────────────────────────────────────────────────
-let SOC_LINE_COLOR = '#fbbf24';  // hourly chart SOC line — overridden by /api/colours
+let SOC_LINE_COLOR = '#fbbf24';        // bar chart SOC line — overridden by /api/colours
+let GRAPH_SOC_LINE_COLOR = '#fbbf24';  // power graph SOC line — overridden by /api/colours
 
 function applyChartColors(c) {
   const keyMap = { solar_kwh:'solar', home_kwh:'home', grid_in_kwh:'grid_in',
@@ -2227,6 +2245,30 @@ function applyChartColors(c) {
   });
   const socSdot = document.querySelector('#hourly-soc-btn .sdot');
   if (socSdot) socSdot.style.background = SOC_LINE_COLOR;
+
+  // Power graph colours (separate from bar chart)
+  if (typeof POWER_SERIES !== 'undefined') {
+    const g = {
+      solar_w:   { pos:'graph_solar' },
+      home_w:    { pos:'graph_home' },
+      battery_w: { pos:'graph_bat_dis', neg:'graph_bat_chg' },
+      grid_w:    { pos:'graph_grid',    neg:'graph_grid' },
+    };
+    POWER_SERIES.forEach(s => {
+      const m = g[s.key]; if (!m) return;
+      if (m.pos && c[m.pos]) s.colorPos = c[m.pos];
+      if (m.neg && c[m.neg]) s.colorNeg = c[m.neg];
+    });
+    if (c.graph_soc) GRAPH_SOC_LINE_COLOR = c.graph_soc;
+    // Sync power series legend dots (single dot per series; battery uses discharge colour)
+    const dot = (key, col) => { const el = document.querySelector(`[data-ps="${key}"] .sdot`); if (el && col) el.style.background = col; };
+    dot('solar_w',   c.graph_solar);
+    dot('home_w',    c.graph_home);
+    dot('battery_w', c.graph_bat_dis);
+    dot('grid_w',    c.graph_grid);
+    const pSocSdot = document.querySelector('#power-soc-btn .sdot');
+    if (pSocSdot && c.graph_soc) pSocSdot.style.background = c.graph_soc;
+  }
 }
 
 const SERIES_DEF = [
@@ -2940,7 +2982,7 @@ function drawPowerChart() {
     const socPts = powerData.filter(d => d.soc != null);
     if (socPts.length > 1) {
       const sPts = socPts.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
-      c.strokeStyle = SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+      c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
       c.beginPath();
       c.moveTo(sPts[0].x, sPts[0].y);
       _catmullPath(c, sPts);
@@ -3017,7 +3059,7 @@ function drawPowerChart() {
                  : s.colorPos;
       lines.push({ text: label + ': ' + fmtW(Math.abs(v)), bold: false, color: col+'ee' });
     });
-    if (powerShowSoc) lines.push({ text:'Battery %: '+(d.soc||0)+'%', bold:false, color:SOC_LINE_COLOR });
+    if (powerShowSoc) lines.push({ text:'Battery %: '+(d.soc||0)+'%', bold:false, color:GRAPH_SOC_LINE_COLOR });
 
     c.font = fs+'px sans-serif';
     const tPad  = 7, tLineH = fs + 5;
