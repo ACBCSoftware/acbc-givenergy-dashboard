@@ -3189,6 +3189,12 @@ $('power-canvas').addEventListener('dblclick', () => {
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
 }
+
+// Apply portrait lock immediately (startup) and whenever the PWA resumes from background
+_manageOrientation(currentView);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) _manageOrientation(currentView);
+});
 </script>
 </body>
 </html>
