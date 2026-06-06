@@ -2795,6 +2795,22 @@ async function loadPowerData() {
   drawPowerChart();
 }
 
+// Catmull-Rom spline path helper — smooth curve that passes through every point.
+// Call after c.moveTo(pts[0].x, pts[0].y); closes nothing, caller handles start/end.
+function _catmullPath(c, pts) {
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
+    c.bezierCurveTo(
+      p1.x + (p2.x - p0.x) / 6,  p1.y + (p2.y - p0.y) / 6,
+      p2.x - (p3.x - p1.x) / 6,  p2.y - (p3.y - p1.y) / 6,
+      p2.x, p2.y
+    );
+  }
+}
+
 function _roundRectPath(c, x, y, w, h, r) {
   c.beginPath();
   c.moveTo(x+r, y);
@@ -2914,7 +2930,8 @@ function drawPowerChart() {
       c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
       c.beginPath();
       c.moveTo(pts[0].x, yZero);
-      pts.forEach(p => c.lineTo(p.x, p.y));
+      c.lineTo(pts[0].x, pts[0].y);
+      _catmullPath(c, pts);
       c.lineTo(pts[pts.length-1].x, yZero);
       c.closePath();
       c.fillStyle = color;
@@ -2927,9 +2944,10 @@ function drawPowerChart() {
     // Negative area (below zero — y > yZero), only if series can go negative
     if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
 
-    // Series outline
+    // Smooth series outline
     c.beginPath();
-    pts.forEach((p, i) => i===0 ? c.moveTo(p.x, p.y) : c.lineTo(p.x, p.y));
+    c.moveTo(pts[0].x, pts[0].y);
+    _catmullPath(c, pts);
     c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
     c.stroke();
   });
@@ -2945,13 +2963,11 @@ function drawPowerChart() {
   if (powerShowSoc) {
     const socPts = powerData.filter(d => d.soc != null);
     if (socPts.length > 1) {
+      const sPts = socPts.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
       c.strokeStyle = SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
       c.beginPath();
-      socPts.forEach((d, i) => {
-        const x = xPx(d.t);
-        const y = PT + plotH - (d.soc/100) * plotH;
-        i===0 ? c.moveTo(x, y) : c.lineTo(x, y);
-      });
+      c.moveTo(sPts[0].x, sPts[0].y);
+      _catmullPath(c, sPts);
       c.stroke();
     }
   }
