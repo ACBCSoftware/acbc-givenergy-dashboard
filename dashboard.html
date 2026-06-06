@@ -964,8 +964,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       </div>
       <div class="se-field" id="se-pct-field">
         <label>Power limit <span id="se-pct-val">50%</span></label>
-        <input type="range" id="se-pct" min="0" max="50" value="50"
-          oninput="$('se-pct-val').textContent=this.value+'%'">
+        <input type="range" id="se-pct" min="0" max="50" value="50" data-reg="50"
+          oninput="_sePctInput()">
       </div>
       <div id="se-btn-row">
         <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
@@ -1884,6 +1884,7 @@ async function loadSchedules() {
     if (r.status === 401) { showView('live'); return; }
     const d = await r.json();
     _schedRules = d.rules || [];
+    if (d.power_units) _ctrlPower = { units: d.power_units, maxChg: d.max_charge_w || 2600, maxDis: d.max_discharge_w || 2600 };
     $('sched-master').checked  = !!d.master_enabled;
     $('sched-baseline').value  = d.baseline || 'eco';
     const reserve = d.baseline_soc_reserve ?? 4;
@@ -1903,8 +1904,8 @@ function renderSchedules() {
   }
   list.innerHTML = _schedRules.map(rl => {
     let extra = '';
-    if (rl.action === 'charge')  extra = ` to ${rl.target_soc}% · ${rl.power_pct}% power`;
-    if (rl.action === 'export')  extra = ` · stop at ${rl.target_soc}% · ${rl.power_pct}% power`;
+    if (rl.action === 'charge')  extra = ` to ${rl.target_soc}% · ${_fmtPower(rl.power_pct, 'charge')} power`;
+    if (rl.action === 'export')  extra = ` · stop at ${rl.target_soc}% · ${_fmtPower(rl.power_pct, 'export')} power`;
     return `
       <div class="sched-rule ${rl.enabled ? '' : 'off'}" onclick="openEditor(${rl.id})">
         <div class="sr-main">
@@ -1930,16 +1931,68 @@ function _collectDaysMask() {
   return mask;
 }
 
+// ── Scheduler power-limit helpers (mirrors control-screen _ctrlPower logic) ──
+// _ctrlPower is populated when the control page loads, or from /api/schedules.
+// The DB always stores the raw register value (0–50). Display converts to W or %.
+
+function _sePowerMax(action) {
+  return (action === 'charge') ? _ctrlPower.maxChg : _ctrlPower.maxDis;
+}
+function _seRegToDisplay(reg, action) {
+  if (_ctrlPower.units === 'watts') {
+    const maxW = _sePowerMax(action);
+    return Math.round((reg / 50) * maxW / 100) * 100;
+  }
+  return reg;
+}
+function _seDisplayToReg(display, action) {
+  if (_ctrlPower.units === 'watts') {
+    const maxW = _sePowerMax(action);
+    return Math.max(0, Math.min(50, Math.round(display / maxW * 50)));
+  }
+  return Math.max(0, Math.min(50, display));
+}
+function _seConfigPowerSlider(action) {
+  const sl  = $('se-pct');
+  const lbl = $('se-pct-val');
+  const reg = parseInt(sl.dataset.reg ?? '50');
+  if (_ctrlPower.units === 'watts') {
+    const maxW    = _sePowerMax(action);
+    const display = Math.round((reg / 50) * maxW / 100) * 100;
+    sl.min = 0; sl.max = maxW; sl.step = 100;
+    sl.value = display;
+    lbl.textContent = display + ' W';
+  } else {
+    sl.min = 0; sl.max = 50; sl.step = 1;
+    sl.value = reg;
+    lbl.textContent = reg + '%';
+  }
+}
+function _sePctInput() {
+  const sl = $('se-pct');
+  // Keep dataset.reg in sync so action-switch re-converts correctly
+  sl.dataset.reg = _seDisplayToReg(+sl.value, $('se-action').value);
+  $('se-pct-val').textContent = _ctrlPower.units === 'watts' ? sl.value + ' W' : sl.value + '%';
+}
+function _fmtPower(reg, action) {
+  if (_ctrlPower.units === 'watts') {
+    const maxW = _sePowerMax(action);
+    return Math.round((reg / 50) * maxW / 100) * 100 + ' W';
+  }
+  return reg + '%';
+}
+
 function seActionChanged() {
   const action = $('se-action').value;
   const showSoc = action === 'charge' || action === 'export';
   $('se-soc-field').style.display = showSoc ? '' : 'none';
-  $('se-pct-field').style.display = (action === 'charge' || action === 'export') ? '' : 'none';
+  $('se-pct-field').style.display = showSoc ? '' : 'none';
   if (action === 'charge') {
     $('se-soc-label').innerHTML = 'Charge to <span id="se-soc-val">' + $('se-soc').value + '%</span>';
   } else if (action === 'export') {
     $('se-soc-label').innerHTML = 'Stop discharging below <span id="se-soc-val">' + $('se-soc').value + '%</span>';
   }
+  _seConfigPowerSlider(action);
 }
 
 // Build the 48 half-hour options (00:00 … 23:30) into a <select>, selecting `val`.
@@ -1963,10 +2016,9 @@ function openEditor(id) {
   const soc = (rl && rl.target_soc != null) ? rl.target_soc : (rl && rl.action === 'export' ? 10 : 100);
   $('se-soc').value              = soc;
   const pct = (rl && rl.power_pct != null) ? rl.power_pct : 50;
-  $('se-pct').value              = pct;
-  $('se-pct-val').textContent    = pct + '%';
+  $('se-pct').dataset.reg = pct;   // store register value; seActionChanged converts to display
   _buildDayChips(rl ? rl.days_mask : 127);
-  seActionChanged();
+  seActionChanged();               // configures slider range + display from data-reg
   $('sched-editor').classList.add('open');
 }
 function closeEditor() { $('sched-editor').classList.remove('open'); }
@@ -1980,7 +2032,7 @@ async function saveRule() {
     end:        $('se-end').value,
     days_mask:  mask,
     target_soc: +$('se-soc').value,
-    power_pct:  +$('se-pct').value,
+    power_pct:  _seDisplayToReg(+$('se-pct').value, $('se-action').value),
     enabled:    true,
   };
   if (_editingId != null) {

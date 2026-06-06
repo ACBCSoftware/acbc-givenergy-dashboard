@@ -1927,6 +1927,9 @@ def get_schedules():
         "master_enabled":         SCHEDULER_ENABLED,
         "baseline":               SCHEDULER_BASELINE,
         "baseline_soc_reserve":   SCHEDULER_BASELINE_SOC_RESERVE,
+        "power_units":            POWER_UNITS,
+        "max_charge_w":           MAX_CHARGE_W,
+        "max_discharge_w":        MAX_DISCHARGE_W,
         "rules":                  rows,
     })
 
