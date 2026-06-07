@@ -2333,7 +2333,8 @@ document.addEventListener('visibilitychange', () => {
     _pauseLoop();
   } else if (currentView === 'live') {
     layout(); particles.length = 0;
-    _resumeLoop();
+    render();       // draw lines immediately — don't wait for first rAF tick
+    _resumeLoop();  // then start the animation loop for particles
   }
 });
 
