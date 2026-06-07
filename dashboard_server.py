@@ -1214,13 +1214,13 @@ _detect_lock = threading.Lock()
 
 # DTC first-byte → profile (before firmware disambiguation)
 _DTC_PREFIX_PROFILE = {
-    "2": "single_phase_2slot",    # HYBRID family — fw disambiguates Gen2/Gen3
-    "3": "single_phase_2slot",    # AC single-phase
-    "4": "three_phase_aio",       # three-phase hybrid
-    "5": "single_phase_2slot",    # EMS
-    "6": "three_phase_aio",       # three-phase AC
-    "7": "single_phase_2slot",    # GATEWAY
-    "8": "three_phase_aio",       # ALL_IN_ONE family
+    "2": "single_phase_2slot",       # HYBRID family — fw disambiguates Gen2/Gen3
+    "3": "single_phase_ac_coupled",  # AC single-phase (GIV-AC3.0 etc.) — 1 charge slot only
+    "4": "three_phase_aio",          # three-phase hybrid
+    "5": "single_phase_2slot",       # EMS
+    "6": "three_phase_aio",          # three-phase AC
+    "7": "single_phase_2slot",       # GATEWAY
+    "8": "three_phase_aio",          # ALL_IN_ONE family
 }
 
 # Specific two-digit DTC prefixes that override the coarse map
@@ -1408,17 +1408,29 @@ _CHARGE_SLOT_HR_3PH    = [(1113, 1114), (1115, 1116)]
 _DISCHARGE_SLOT_HR_3PH = [(1118, 1119), (1120, 1121)]
 _HR_3PH_CHARGE_TARGET  = 1111   # shadows HR 116
 
-# Number of slots per profile
-_SLOT_COUNT = {
-    "single_phase_2slot":    2,
-    "single_phase_extended": 10,
-    "three_phase_aio":       2,
-    "gateway_aio":           2,
+# Charge and discharge slot counts per profile (may differ — e.g. AC-coupled
+# inverters have only 1 usable charge slot but 2 discharge slots).
+# Confirmed on GIV-AC3.0 D0.212, 07 Jun 2026: HR 31/32 (charge slot 2) is
+# not writable; HR 56/57 and HR 44/45 (discharge slots 1 & 2) both work.
+_CHARGE_SLOT_COUNT = {
+    "single_phase_ac_coupled": 1,    # GIV-AC3.0: HR 94/95 only; HR 31/32 not writable
+    "single_phase_2slot":      2,
+    "single_phase_extended":  10,
+    "three_phase_aio":         2,
+    "gateway_aio":             2,
+}
+_DISCHARGE_SLOT_COUNT = {
+    "single_phase_ac_coupled": 2,    # GIV-AC3.0: HR 56/57 and HR 44/45 both work
+    "single_phase_2slot":      2,
+    "single_phase_extended":  10,
+    "three_phase_aio":         2,
+    "gateway_aio":             2,
 }
 
 # Profiles that support app-held scheduling (three_phase_aio is read-only for
 # writes, so it is excluded; unknown means detection hasn't run yet).
-_SCHED_PROFILES = {"single_phase_2slot", "single_phase_extended", "gateway_aio"}
+_SCHED_PROFILES = {"single_phase_ac_coupled", "single_phase_2slot",
+                   "single_phase_extended", "gateway_aio"}
 
 
 # ── State reader ──────────────────────────────────────────────────────────────
@@ -1462,7 +1474,8 @@ def _read_control_state() -> dict:
             return hr(n)
 
     # ── Build slot arrays ─────────────────────────────────────────────────────
-    num_slots = _SLOT_COUNT[profile]
+    num_charge_slots    = _CHARGE_SLOT_COUNT[profile]
+    num_discharge_slots = _DISCHARGE_SLOT_COUNT[profile]
 
     def read_slot(slot_hrs, soc_hrs, idx):
         start_hr, end_hr = slot_hrs[idx]
@@ -1479,11 +1492,11 @@ def _read_control_state() -> dict:
 
     charge_slots = [
         read_slot(_CHARGE_SLOT_HR, _CHARGE_SOC_HR, i)
-        for i in range(num_slots)
+        for i in range(num_charge_slots)
     ]
     discharge_slots = [
         read_slot(_DISCHARGE_SLOT_HR, _DISCHARGE_SOC_HR, i)
-        for i in range(num_slots)
+        for i in range(num_discharge_slots)
     ]
 
     if profile == "three_phase_aio":
@@ -1595,9 +1608,9 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     # ── Charge slot ───────────────────────────────────────────────────────────
     if command == "set_charge_slot":
         slot = int(params.get("slot", 1))
-        max_slots = _SLOT_COUNT[profile]
+        max_slots = _CHARGE_SLOT_COUNT[profile]
         if not 1 <= slot <= max_slots:
-            raise ValueError(f"Slot {slot} out of range for this inverter (max {max_slots})")
+            raise ValueError(f"Charge slot {slot} out of range for this inverter (max {max_slots})")
         start_hr, end_hr = _CHARGE_SLOT_HR[slot - 1]
         wr(start_hr, _hhmm_to_bcd(params["start"]))
         wr(end_hr,   _hhmm_to_bcd(params["end"]))
@@ -1606,9 +1619,9 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     # ── Discharge slot ────────────────────────────────────────────────────────
     if command == "set_discharge_slot":
         slot = int(params.get("slot", 1))
-        max_slots = _SLOT_COUNT[profile]
+        max_slots = _DISCHARGE_SLOT_COUNT[profile]
         if not 1 <= slot <= max_slots:
-            raise ValueError(f"Slot {slot} out of range for this inverter (max {max_slots})")
+            raise ValueError(f"Discharge slot {slot} out of range for this inverter (max {max_slots})")
         start_hr, end_hr = _DISCHARGE_SLOT_HR[slot - 1]
         wr(start_hr, _hhmm_to_bcd(params["start"]))
         wr(end_hr,   _hhmm_to_bcd(params["end"]))
