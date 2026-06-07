@@ -91,10 +91,10 @@ CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 SCHEDULER_ENABLED  = _cfg.getboolean("scheduler", "enabled", fallback=False)
 SCHEDULER_BASELINE = _cfg.get("scheduler", "baseline", fallback="eco").strip().lower()
 SCHEDULER_BASELINE_SOC_RESERVE = max(4, min(100, _cfg.getint("scheduler", "baseline_soc_reserve", fallback=4)))
-# Skip slot writes for installs where a cloud integration (Octopus, Predbat, etc.) owns the
-# slot registers and must not be overwritten.  Set to true in config.ini [scheduler] for those.
-# Default false — standalone installs need slots for forced grid charge / grid export.
-SCHEDULER_SKIP_SLOT_WRITES = _cfg.getboolean("scheduler", "skip_slot_writes", fallback=False)
+# NOTE: the scheduler requires exclusive inverter control.  If a cloud integration
+# (Octopus Intelligent Flux, Predbat, etc.) is active, its register locks will cause
+# scheduler writes to be silently rejected by the firmware — behaviour is undefined.
+# Disconnect any cloud integration before enabling the scheduler.
 _SCHED_BASELINES   = ("eco", "storage")   # eco = discharge-on/grid-charge-off
 if SCHEDULER_BASELINE not in _SCHED_BASELINES:
     SCHEDULER_BASELINE = "eco"
@@ -1759,17 +1759,15 @@ def _sched_compute_writes(desired: dict):
     if mode == "charge":
         target = max(4, min(100, int(desired.get("target_soc", 100))))
         # Slot writes FIRST so the inverter sees a valid active slot before
-        # ENABLE_CHARGE=1 — the inverter may reject the enable if no slot exists.
+        # ENABLE_CHARGE=1 — the inverter rejects the enable if no slot exists.
         # (Live-tested on GIV-AC3.0 D0.212 — test C2 proved this, 07 Jun 2026.)
-        w = []
-        if not SCHEDULER_SKIP_SLOT_WRITES:
-            # slot_start / slot_end are "HH:MM" strings from the rule row;
-            # convert via minutes so _mins_to_hhmm can apply the 00:00→00:01 clamp.
-            cs = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_start", "00:01")))
-            ce = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_end",   "00:01")))
-            w += [(_CHARGE_SLOT_HR[0][0], cs),   # HR 94  charge slot 1 start
-                  (_CHARGE_SLOT_HR[0][1], ce)]    # HR 95  charge slot 1 end
-        w += [(_HR["ENABLE_DISCHARGE"],                          0),
+        # slot_start / slot_end are "HH:MM" strings from the rule row;
+        # convert via minutes so _mins_to_hhmm can apply the 00:00→00:01 clamp.
+        cs = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_start", "00:01")))
+        ce = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_end",   "00:01")))
+        w  = [(_CHARGE_SLOT_HR[0][0], cs),   # HR 94  charge slot 1 start
+              (_CHARGE_SLOT_HR[0][1], ce),   # HR 95  charge slot 1 end
+              (_HR["ENABLE_DISCHARGE"],                          0),
               (_HR["BATTERY_POWER_MODE"],                        1),   # demand / eco
               (_HR["ENABLE_CHARGE_TARGET"], 0 if target == 100 else 1),
               (_HR["CHARGE_TARGET_SOC"],                    target),
@@ -1781,13 +1779,11 @@ def _sched_compute_writes(desired: dict):
         stop = max(4, min(100, int(desired.get("stop_soc", 4))))
         # Discharge slot FIRST — firmware requires an active discharge slot for
         # forced grid export (eco OFF + HR59=1 without a slot = idle, not export).
-        w = []
-        if not SCHEDULER_SKIP_SLOT_WRITES:
-            dstart = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_start", "00:01")))
-            dend   = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_end",   "00:01")))
-            w += [(_DISCHARGE_SLOT_HR[0][0], dstart),   # HR 56  discharge slot 1 start
-                  (_DISCHARGE_SLOT_HR[0][1], dend)]      # HR 57  discharge slot 1 end
-        w += [(_HR["ENABLE_CHARGE"],               0),
+        dstart = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_start", "00:01")))
+        dend   = _mins_to_hhmm(_hhmm_to_min(desired.get("slot_end",   "00:01")))
+        w  = [(_DISCHARGE_SLOT_HR[0][0], dstart),   # HR 56  discharge slot 1 start
+              (_DISCHARGE_SLOT_HR[0][1], dend),      # HR 57  discharge slot 1 end
+              (_HR["ENABLE_CHARGE"],               0),
               (_HR["BATTERY_POWER_MODE"],           0),   # 0 = export / max-power
               (_HR["BATTERY_SOC_RESERVE"],       stop),
               (_HR["BATTERY_DISCHARGE_LIMIT"],    pct),
@@ -1797,19 +1793,16 @@ def _sched_compute_writes(desired: dict):
     elif mode == "hold":
         w = [(_HR["ENABLE_CHARGE"],        0),
              (_HR["ENABLE_CHARGE_TARGET"], 0),
-             (_HR["ENABLE_DISCHARGE"],     0)]
-        if not SCHEDULER_SKIP_SLOT_WRITES:
-            # Clear both slot pairs so they don't accidentally re-activate later.
-            w += [(_CHARGE_SLOT_HR[0][0],    0),   # HR 94  charge slot 1 start → disabled
-                  (_CHARGE_SLOT_HR[0][1],    0),   # HR 95  charge slot 1 end   → disabled
-                  (_DISCHARGE_SLOT_HR[0][0], 0),   # HR 56  discharge slot 1 start → disabled
-                  (_DISCHARGE_SLOT_HR[0][1], 0)]   # HR 57  discharge slot 1 end   → disabled
+             (_HR["ENABLE_DISCHARGE"],     0),
+             (_CHARGE_SLOT_HR[0][0],    0),   # HR 94  charge slot 1 start → disabled
+             (_CHARGE_SLOT_HR[0][1],    0),   # HR 95  charge slot 1 end   → disabled
+             (_DISCHARGE_SLOT_HR[0][0], 0),   # HR 56  discharge slot 1 start → disabled
+             (_DISCHARGE_SLOT_HR[0][1], 0)]   # HR 57  discharge slot 1 end   → disabled
         summary = "Hold charge"
 
     else:   # baseline (also used for cleanup when master is switched off)
         reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
-        # Clear slots first, then set the desired base state.
-        slot_clears = [] if SCHEDULER_SKIP_SLOT_WRITES else [
+        slot_clears = [
             (_CHARGE_SLOT_HR[0][0],    0),   # HR 94  charge slot 1 start → disabled
             (_CHARGE_SLOT_HR[0][1],    0),   # HR 95  charge slot 1 end   → disabled
             (_DISCHARGE_SLOT_HR[0][0], 0),   # HR 56  discharge slot 1 start → disabled

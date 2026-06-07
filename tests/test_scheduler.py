@@ -159,7 +159,6 @@ def test_compute_charge_writes_slot1():
 def test_compute_charge_midnight_clamp():
     """Slot times of 00:00 must be clamped to 00:01 (0 = disabled on inverter)."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     _, w, _ = ds._sched_compute_writes(
         {"mode": "charge", "target_soc": 80,
          "slot_start": "00:00", "slot_end": "00:00"})
@@ -167,23 +166,9 @@ def test_compute_charge_midnight_clamp():
     assert regs[_HR94] == 1    # 00:00 → 00:01
     assert regs[_HR95] == 1    # 00:00 → 00:01
 
-def test_compute_charge_skip_slot_writes():
-    """With SCHEDULER_SKIP_SLOT_WRITES True, no slot registers must be written."""
-    _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = True
-    _, w, _ = ds._sched_compute_writes(
-        {"mode": "charge", "target_soc": 90,
-         "slot_start": "00:30", "slot_end": "04:30"})
-    regs_written = {r for r, _ in w}
-    assert _HR94 not in regs_written
-    assert _HR95 not in regs_written
-    assert 96 in regs_written   # ENABLE_CHARGE still written
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False  # restore
-
 def test_compute_export_writes_discharge_slot1():
     """Export mode must write HR 56/57 (discharge slot 1) before ENABLE_DISCHARGE."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     _, w, summary = ds._sched_compute_writes(
         {"mode": "export", "stop_soc": 20, "power_pct": 50,
          "slot_start": "16:00", "slot_end": "19:00"})
@@ -202,7 +187,6 @@ def test_compute_export_writes_discharge_slot1():
 def test_compute_hold_clears_slots():
     """Hold mode must clear both charge and discharge slot 1 register pairs."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     _, w, summary = ds._sched_compute_writes({"mode": "hold"})
     regs = {r: v for r, v in w}
     assert regs.get(_HR94, -1) == 0    # charge slot 1 cleared
@@ -213,22 +197,9 @@ def test_compute_hold_clears_slots():
     assert regs[59] == 0               # ENABLE_DISCHARGE = OFF
     assert "Hold" in summary
 
-def test_compute_hold_skip_slot_writes():
-    """Hold with SCHEDULER_SKIP_SLOT_WRITES True must not touch slot registers."""
-    _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = True
-    _, w, _ = ds._sched_compute_writes({"mode": "hold"})
-    regs_written = {r for r, _ in w}
-    assert _HR94 not in regs_written
-    assert _HR95 not in regs_written
-    assert _HR56 not in regs_written
-    assert _HR57 not in regs_written
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False  # restore
-
 def test_compute_baseline_eco_clears_slots():
     """Eco baseline must clear both slot pairs and restore eco / discharge-on."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     ds.SCHEDULER_BASELINE = "eco"
     _, w, summary = ds._sched_compute_writes({"mode": "baseline"})
     regs = {r: v for r, v in w}
@@ -244,7 +215,6 @@ def test_compute_baseline_eco_clears_slots():
 def test_compute_baseline_storage_clears_slots():
     """Storage baseline must clear both slot pairs and leave both charge/discharge off."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     ds.SCHEDULER_BASELINE = "storage"
     _, w, summary = ds._sched_compute_writes({"mode": "baseline"})
     regs = {r: v for r, v in w}
