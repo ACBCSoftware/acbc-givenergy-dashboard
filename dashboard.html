@@ -778,9 +778,13 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 
       <!-- Inverter info -->
       <div class="ctrl-section" style="padding-bottom:6px;border-bottom:1px solid var(--border)">
-        <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
           <div><span class="ctrl-heading">Model</span><br><span id="ctrl-model" style="font-size:.85rem">—</span></div>
           <div><span class="ctrl-heading">Serial</span><br><span id="ctrl-serial" style="font-size:.85rem;font-family:monospace">—</span></div>
+          <button onclick="loadControlState()" title="Refresh inverter detection"
+            style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;
+                   color:var(--muted);cursor:pointer;padding:4px 8px;font-size:1rem;line-height:1"
+            >&#x21BB;</button>
         </div>
       </div>
 
@@ -1504,6 +1508,8 @@ async function loadControlState() {
     // Inverter info
     $('ctrl-model').textContent  = d.model  || '—';
     $('ctrl-serial').textContent = d.serial || '—';
+    // If detection hasn't completed yet, auto-retry once after 3 s
+    if (!d.model) setTimeout(loadControlState, 3000);
 
     // Mode buttons
     const isStorage = d.enable_discharge && d.battery_power_mode === 1;
