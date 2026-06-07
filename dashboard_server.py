@@ -1353,6 +1353,7 @@ _HR = {
     "ENABLE_CHARGE":         96,
     "ENABLE_DISCHARGE":      59,
     "BATTERY_POWER_MODE":    27,
+    "ENABLE_CHARGE_TARGET":  20,    # must be 1 for CHARGE_TARGET_SOC to take effect
     "CHARGE_TARGET_SOC":    116,   # global target; Gen3 also has per-slot at HR 242+
     "BATTERY_SOC_RESERVE":  110,
     "BATTERY_CHARGE_LIMIT": 111,
@@ -1630,6 +1631,7 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     # ── Scalar settings ───────────────────────────────────────────────────────
     if command == "set_charge_target_soc":
         val = max(4, min(100, int(params["value"])))
+        wr(_HR["ENABLE_CHARGE_TARGET"], 0 if val == 100 else 1)
         wr(_HR["CHARGE_TARGET_SOC"], val)
         return f"Charge target SOC set to {val}%"
 
@@ -1731,11 +1733,12 @@ def _sched_compute_writes(desired: dict):
 
     if mode == "charge":
         target = max(4, min(100, int(desired.get("target_soc", 100))))
-        w = [(_HR["ENABLE_DISCHARGE"],       0),
-             (_HR["BATTERY_POWER_MODE"],      1),   # demand
-             (_HR["CHARGE_TARGET_SOC"],  target),
-             (_HR["BATTERY_CHARGE_LIMIT"],  pct),
-             (_HR["ENABLE_CHARGE"],          1)]
+        w = [(_HR["ENABLE_DISCHARGE"],                          0),
+             (_HR["BATTERY_POWER_MODE"],                        1),   # demand
+             (_HR["ENABLE_CHARGE_TARGET"], 0 if target == 100 else 1),
+             (_HR["CHARGE_TARGET_SOC"],                    target),
+             (_HR["BATTERY_CHARGE_LIMIT"],                    pct),
+             (_HR["ENABLE_CHARGE"],                             1)]
         summary = f"Charge to {target}% at {pct}% power"
 
     elif mode == "export":
@@ -1748,19 +1751,22 @@ def _sched_compute_writes(desired: dict):
         summary = f"Export at {pct}% power, stop at {stop}% SOC"
 
     elif mode == "hold":
-        w = [(_HR["ENABLE_CHARGE"],    0),
-             (_HR["ENABLE_DISCHARGE"], 0)]
+        w = [(_HR["ENABLE_CHARGE"],        0),
+             (_HR["ENABLE_CHARGE_TARGET"], 0),
+             (_HR["ENABLE_DISCHARGE"],     0)]
         summary = "Hold charge"
 
     else:   # baseline (also used for cleanup when master is switched off)
         reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
         if SCHEDULER_BASELINE == "storage":
-            w = [(_HR["ENABLE_CHARGE"],       0),
+            w = [(_HR["ENABLE_CHARGE"],        0),
+                 (_HR["ENABLE_CHARGE_TARGET"], 0),
                  (_HR["ENABLE_DISCHARGE"],     0),
                  (_HR["BATTERY_SOC_RESERVE"], reserve)]
             summary = "Baseline: Storage (hold charge)"
         else:   # eco
-            w = [(_HR["ENABLE_CHARGE"],       0),
+            w = [(_HR["ENABLE_CHARGE"],        0),
+                 (_HR["ENABLE_CHARGE_TARGET"], 0),
                  (_HR["BATTERY_POWER_MODE"],   1),   # demand
                  (_HR["BATTERY_SOC_RESERVE"], reserve),
                  (_HR["ENABLE_DISCHARGE"],     1)]
