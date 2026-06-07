@@ -1371,6 +1371,9 @@ _HR = {
 _CHARGE_SLOT_HR = [
     (94, 95),    # slot 1
     (31, 32),    # slot 2  — same address in both 2-slot and extended profiles
+                 #           NOTE: GIV-AC3.0 (Gen2 AC) cannot write HR 31/32 — firmware
+                 #           silently times out the write.  Confirmed live 07 Jun 2026 with
+                 #           no cloud integration active.  Scheduler only ever uses slot 1.
     (246, 247),  # slot 3  } extended (Gen3/Gen4/HV-Gen3) only
     (249, 250),  # slot 4  }
     (252, 253),  # slot 5  }
