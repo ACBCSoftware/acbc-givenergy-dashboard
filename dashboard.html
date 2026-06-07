@@ -46,6 +46,7 @@ html,body{
 #dot{width:7px;height:7px;border-radius:50%;background:#555;transition:background .5s,box-shadow .5s}
 #dot.on {background:#4ade80;box-shadow:0 0 7px #4ade80}
 #dot.err{background:#f87171;box-shadow:0 0 7px #f87171}
+@keyframes spin{to{transform:rotate(360deg)}}
 #weather-badge{
   display:flex;flex-direction:column;align-items:center;gap:3px;
   background:rgba(0,0,0,0.30);border:1px solid var(--border);
@@ -781,7 +782,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
           <div><span class="ctrl-heading">Model</span><br><span id="ctrl-model" style="font-size:.85rem">—</span></div>
           <div><span class="ctrl-heading">Serial</span><br><span id="ctrl-serial" style="font-size:.85rem;font-family:monospace">—</span></div>
-          <button onclick="loadControlState()" title="Refresh inverter detection"
+          <button id="ctrl-refresh-btn" onclick="loadControlState()" title="Refresh inverter detection"
             style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;
                    color:var(--muted);cursor:pointer;padding:4px 8px;font-size:1rem;line-height:1"
             >&#x21BB;</button>
@@ -1499,6 +1500,8 @@ function _ctrlMsg(txt, ok) {
 async function loadControlState() {
   $('ctrl-msg').textContent = 'Reading inverter…';
   $('ctrl-msg').style.color = 'var(--muted)';
+  const btn = $('ctrl-refresh-btn');
+  if (btn) { btn.style.animation = 'spin 1s linear infinite'; btn.disabled = true; }
   try {
     const r = await fetch('/api/control', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
     if (r.status === 401) { showView('live'); return; }
@@ -1550,7 +1553,11 @@ async function loadControlState() {
     _ctrlMsg(roMsg, roMsg === '');
 
     $('ctrl-msg').textContent = roMsg;
-  } catch(e) { _ctrlMsg('Error: ' + e.message, false); }
+  } catch(e) {
+    _ctrlMsg('Error: ' + e.message, false);
+  } finally {
+    if (btn) { btn.style.animation = ''; btn.disabled = false; }
+  }
 }
 
 async function ctrlCmd(command, params) {

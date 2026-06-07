@@ -870,8 +870,8 @@ def _detect_on_socket(s, slave: int) -> None:
     model.  Populates _inverter_profile/_inverter_model so that later calls to
     _detect_inverter() hit the cache and never open a second TCP connection."""
     global _inverter_profile, _inverter_model
-    if _inverter_profile:
-        return   # already done
+    if _inverter_profile and _inverter_profile != "unknown":
+        return   # already successfully detected
     try:
         serial  = b"AB1234G567"
         padding = b"\x00" * 7 + b"\x08"
@@ -1290,12 +1290,14 @@ def _detect_inverter() -> tuple:
     Uses the listener's observed slave as a hint for which address to poll.
     Falls back to an active IR probe on 0x11 if the listener hasn't seen a
     frame yet, so the control page is immediately usable at startup.
+    Failed detections ("unknown") are NOT cached — every call retries until
+    a real model is identified, so the refresh button is always useful.
     """
     global _inverter_profile, _inverter_model
 
     with _detect_lock:
-        if _inverter_profile:
-            # Already detected — return cached values.
+        if _inverter_profile and _inverter_profile != "unknown":
+            # Successfully detected — return cached values.
             slave = _inverter_slave if _inverter_slave else 0x11
             return slave, _inverter_profile, _inverter_model
 
@@ -1332,8 +1334,11 @@ def _detect_inverter() -> tuple:
             log.warning("Inverter detection failed: %s", exc)
             profile, model = "unknown", "Detection failed"
 
-        _inverter_profile = profile
-        _inverter_model   = model
+        # Only cache successful detections — failed ones stay empty so the
+        # next call (or refresh button press) retries automatically.
+        if profile != "unknown":
+            _inverter_profile = profile
+            _inverter_model   = model
         return slave, profile, model
 
 
