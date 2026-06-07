@@ -1556,7 +1556,10 @@ async function loadControlState() {
   } catch(e) {
     _ctrlMsg('Error: ' + e.message, false);
   } finally {
-    if (btn) { btn.style.animation = ''; btn.disabled = false; }
+    if (btn) {
+      btn.style.animation = '';
+      setTimeout(() => { btn.disabled = false; }, 5000);
+    }
   }
 }
 
