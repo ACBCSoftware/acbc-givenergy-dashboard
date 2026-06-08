@@ -245,18 +245,20 @@ html,body{
 #pw-cancel:active{opacity:.6}
 #pw-error{font-size:.75rem;color:#f87171;text-align:center;min-height:16px}
 
-/* ── Quick Action Bar ─────────────────────────── */
-#quick-action-bar{
-  display:none;flex-direction:row;align-items:center;gap:8px;
-  padding:5px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
+/* ── Quick Action Bar (floats inside header below title row) ─── */
+#hdr-title{
+  display:flex;flex-direction:column;align-items:flex-start;gap:6px;
+  font-size:1rem;font-weight:700;letter-spacing:.3px;color:var(--text)
 }
+#hdr-title-row{display:flex;align-items:center}
+#quick-action-bar{display:none;flex-direction:row;gap:7px;align-items:center}
 .qa-btn{
   display:flex;align-items:center;gap:5px;
   background:rgba(0,0,0,0.28);border:1px solid var(--border);border-radius:8px;
-  color:var(--text);cursor:pointer;font-size:.78rem;padding:5px 12px;
+  color:var(--muted);cursor:pointer;font-size:.76rem;padding:4px 10px;
   transition:background .2s,border-color .2s,color .2s;white-space:nowrap;
 }
-.qa-btn:hover:not(:disabled){background:rgba(255,255,255,0.08)}
+.qa-btn:hover:not(:disabled){background:rgba(255,255,255,0.08);color:var(--text)}
 .qa-btn:disabled{opacity:.4;cursor:not-allowed}
 .qa-btn.active-chg{border-color:#4ade80;color:#4ade80;
   animation:qa-pulse-chg 2s ease-in-out infinite}
@@ -530,10 +532,16 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
   <!-- Header -->
   <div id="hdr">
     <div id="hdr-title">
-      <span id="bolt" style="color:#f59e0b;cursor:pointer" title="Settings">&#9889;</span>
-      ACBC - GivEnergy Portal
-      <span id="ctrl-btn" title="Inverter Control"><svg width="15" height="13" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg></span>
-      <span id="sched-btn" title="Schedule"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.4V8l2.5 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      <div id="hdr-title-row">
+        <span id="bolt" style="color:#f59e0b;cursor:pointer" title="Settings">&#9889;</span>
+        ACBC - GivEnergy Portal
+        <span id="ctrl-btn" title="Inverter Control"><svg width="15" height="13" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg></span>
+        <span id="sched-btn" title="Schedule"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.4V8l2.5 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      </div>
+      <div id="quick-action-bar">
+        <button class="qa-btn" id="qa-charge-btn" title=""><svg width="9" height="13" viewBox="0 0 10 16" fill="#f87171"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">Quick Charge</span></button>
+        <button class="qa-btn" id="qa-discharge-btn" title=""><svg width="9" height="13" viewBox="0 0 10 16" fill="#4ade80"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">Quick Discharge</span></button>
+      </div>
     </div>
     <div id="hdr-right">
       <div id="status-pill"><div id="dot"></div><span id="status-txt">Connecting…</span></div>
@@ -543,12 +551,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div id="wx-row3">—</div>
       </div>
     </div>
-  </div>
-
-  <!-- Quick Action Bar -->
-  <div id="quick-action-bar">
-    <button class="qa-btn" id="qa-charge-btn"    title="">&#9889; Quick Charge</button>
-    <button class="qa-btn" id="qa-discharge-btn" title="">&#9889; Quick Discharge</button>
   </div>
 
   <!-- Energy flow area -->
@@ -1478,10 +1480,10 @@ function updateQuickActions(d) {
   chgBtn.className = 'qa-btn' + (chgActive ? ' active-chg' : '');
   if (chgActive) {
     const mins = Math.max(1, Math.ceil((d.quick_charge_remaining || 0) / 60));
-    chgBtn.textContent = '⚡ Charging · ' + mins + ' min';
+    chgBtn.querySelector('.qa-label').textContent = 'Charging · ' + mins + ' min';
     chgBtn.title = 'Click to cancel';
   } else {
-    chgBtn.textContent = '⚡ Quick Charge';
+    chgBtn.querySelector('.qa-label').textContent = 'Quick Charge';
     chgBtn.title = schedBlocking ? 'A scheduled task is currently active'
                  : disActive     ? 'Quick Discharge is active' : '';
   }
@@ -1491,10 +1493,10 @@ function updateQuickActions(d) {
   disBtn.className = 'qa-btn' + (disActive ? ' active-dis' : '');
   if (disActive) {
     const mins = Math.max(1, Math.ceil((d.quick_discharge_remaining || 0) / 60));
-    disBtn.textContent = '⚡ Discharging · ' + mins + ' min';
+    disBtn.querySelector('.qa-label').textContent = 'Discharging · ' + mins + ' min';
     disBtn.title = 'Click to cancel';
   } else {
-    disBtn.textContent = '⚡ Quick Discharge';
+    disBtn.querySelector('.qa-label').textContent = 'Quick Discharge';
     disBtn.title = schedBlocking ? 'A scheduled task is currently active'
                  : chgActive     ? 'Quick Charge is active' : '';
   }
