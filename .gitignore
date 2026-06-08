@@ -49,6 +49,12 @@ givenergy-local-modbus.json
 BACKLOG.md
 RELEASE_PROCESS.md
 PROJECT_MEMORY.md
+PROMPT-model-detection-audit.md
+
+# ─── Reference / research material (large binaries, vendor copyright) ─
+# PDFs are gitignored (vendor copyright + size); text files (models.md, INDEX.md)
+# are also local-only to keep the repo focused on shippable code.
+reference/
 
 # ─── Editor / OS / local agent ────────────────────────────────────────
 .claude/
