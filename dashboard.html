@@ -840,7 +840,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           <button id="ctrl-refresh-btn" onclick="loadControlState()" title="Refresh"
             style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;
                    color:var(--muted);cursor:pointer;padding:4px 8px;font-size:1rem;line-height:1"
-            >&#x21BB;</button>
+            ><span id="ctrl-refresh-icon" style="display:inline-block">&#x21BB;</span></button>
         </div>
       </div>
 
@@ -1644,7 +1644,7 @@ async function loadControlState() {
   $('ctrl-msg').textContent = 'Reading inverter…';
   $('ctrl-msg').style.color = 'var(--muted)';
   const btn = $('ctrl-refresh-btn');
-  if (btn) { btn.style.animation = 'spin 1s linear infinite'; btn.disabled = true; }
+  if (btn) { $('ctrl-refresh-icon').style.animation = 'spin 1s linear infinite'; btn.disabled = true; }
   try {
     const r = await fetch('/api/control', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
     if (r.status === 401) { showView('live'); return; }
@@ -1700,7 +1700,7 @@ async function loadControlState() {
     _ctrlMsg('Error: ' + e.message, false);
   } finally {
     if (btn) {
-      btn.style.animation = '';
+      $('ctrl-refresh-icon').style.animation = '';
       setTimeout(() => { btn.disabled = false; }, 5000);
     }
   }
