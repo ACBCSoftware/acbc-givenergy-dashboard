@@ -662,7 +662,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
   </div>
 
-  <div id="ver-bar">V2.0 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
+  <div id="ver-bar">V2.1 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
   <!-- v1.2 includes inverter control + activity log -->
 
   <!-- Password modal -->
@@ -1476,9 +1476,23 @@ function updateQuickActions(d) {
   const chgBtn = $('qa-charge-btn');
   const disBtn = $('qa-discharge-btn');
 
-  const supported = _QA_PROFILES.has(d.inverter_profile);
-  bar.style.display = (d.quick_actions_enabled && supported && currentView === 'live') ? 'flex' : 'none';
-  if (!d.quick_actions_enabled || !supported || currentView !== 'live') return;
+  _qaEnabled = !!d.quick_actions_enabled;
+
+  // Profile may not be detected yet on first few polls — show greyed until it is
+  const profileKnown = !!d.inverter_profile;
+  const supported    = profileKnown && _QA_PROFILES.has(d.inverter_profile);
+
+  // Hide if QA disabled, or profile is known and not supported, or not on live screen
+  if (!d.quick_actions_enabled || (profileKnown && !supported) || currentView !== 'live') {
+    bar.style.display = 'none'; return;
+  }
+
+  // Show bar — but keep buttons disabled while profile is still being detected
+  bar.style.display = 'flex';
+  if (!profileKnown) {
+    chgBtn.disabled = disBtn.disabled = true;
+    return;
+  }
 
   const schedBlocking = !!d.scheduler_task_active;
   const chgActive = !!d.quick_charge_active;
@@ -2241,6 +2255,7 @@ $('sched-editor').addEventListener('click', e => { if (e.target.id === 'sched-ed
 
 // ── Settings + password ───────────────────────────────────────────────────────
 let _weatherConfigured = false;
+let _qaEnabled = false;   // tracks quick_actions_enabled so showView can pre-render the bar
 let _adminPw = '';   // held in memory for the session only
 
 function _settHeaders() {
@@ -2588,7 +2603,17 @@ function showView(v) {
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
   $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
-  $('weather-badge').style.display  = (live && _weatherConfigured) ? '' : 'none';
+  $('weather-badge').style.display   = (live && _weatherConfigured) ? '' : 'none';
+  if (live) {
+    if (liveData) {
+      updateQuickActions(liveData);          // data already cached — set correct state immediately
+    } else if (_qaEnabled) {
+      $('quick-action-bar').style.display = 'flex';   // show greyed until first poll arrives
+      $('qa-charge-btn').disabled = $('qa-discharge-btn').disabled = true;
+    }
+  } else {
+    $('quick-action-bar').style.display = 'none';
+  }
   $('ver-bar').style.display        = live         ? '' : 'none';
   if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
   if (v==='history') loadHistory();

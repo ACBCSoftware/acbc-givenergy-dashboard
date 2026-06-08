@@ -50,7 +50,7 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser()
@@ -443,8 +443,9 @@ def _met_nearest_station(lat: float, lng: float) -> dict:
     """Call the Met Office /nearest endpoint to find the closest observation station.
     Returns the first result dict, e.g. {"geohash": "gcj8ds", "area": "Devon", ...}.
     Raises on any network or API error."""
+    # Met Office /nearest requires at most 2 decimal places on lat/lon
     url = (f"https://data.hub.api.metoffice.gov.uk/observation-land/1/nearest"
-           f"?lat={lat}&lon={lng}")
+           f"?lat={lat:.2f}&lon={lng:.2f}")
     req = urllib.request.Request(
         url, headers={"apikey": MET_API_KEY, "accept": "application/json"})
     with urllib.request.urlopen(req, timeout=15) as r:
