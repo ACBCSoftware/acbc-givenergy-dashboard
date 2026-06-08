@@ -1565,8 +1565,10 @@ const WX_ICON = {
 };
 
 async function pollWeather() {
+  let retryMs = 600000;   // default: refresh every 10 mins
   try {
     const r = await fetch('/api/weather', { cache:'no-store' });
+    if (r.status === 503) { retryMs = 15000; throw new Error('not ready'); }  // server hasn't fetched yet — retry shortly
     if (!r.ok) throw new Error('HTTP '+r.status);
     const w = await r.json();
     if (w.ok) {
@@ -1578,9 +1580,11 @@ async function pollWeather() {
         ? new Date(w.updated).toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'})
         : '—';
       $('wx-row3').textContent = 'Obs ' + obsTime;
+      // Ensure badge is visible now that we have data (may have been hidden on first load)
+      if (currentView === 'live') $('weather-badge').style.display = '';
     }
   } catch(e) { /* silently ignore — weather is non-critical */ }
-  setTimeout(pollWeather, 600000);    // refresh badge every 10 mins (server caches Met Office calls)
+  setTimeout(pollWeather, retryMs);
 }
 
 // ── Update banner ─────────────────────────────────────────────────────────────
