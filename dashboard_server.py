@@ -99,6 +99,14 @@ _SCHED_BASELINES   = ("eco", "storage")   # eco = discharge-on/grid-charge-off
 if SCHEDULER_BASELINE not in _SCHED_BASELINES:
     SCHEDULER_BASELINE = "eco"
 
+# ── Quick Actions (1-hour manual charge / discharge buttons) ─────────────────
+# Buttons shown on the home page when enabled; each runs for up to 1 hour then
+# auto-reverts to the same baseline the scheduler uses.
+QUICK_ACTIONS_ENABLED      = _cfg.getboolean("quick_actions", "enabled",            fallback=False)
+QUICK_CHARGE_POWER_PCT     = max(1, min(100, _cfg.getint("quick_actions", "charge_power_pct",    fallback=100)))
+QUICK_DISCHARGE_POWER_PCT  = max(1, min(100, _cfg.getint("quick_actions", "discharge_power_pct", fallback=100)))
+QUICK_CHARGE_TARGET_SOC    = max(4, min(100, _cfg.getint("quick_actions", "charge_target_soc",   fallback=100)))
+
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
@@ -983,6 +991,7 @@ def _run_listen(st: dict):
                     last_proc = now
                 _maybe_weather()
                 _maybe_check_update()
+                _maybe_quick_action_tick()
                 # Offline watchdog: no decodable frame for 75s
                 if now - last_frame > 75:
                     raise ConnectionError("no inverter data for 75s")
@@ -1851,6 +1860,112 @@ _sched_last_status  = "idle"      # surfaced on /api/data: idle | applying | sum
 _CLEANUP_DESIRED    = {"mode": "baseline"}
 _CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
+# Quick-action runtime state (epoch timestamps; 0 = inactive)
+_quick_charge_until    = 0.0
+_quick_discharge_until = 0.0
+
+
+def _sched_task_active() -> bool:
+    """True when the scheduler has a live charge or export task applied."""
+    if not SCHEDULER_ENABLED or _sched_applied_sig is None:
+        return False
+    try:
+        return json.loads(_sched_applied_sig).get("mode") in ("charge", "export")
+    except Exception:
+        return False
+
+
+def _quick_action_do(action: str):
+    """Write the registers for a quick charge or discharge.
+    Returns (slot_start_hhmm, slot_end_hhmm) integers on success; raises on error."""
+    from datetime import datetime
+    slave, profile, model = _detect_inverter()
+    if profile not in _SCHED_PROFILES:
+        raise RuntimeError(f"Quick actions are not supported on this inverter ({model})")
+
+    now_dt     = datetime.now()
+    start_mins = now_dt.hour * 60 + now_dt.minute
+    end_mins   = min(start_mins + 60, 23 * 60 + 59)   # clamp to 23:59 — no midnight wrap
+    cs         = _mins_to_hhmm(start_mins)
+    ce         = _mins_to_hhmm(end_mins)
+
+    if action == "charge":
+        pct    = max(0, min(50, QUICK_CHARGE_POWER_PCT  * 50 // 100))
+        target = QUICK_CHARGE_TARGET_SOC
+        writes = [
+            (_CHARGE_SLOT_HR[0][0],                              cs),  # HR 94
+            (_CHARGE_SLOT_HR[0][1],                              ce),  # HR 95
+            (_HR["ENABLE_DISCHARGE"],                             0),
+            (_HR["BATTERY_POWER_MODE"],                           1),  # eco / demand
+            (_HR["ENABLE_CHARGE_TARGET"],   0 if target == 100 else 1),
+            (_HR["CHARGE_TARGET_SOC"],                       target),
+            (_HR["BATTERY_CHARGE_LIMIT"],                       pct),
+            (_HR["ENABLE_CHARGE"],                                1),
+        ]
+        label = f"Quick charge started: slot {cs:04d}–{ce:04d}, target {target}%, power {pct*2}%"
+    else:
+        pct   = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
+        stop  = max(4, SCHEDULER_BASELINE_SOC_RESERVE)
+        writes = [
+            (_DISCHARGE_SLOT_HR[0][0],                           cs),  # HR 56
+            (_DISCHARGE_SLOT_HR[0][1],                           ce),  # HR 57
+            (_HR["ENABLE_CHARGE"],                                0),
+            (_HR["BATTERY_POWER_MODE"],                           0),  # export / max-power
+            (_HR["BATTERY_SOC_RESERVE"],                       stop),
+            (_HR["BATTERY_DISCHARGE_LIMIT"],                    pct),
+            (_HR["ENABLE_DISCHARGE"],                             1),
+        ]
+        label = f"Quick discharge started: slot {cs:04d}–{ce:04d}, stop {stop}% SOC, power {pct*2}%"
+
+    for reg, val in writes:
+        _hr_write(slave, reg, val)
+        time.sleep(_SCHED_WRITE_GAP)
+    _log_control("quick_action", {"action": action, "slot_start": cs, "slot_end": ce}, True, label)
+    log.warning(label)
+    return cs, ce
+
+
+def _quick_action_revert():
+    """Clear quick-action slots and restore eco baseline.  Best-effort — logged on failure."""
+    try:
+        slave, profile, _model = _detect_inverter()
+        if profile not in _SCHED_PROFILES:
+            return
+        reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
+        writes  = [
+            (_CHARGE_SLOT_HR[0][0],       0),  # HR 94 clear
+            (_CHARGE_SLOT_HR[0][1],       0),  # HR 95 clear
+            (_DISCHARGE_SLOT_HR[0][0],    0),  # HR 56 clear
+            (_DISCHARGE_SLOT_HR[0][1],    0),  # HR 57 clear
+            (_HR["ENABLE_CHARGE"],         0),
+            (_HR["ENABLE_CHARGE_TARGET"],  0),
+            (_HR["BATTERY_POWER_MODE"],    1),  # eco
+            (_HR["BATTERY_SOC_RESERVE"], reserve),
+            (_HR["ENABLE_DISCHARGE"],      1),
+        ]
+        for reg, val in writes:
+            _hr_write(slave, reg, val)
+            time.sleep(_SCHED_WRITE_GAP)
+        _log_control("quick_action", {"action": "revert"}, True, "Quick action: reverted to baseline")
+        log.warning("Quick action: reverted to baseline")
+    except Exception as exc:
+        log.warning("Quick action revert failed: %s", exc)
+
+
+def _maybe_quick_action_tick():
+    """Called every poll cycle. Reverts any quick action whose 1-hour window has expired."""
+    global _quick_charge_until, _quick_discharge_until
+    now = time.time()
+    if _quick_charge_until > 0 and now >= _quick_charge_until:
+        log.warning("Quick charge: 1-hour window expired — reverting to baseline")
+        _quick_charge_until = 0.0
+        threading.Thread(target=_quick_action_revert, daemon=True).start()
+    elif _quick_discharge_until > 0 and now >= _quick_discharge_until:
+        log.warning("Quick discharge: 1-hour window expired — reverting to baseline")
+        _quick_discharge_until = 0.0
+        threading.Thread(target=_quick_action_revert, daemon=True).start()
+
+
 def _sched_apply(desired: dict) -> None:
     """Apply a desired state EXACTLY like a manual control button — _hr_write to the
     detected slave (0x32 on this Gen2) with the listen loop left OPEN, from this (scheduler)
@@ -1944,8 +2059,20 @@ def api_data():
         data = dict(_cached)
     # Scheduler on/off is a status flag (not a control), so it rides on the
     # unauthenticated live feed to drive the header indicator.
-    data["scheduler_active"] = SCHEDULER_ENABLED
-    data["scheduler_status"] = _sched_last_status
+    data["scheduler_active"]      = SCHEDULER_ENABLED
+    data["scheduler_status"]      = _sched_last_status
+    data["scheduler_task_active"] = _sched_task_active()
+    # Quick-action state (unauthenticated — just display flags and countdown)
+    _now = time.time()
+    _qc  = _quick_charge_until    > _now
+    _qd  = _quick_discharge_until > _now
+    data["quick_actions_enabled"]      = QUICK_ACTIONS_ENABLED
+    data["quick_charge_active"]        = _qc
+    data["quick_discharge_active"]     = _qd
+    data["quick_charge_remaining"]     = max(0, int(_quick_charge_until    - _now)) if _qc else 0
+    data["quick_discharge_remaining"]  = max(0, int(_quick_discharge_until - _now)) if _qd else 0
+    # Inverter profile — needed by the frontend to hide quick-action bar on unsupported profiles
+    data["inverter_profile"] = _inverter_profile or ""
     return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
@@ -2099,6 +2226,47 @@ def save_schedule_config():
                     "master_enabled":        SCHEDULER_ENABLED,
                     "baseline":              SCHEDULER_BASELINE,
                     "baseline_soc_reserve":  SCHEDULER_BASELINE_SOC_RESERVE})
+
+@app.route("/api/quick_action", methods=["POST"])
+def quick_action_endpoint():
+    """Start or cancel a 1-hour quick charge / discharge action."""
+    global _quick_charge_until, _quick_discharge_until
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    if not QUICK_ACTIONS_ENABLED:
+        return jsonify({"ok": False, "error": "Quick actions are not enabled in settings"})
+
+    data   = request.get_json(force=True) or {}
+    action = data.get("action", "")          # "charge" or "discharge"
+    start  = bool(data.get("start", True))
+
+    if action not in ("charge", "discharge"):
+        return jsonify({"ok": False, "error": "action must be 'charge' or 'discharge'"})
+
+    if not start:
+        # Cancel
+        if action == "charge":
+            _quick_charge_until = 0.0
+        else:
+            _quick_discharge_until = 0.0
+        threading.Thread(target=_quick_action_revert, daemon=True).start()
+        return jsonify({"ok": True, "message": f"Quick {action} cancelled"})
+
+    # Start
+    try:
+        cs, ce = _quick_action_do(action)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+
+    if action == "charge":
+        _quick_charge_until    = time.time() + 3600
+        _quick_discharge_until = 0.0   # cancel any competing discharge
+    else:
+        _quick_discharge_until = time.time() + 3600
+        _quick_charge_until    = 0.0   # cancel any competing charge
+
+    return jsonify({"ok": True, "message": f"Quick {action} started (slot {cs:04d}–{ce:04d})"})
+
 
 @app.route("/api/logs")
 def get_logs():
@@ -2272,9 +2440,13 @@ def get_settings():
         "backup_enabled":      BACKUP_ENABLED,
         "backup_keep_days":    BACKUP_KEEP_DAYS,
         "last_backup":         _last_backup_info()[1] or "none yet",
-        "check_for_updates":   CHECK_UPDATES,
-        "app_version":         APP_VERSION,
-        "chart_colors":        CHART_COLORS,
+        "check_for_updates":        CHECK_UPDATES,
+        "app_version":              APP_VERSION,
+        "chart_colors":             CHART_COLORS,
+        "quick_actions_enabled":     QUICK_ACTIONS_ENABLED,
+        "quick_charge_power_pct":    QUICK_CHARGE_POWER_PCT,
+        "quick_discharge_power_pct": QUICK_DISCHARGE_POWER_PCT,
+        "quick_charge_target_soc":   QUICK_CHARGE_TARGET_SOC,
         # API key is intentionally never returned to the browser
     })
 
@@ -2285,6 +2457,7 @@ def save_settings():
     global ADMIN_HASH, WEATHER_POLL_MINS
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
     global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
+    global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -2338,6 +2511,19 @@ def save_settings():
             if _valid_hex(v):
                 CHART_COLORS[k] = v
                 cfg.set("colours", k, v)
+
+    if "quick_actions_enabled" in data:
+        QUICK_ACTIONS_ENABLED = bool(data["quick_actions_enabled"])
+        _set("quick_actions", "enabled", "yes" if QUICK_ACTIONS_ENABLED else "no")
+    if "quick_charge_power_pct" in data:
+        QUICK_CHARGE_POWER_PCT = max(1, min(100, int(data["quick_charge_power_pct"])))
+        _set("quick_actions", "charge_power_pct", QUICK_CHARGE_POWER_PCT)
+    if "quick_discharge_power_pct" in data:
+        QUICK_DISCHARGE_POWER_PCT = max(1, min(100, int(data["quick_discharge_power_pct"])))
+        _set("quick_actions", "discharge_power_pct", QUICK_DISCHARGE_POWER_PCT)
+    if "quick_charge_target_soc" in data:
+        QUICK_CHARGE_TARGET_SOC = max(4, min(100, int(data["quick_charge_target_soc"])))
+        _set("quick_actions", "charge_target_soc", QUICK_CHARGE_TARGET_SOC)
 
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:

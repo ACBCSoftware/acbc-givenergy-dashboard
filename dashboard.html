@@ -245,6 +245,30 @@ html,body{
 #pw-cancel:active{opacity:.6}
 #pw-error{font-size:.75rem;color:#f87171;text-align:center;min-height:16px}
 
+/* ── Quick Action Bar ─────────────────────────── */
+#quick-action-bar{
+  display:none;flex-direction:row;align-items:center;gap:8px;
+  padding:5px 12px;border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.qa-btn{
+  display:flex;align-items:center;gap:5px;
+  background:rgba(0,0,0,0.28);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);cursor:pointer;font-size:.78rem;padding:5px 12px;
+  transition:background .2s,border-color .2s,color .2s;white-space:nowrap;
+}
+.qa-btn:hover:not(:disabled){background:rgba(255,255,255,0.08)}
+.qa-btn:disabled{opacity:.4;cursor:not-allowed}
+.qa-btn.active-chg{border-color:#4ade80;color:#4ade80;
+  animation:qa-pulse-chg 2s ease-in-out infinite}
+.qa-btn.active-dis{border-color:#f59e0b;color:#f59e0b;
+  animation:qa-pulse-dis 2s ease-in-out infinite}
+@keyframes qa-pulse-chg{
+  0%,100%{box-shadow:0 0 0 0 rgba(74,222,128,0)}
+  50%{box-shadow:0 0 6px 2px rgba(74,222,128,0.35)}}
+@keyframes qa-pulse-dis{
+  0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,0)}
+  50%{box-shadow:0 0 6px 2px rgba(245,158,11,0.35)}}
+
 /* ── Flow canvas area ─────────────────────────── */
 #flow-wrap{flex:1;min-height:0;position:relative;}
 #cv{position:absolute;inset:0;width:100%;height:100%}
@@ -521,6 +545,12 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
   </div>
 
+  <!-- Quick Action Bar -->
+  <div id="quick-action-bar">
+    <button class="qa-btn" id="qa-charge-btn"    title="">&#9889; Quick Charge</button>
+    <button class="qa-btn" id="qa-discharge-btn" title="">&#9889; Quick Discharge</button>
+  </div>
+
   <!-- Energy flow area -->
   <div id="flow-wrap">
     <canvas id="cv"></canvas>
@@ -763,6 +793,20 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
         <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
         <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Quick Actions</div>
+        <div class="sett-hint">Adds Quick Charge and Quick Discharge buttons to the home page. Each button forces a 1-hour charge or discharge from the grid at the configured power level, then automatically reverts to normal operation. Requires exclusive inverter control — disable any cloud integration (Octopus, Predbat) first.</div>
+        <div class="sett-row">
+          <label>Show buttons</label>
+          <select id="s-qa-enabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="no">Off</option>
+            <option value="yes">On</option>
+          </select>
+        </div>
+        <div class="sett-row"><label>Charge power (%)</label><input id="s-qa-chg-pct" type="number" min="1" max="100"></div>
+        <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
+        <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
       </div>
       <button id="sett-save">Save Settings</button>
       <div id="sett-msg"></div>
@@ -1338,6 +1382,7 @@ function applyData(d) {
   liveData  = d;
   liveFlows = getFlows(d);
   setSchedIcon(d.scheduler_active);
+  updateQuickActions(d);
 
   const solarOn = d.solar_w   > 20;
   const batOn   = d.battery_w > 20;
@@ -1411,6 +1456,75 @@ setInterval(_tickAge, 1000);
 
 // ── Loop ────────────────────────────────────────────────────────────────────
 let _loopRaf = null;
+// ── Quick Actions ─────────────────────────────────────────────────────────────
+const _QA_PROFILES = new Set(['single_phase_ac_coupled','single_phase_2slot','single_phase_extended']);
+let _qaInFlight = false;
+
+function updateQuickActions(d) {
+  const bar    = $('quick-action-bar');
+  const chgBtn = $('qa-charge-btn');
+  const disBtn = $('qa-discharge-btn');
+
+  const supported = _QA_PROFILES.has(d.inverter_profile);
+  bar.style.display = (d.quick_actions_enabled && supported) ? 'flex' : 'none';
+  if (!d.quick_actions_enabled || !supported) return;
+
+  const schedBlocking = !!d.scheduler_task_active;
+  const chgActive = !!d.quick_charge_active;
+  const disActive = !!d.quick_discharge_active;
+
+  // Charge button
+  chgBtn.disabled = schedBlocking || disActive || _qaInFlight;
+  chgBtn.className = 'qa-btn' + (chgActive ? ' active-chg' : '');
+  if (chgActive) {
+    const mins = Math.max(1, Math.ceil((d.quick_charge_remaining || 0) / 60));
+    chgBtn.textContent = '⚡ Charging · ' + mins + ' min';
+    chgBtn.title = 'Click to cancel';
+  } else {
+    chgBtn.textContent = '⚡ Quick Charge';
+    chgBtn.title = schedBlocking ? 'A scheduled task is currently active'
+                 : disActive     ? 'Quick Discharge is active' : '';
+  }
+
+  // Discharge button
+  disBtn.disabled = schedBlocking || chgActive || _qaInFlight;
+  disBtn.className = 'qa-btn' + (disActive ? ' active-dis' : '');
+  if (disActive) {
+    const mins = Math.max(1, Math.ceil((d.quick_discharge_remaining || 0) / 60));
+    disBtn.textContent = '⚡ Discharging · ' + mins + ' min';
+    disBtn.title = 'Click to cancel';
+  } else {
+    disBtn.textContent = '⚡ Quick Discharge';
+    disBtn.title = schedBlocking ? 'A scheduled task is currently active'
+                 : chgActive     ? 'Quick Charge is active' : '';
+  }
+}
+
+async function quickAction(type) {
+  if (_qaInFlight) return;
+  const d = liveData;
+  if (!d) return;
+  const isActive = type === 'charge' ? d.quick_charge_active : d.quick_discharge_active;
+  const label    = type === 'charge' ? 'Quick Charge' : 'Quick Discharge';
+  if (!isActive && !confirm('Start ' + label + ' for up to 1 hour?\n\nThis will force grid ' + (type === 'charge' ? 'charging' : 'export') + ' and requires exclusive inverter control.')) return;
+  _qaInFlight = true;
+  updateQuickActions(d);   // grey buttons immediately while in-flight
+  try {
+    const r = await fetch('/api/quick_action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Password': _adminPw },
+      body: JSON.stringify({ action: type, start: !isActive })
+    });
+    const res = await r.json();
+    if (!res.ok) alert(res.error || 'Request failed');
+    else poll();
+  } catch(e) { alert('Network error'); }
+  finally { _qaInFlight = false; }
+}
+
+$('qa-charge-btn').addEventListener('click',    () => quickAction('charge'));
+$('qa-discharge-btn').addEventListener('click', () => quickAction('discharge'));
+
 function loop() { tickParticles(); render(); _loopRaf = requestAnimationFrame(loop); }
 function _pauseLoop()  { if (_loopRaf) { cancelAnimationFrame(_loopRaf); _loopRaf = null; } }
 function _resumeLoop() { if (!_loopRaf && currentView === 'live') _loopRaf = requestAnimationFrame(loop); }
@@ -2216,6 +2330,10 @@ async function loadSettings() {
     $('s-wxkey').value     = '';
     $('s-wxkey').placeholder = s.weather_configured
       ? 'Key is set — paste new key to change' : 'Paste API key';
+    $('s-qa-enabled').value  = s.quick_actions_enabled     ? 'yes' : 'no';
+    $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
+    $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
+    $('s-qa-chg-soc').value  = s.quick_charge_target_soc   ?? 100;
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
     if (s.chart_colors) {
@@ -2250,10 +2368,14 @@ $('sett-save').addEventListener('click', async () => {
     backup_enabled:      $('s-bkenabled').value === 'yes',
     check_for_updates:   $('s-checkupdates').value === 'yes',
     backup_keep_days:    parseInt($('s-bkkeep').value) || 7,
-    weather_geohash:     $('s-wxhash').value.trim(),
-    weather_api_key:     $('s-wxkey').value.trim(),
-    weather_poll_mins:   parseInt($('s-wxpoll').value) || 30,
-    new_password:        newPw,
+    weather_geohash:          $('s-wxhash').value.trim(),
+    weather_api_key:          $('s-wxkey').value.trim(),
+    weather_poll_mins:        parseInt($('s-wxpoll').value) || 30,
+    quick_actions_enabled:    $('s-qa-enabled').value === 'yes',
+    quick_charge_power_pct:   parseInt($('s-qa-chg-pct').value)  || 100,
+    quick_discharge_power_pct:parseInt($('s-qa-dis-pct').value)  || 100,
+    quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
+    new_password:             newPw,
     chart_colors: {
       solar:   $('s-col-solar').value,
       home:    $('s-col-home').value,
