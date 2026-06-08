@@ -1203,10 +1203,10 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
 # and classifies using the same logic as the givenergy-modbus library.
 #
 # Profiles:
-#   single_phase_2slot     – Gen1/Gen2, Gen3 with ARM fw ≤302
-#   single_phase_extended  – Gen3 (ARM fw >302), Gen3+, Gen4, HV Gen3, AIO Hybrid
-#   three_phase_aio        – three-phase / AIO Commercial / All-in-One
-#   unknown                – detection failed or unrecognised DTC
+#   single_phase_2slot     – Hybrid Gen 1/Gen 2, Gen 3 with ARM fw ≤302
+#   single_phase_extended  – Gen 3 (ARM fw >302), HV Gen 3 (0x81xx), 0x83xx (identity unconfirmed)
+#   three_phase_aio        – three-phase / AIO Commercial / All in One
+#   unknown                – detection failed, unrecognised DTC, or no-battery device (String Inverter)
 
 _inverter_profile: str = ""     # "" = not yet detected
 _inverter_model:   str = ""     # human-readable model name
@@ -1225,13 +1225,14 @@ _DTC_PREFIX_PROFILE = {
 
 # Specific two-digit DTC prefixes that override the coarse map
 _DTC_TWO_PREFIX_PROFILE = {
-    "21": "single_phase_2slot",   # POLAR
-    "41": "three_phase_aio",      # AIO Commercial
-    "51": "single_phase_2slot",   # EMS Commercial
-    "70": "gateway_aio",          # Gateway AIO (DTC 0x70xx) — live data at IR base=1600
-    "81": "single_phase_extended",# HV Gen3 (single-phase HV)
-    "82": "three_phase_aio",      # All-in-One Hybrid
-    "83": "single_phase_extended",# Gen4
+    "21": "single_phase_2slot",    # Polar
+    "23": "unknown",               # String Inverter Gen 3 — no battery, cannot use battery controls
+    "41": "three_phase_aio",       # AIO Commercial
+    "51": "single_phase_2slot",    # EMS Commercial
+    "70": "gateway_aio",           # Gateway / Giv-Gateway (DTC 0x70xx) — live data at IR base=1600
+    "81": "single_phase_extended", # Hybrid Inverter Gen 3 HV (single-phase, 8/10 kW)
+    "82": "three_phase_aio",       # All in One 2 (AIO2 + MPPT)
+    "83": "single_phase_extended", # DTC 0x83xx — identity unconfirmed; community libs say HYBRID_GEN4 but GivEnergy sells no Gen4
 }
 
 # ARM firmware century → generation for DTC prefix "20" (HYBRID family)
@@ -1241,20 +1242,21 @@ _FW_CENTURY_GEN = {3: "gen3", 8: "gen2", 9: "gen2"}
 
 _DTC_TWO_MODEL_NAME = {
     "21": "Polar",
+    "23": "String Inverter Gen 3",
     "41": "AIO Commercial",
     "51": "EMS Commercial",
-    "70": "Gateway AIO",
-    "81": "Hybrid HV Gen3",
-    "82": "All-in-One Hybrid",
-    "83": "Hybrid Gen4",
+    "70": "Gateway",
+    "81": "Hybrid Inverter Gen 3 HV",
+    "82": "All in One 2",
+    "83": "Unknown (0x83)",
 }
 _DTC_ONE_MODEL_NAME = {
-    "3": "AC Inverter",
-    "4": "Three-Phase Hybrid",
-    "5": "EMS",
-    "6": "Three-Phase AC",
+    "3": "AC Coupled Inverter",
+    "4": "Three-Phase Hybrid Inverter",
+    "5": "Energy Management System",
+    "6": "Three-Phase AC Inverter",
     "7": "Gateway",
-    "8": "All-in-One",
+    "8": "All in One",
 }
 
 def _classify_model(raw_dtc: int, arm_fw: int):
@@ -1271,13 +1273,13 @@ def _classify_model(raw_dtc: int, arm_fw: int):
         gen = _FW_CENTURY_GEN.get(arm_fw // 100, "gen1")
         if gen == "gen3":
             profile = "single_phase_extended" if arm_fw > 302 else "single_phase_2slot"
-            model   = "Hybrid Gen3"
+            model   = "Hybrid Inverter Gen 3"
         elif gen == "gen2":
             profile = "single_phase_2slot"
-            model   = "Hybrid Gen2"
+            model   = "Hybrid Inverter Gen 2"
         else:
             profile = "single_phase_2slot"
-            model   = "Hybrid Gen1"
+            model   = "Hybrid Inverter Gen 1"
     elif one in _DTC_PREFIX_PROFILE:
         profile = _DTC_PREFIX_PROFILE[one]
         model   = _DTC_ONE_MODEL_NAME.get(one, f"DTC-{one.upper()}")
@@ -1374,7 +1376,7 @@ _CHARGE_SLOT_HR = [
                  #           NOTE: GIV-AC3.0 (Gen2 AC) cannot write HR 31/32 — firmware
                  #           silently times out the write.  Confirmed live 07 Jun 2026 with
                  #           no cloud integration active.  Scheduler only ever uses slot 1.
-    (246, 247),  # slot 3  } extended (Gen3/Gen4/HV-Gen3) only
+    (246, 247),  # slot 3  } extended (Gen3/HV-Gen3/0x83xx) only
     (249, 250),  # slot 4  }
     (252, 253),  # slot 5  }
     (255, 256),  # slot 6  }
@@ -1630,7 +1632,7 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     # ── Per-slot SOC target (extended profile only) ───────────────────────────
     if command == "set_charge_slot_soc":
         if profile != "single_phase_extended":
-            raise ValueError("Per-slot charge SOC target is only available on Gen3/Gen4 inverters")
+            raise ValueError("Per-slot charge SOC target is only available on Gen3 / HV Gen3 inverters")
         slot = int(params.get("slot", 1))
         if not 1 <= slot <= 10:
             raise ValueError(f"Slot {slot} out of range (max 10)")
@@ -1640,7 +1642,7 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
 
     if command == "set_discharge_slot_soc":
         if profile != "single_phase_extended":
-            raise ValueError("Per-slot discharge SOC target is only available on Gen3/Gen4 inverters")
+            raise ValueError("Per-slot discharge SOC target is only available on Gen3 / HV Gen3 inverters")
         slot = int(params.get("slot", 1))
         if not 1 <= slot <= 10:
             raise ValueError(f"Slot {slot} out of range (max 10)")
