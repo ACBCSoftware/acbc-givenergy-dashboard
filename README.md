@@ -83,7 +83,7 @@ systemd service that starts on boot.
 #### Option A — Installer (recommended)
 
 1. Install [Python 3.11+](https://python.org/downloads/) — **tick "Add Python to PATH"** during setup.
-2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v2.0.exe`**.
+2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v2.1.exe`**.
 3. The installer will:
    - Create a Python virtual environment
    - Install all required packages
@@ -142,20 +142,11 @@ data_retention_days  = 730   ; history kept in database (days)
 
 Displays live Met Office observations in the dashboard header.
 
-1. Register free at [datahub.metoffice.gov.uk](https://datahub.metoffice.gov.uk)
-2. Subscribe to the **Observation Land** (CDP) free tier
-3. Call the nearest-station endpoint to find your geohash:
-   ```
-   GET https://data.hub.api.metoffice.gov.uk/observation-land/1/nearest?lat=XX.XX&lon=-X.XX
-   ```
-4. Add the values to `config.ini`:
-   ```ini
-   [weather]
-   met_api_key = your-api-key-here
-   geohash     = gcxxxx
-   ```
+1. Register free at [datahub.metoffice.gov.uk](https://datahub.metoffice.gov.uk) and subscribe to the **Land Observations** free tier (360 calls/day).
+2. In the dashboard ⚡ Settings screen, paste your API key and enter your postcode — click **Lookup** and the nearest Met Office station is filled in automatically.
+3. Save settings. The weather widget appears within about 15–20 seconds.
 
-Or configure it via the ⚡ Settings screen in the dashboard.
+Full setup guide: [software.andrewcampbell.co.uk/met-office-setup.html](https://software.andrewcampbell.co.uk/met-office-setup.html)
 
 ---
 
