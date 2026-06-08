@@ -49,7 +49,7 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
-APP_VERSION = "1.9"
+APP_VERSION = "2.0"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser()
