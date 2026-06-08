@@ -241,6 +241,20 @@ Full Cloudflare documentation: [developers.cloudflare.com/cloudflare-one](https:
 
 ---
 
+## About
+
+<img src="docs/andi.png" alt="Andi Campbell" align="right" width="110" style="border-radius:50%;margin:0 0 12px 20px">
+
+Hi, I'm Andi. This project started because my wife couldn't see her solar history in the official app any more, and I couldn't stand how the monitoring screen looked on the tablet we use to display what's going on in the house.
+
+It's been quite the learning curve — but with great community groundwork on Modbus, some AI assistance, and more late nights than I care to admit, my front-end skills finally got a back-end engine to match. We got the app we wanted, then I thought: why not share it?
+
+Since then, requests and feedback have grown it from a simple monitor into a full control app, and I'll keep building it as long as I can. A genuine thank you to everyone who has helped test, logged bugs, or suggested features. We may no longer have a warranty on these systems, but we can at least control them how we want.
+
+Got an idea or found a bug? [Open an issue](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues) — every bit of feedback shapes what comes next.
+
+---
+
 ## Licence
 
 MIT Licence — see `LICENCE` file.  
