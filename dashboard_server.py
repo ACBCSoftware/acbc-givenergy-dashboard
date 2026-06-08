@@ -16,6 +16,7 @@ import socket
 import sqlite3
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -76,8 +77,9 @@ POLL_INTERVAL      = _cfg.getint("server", "poll_interval",      fallback=10)
 WEB_PORT           = _cfg.getint("server", "web_port",           fallback=7890)
 DATA_RETENTION_DAYS = _cfg.getint("server", "data_retention_days", fallback=365)
 
-MET_API_KEY      = _cfg.get("weather",    "met_api_key",       fallback="")
-MET_GEOHASH      = _cfg.get("weather",    "geohash",           fallback="")
+MET_API_KEY       = _cfg.get("weather",    "met_api_key",       fallback="")
+MET_GEOHASH       = _cfg.get("weather",    "geohash",           fallback="")
+WEATHER_POSTCODE  = _cfg.get("weather",    "postcode",          fallback="")
 WEATHER_POLL_MINS = _cfg.getint("weather", "poll_interval_mins", fallback=30)
 
 BACKUP_ENABLED   = _cfg.getboolean("backup", "enabled",   fallback=True)
@@ -435,6 +437,30 @@ def _fetch_weather() -> dict:
         "humidity":     latest.get("humidity"),
         "updated":      latest.get("datetime", ""),
     }
+
+def _encode_geohash(lat: float, lng: float, precision: int = 6) -> str:
+    """Encode a lat/lng pair to a Geohash string (pure-Python, no dependencies).
+    Precision 6 ≈ 1.2 km × 0.6 km — appropriate for Met Office station lookup."""
+    _B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+    lat_lo, lat_hi = -90.0, 90.0
+    lng_lo, lng_hi = -180.0, 180.0
+    bits = [16, 8, 4, 2, 1]
+    result, bit, ch, use_lng = [], 0, 0, True
+    while len(result) < precision:
+        if use_lng:
+            mid = (lng_lo + lng_hi) / 2
+            if lng >= mid: ch |= bits[bit]; lng_lo = mid
+            else: lng_hi = mid
+        else:
+            mid = (lat_lo + lat_hi) / 2
+            if lat >= mid: ch |= bits[bit]; lat_lo = mid
+            else: lat_hi = mid
+        use_lng = not use_lng
+        if bit < 4:
+            bit += 1
+        else:
+            result.append(_B32[ch]); bit = 0; ch = 0
+    return "".join(result)
 
 # ── Inverter data: shared field mapping ─────────────────────────────────────────
 def _build_from_input_page(g) -> dict:
@@ -2435,6 +2461,7 @@ def get_settings():
         "poll_interval":       POLL_INTERVAL,
         "data_retention_days": DATA_RETENTION_DAYS,
         "weather_configured":  bool(MET_API_KEY and MET_GEOHASH),
+        "weather_postcode":    WEATHER_POSTCODE,
         "weather_geohash":     MET_GEOHASH,
         "weather_poll_mins":   WEATHER_POLL_MINS,
         "backup_enabled":      BACKUP_ENABLED,
@@ -2453,7 +2480,7 @@ def get_settings():
 @app.route("/api/settings", methods=["POST"])
 def save_settings():
     global INVERTER_IP, INVERTER_PORT, NUM_BATTERIES, POLL_INTERVAL
-    global DATA_RETENTION_DAYS, MET_API_KEY, MET_GEOHASH, _last_weather_ts
+    global DATA_RETENTION_DAYS, MET_API_KEY, MET_GEOHASH, WEATHER_POSTCODE, _last_weather_ts
     global ADMIN_HASH, WEATHER_POLL_MINS
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
     global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
@@ -2501,6 +2528,9 @@ def save_settings():
     new_key = (data.get("weather_api_key") or "").strip()
     if new_key:
         MET_API_KEY = new_key;  cfg.set("weather", "met_api_key", MET_API_KEY); _last_weather_ts = 0
+    if "weather_postcode" in data:
+        WEATHER_POSTCODE = (data["weather_postcode"] or "").strip().upper()
+        cfg.set("weather", "postcode", WEATHER_POSTCODE)
     if "weather_geohash" in data:
         MET_GEOHASH = data["weather_geohash"].strip(); cfg.set("weather", "geohash", MET_GEOHASH); _last_weather_ts = 0
 
@@ -2607,6 +2637,37 @@ def api_weather():
         if not _weather_cached:
             return jsonify({"ok": False, "error": "Not yet fetched"}), 503
         return jsonify(_weather_cached)
+
+@app.route("/api/weather/lookup_postcode", methods=["POST"])
+def weather_lookup_postcode():
+    """Resolve a UK postcode to a Met Office observation geohash via postcodes.io.
+    Requires admin auth. Returns {ok, geohash, lat, lng} or {ok:False, error}."""
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data = request.get_json(force=True) or {}
+    raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
+    if not raw:
+        return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    try:
+        url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = json.loads(r.read())
+        res = body.get("result") or {}
+        lat = res.get("latitude")
+        lng = res.get("longitude")
+        if lat is None or lng is None:
+            return jsonify({"ok": False, "error": "Postcode lookup returned no coordinates"}), 400
+        geohash = _encode_geohash(float(lat), float(lng), 6)
+        log.info("Postcode %s → %.4f, %.4f → geohash %s", raw, lat, lng, geohash)
+        return jsonify({"ok": True, "geohash": geohash, "lat": lat, "lng": lng})
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return jsonify({"ok": False, "error": "Postcode not found — check and try again"}), 404
+        return jsonify({"ok": False, "error": f"Postcode service error ({exc.code})"}), 502
+    except Exception as exc:
+        log.warning("Postcode lookup failed: %s", exc)
+        return jsonify({"ok": False, "error": "Could not reach postcode service — enter geohash manually"}), 502
 
 @app.route("/api/history")
 def api_history():

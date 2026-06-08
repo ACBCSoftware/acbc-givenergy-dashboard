@@ -251,12 +251,13 @@ html,body{
   font-size:1rem;font-weight:700;letter-spacing:.3px;color:var(--text)
 }
 #hdr-title-row{display:flex;align-items:center}
-#quick-action-bar{display:none;flex-direction:row;gap:7px;align-items:center}
+#quick-action-bar{display:none;flex-direction:row;gap:7px;align-items:flex-start;margin-top:4px}
 .qa-btn{
-  display:flex;align-items:center;gap:5px;
-  background:rgba(0,0,0,0.28);border:1px solid var(--border);border-radius:8px;
-  color:var(--muted);cursor:pointer;font-size:.76rem;padding:4px 10px;
-  transition:background .2s,border-color .2s,color .2s;white-space:nowrap;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;
+  background:rgba(0,0,0,0.28);border:1px solid var(--border);border-radius:10px;
+  color:var(--muted);cursor:pointer;font-size:.7rem;line-height:1.25;text-align:center;
+  padding:7px 5px;width:62px;min-height:64px;
+  transition:background .2s,border-color .2s,color .2s;
 }
 .qa-btn:hover:not(:disabled){background:rgba(255,255,255,0.08);color:var(--text)}
 .qa-btn:disabled{opacity:.4;cursor:not-allowed}
@@ -539,8 +540,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <span id="sched-btn" title="Schedule"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.4V8l2.5 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       </div>
       <div id="quick-action-bar">
-        <button class="qa-btn" id="qa-charge-btn" title=""><svg width="9" height="13" viewBox="0 0 10 16" fill="#f87171"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">Quick Charge</span></button>
-        <button class="qa-btn" id="qa-discharge-btn" title=""><svg width="9" height="13" viewBox="0 0 10 16" fill="#4ade80"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">Quick Discharge</span></button>
+        <button class="qa-btn" id="qa-charge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#f87171"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Charge</span></button>
+        <button class="qa-btn" id="qa-discharge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#4ade80"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Discharge</span></button>
       </div>
     </div>
     <div id="hdr-right">
@@ -753,9 +754,17 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       </div>
       <div class="sett-section">
         <div class="sett-heading">Weather (Met Office)</div>
-        <div class="sett-hint">Leave API key blank to keep current value. Weather badge only shows when both fields are set.</div>
+        <div class="sett-hint">Displays live observations from the nearest Met Office station. Leave API key blank to keep current value. <a href="https://software.andrewcampbell.co.uk/met-office-setup.html" target="_blank" rel="noopener" style="color:var(--amber);text-decoration:none">How to get your API key &#8599;</a></div>
         <div class="sett-row"><label>API Key</label><input id="s-wxkey" type="password" placeholder="Paste new key to update"></div>
-        <div class="sett-row"><label>Geohash</label><input id="s-wxhash" type="text" placeholder="e.g. gcj9q6"></div>
+        <div class="sett-row">
+          <label>Postcode</label>
+          <div style="display:flex;gap:6px;flex:1;min-width:0">
+            <input id="s-wxpostcode" type="text" placeholder="e.g. EX1 1AA" style="flex:1;min-width:0;text-transform:uppercase">
+            <button type="button" id="s-wxlookup" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:0 12px;white-space:nowrap;transition:background .2s" onclick="lookupPostcode()">Lookup</button>
+          </div>
+        </div>
+        <div id="s-wxhash-hint" style="display:none;font-size:.74rem;padding:0 0 6px 0;color:var(--muted)"></div>
+        <div class="sett-row"><label style="font-size:.76rem;opacity:.65">Geohash (manual)</label><input id="s-wxhash" type="text" placeholder="Auto-filled by Lookup, or enter directly" style="font-size:.8rem"></div>
         <div class="sett-row"><label>Poll interval (mins)</label><input id="s-wxpoll" type="number" min="5" max="1440"></div>
       </div>
       <div class="sett-section">
@@ -1483,9 +1492,9 @@ function updateQuickActions(d) {
     chgBtn.querySelector('.qa-label').textContent = 'Charging · ' + mins + ' min';
     chgBtn.title = 'Click to cancel';
   } else {
-    chgBtn.querySelector('.qa-label').textContent = 'Quick Charge';
+    chgBtn.querySelector('.qa-label').textContent = '1hr Quick Charge';
     chgBtn.title = schedBlocking ? 'A scheduled task is currently active'
-                 : disActive     ? 'Quick Discharge is active' : '';
+                 : disActive     ? '1hr Quick Discharge is active' : '';
   }
 
   // Discharge button
@@ -1496,9 +1505,9 @@ function updateQuickActions(d) {
     disBtn.querySelector('.qa-label').textContent = 'Discharging · ' + mins + ' min';
     disBtn.title = 'Click to cancel';
   } else {
-    disBtn.querySelector('.qa-label').textContent = 'Quick Discharge';
+    disBtn.querySelector('.qa-label').textContent = '1hr Quick Discharge';
     disBtn.title = schedBlocking ? 'A scheduled task is currently active'
-                 : chgActive     ? 'Quick Charge is active' : '';
+                 : chgActive     ? '1hr Quick Charge is active' : '';
   }
 }
 
@@ -1507,7 +1516,7 @@ async function quickAction(type) {
   const d = liveData;
   if (!d) return;
   const isActive = type === 'charge' ? d.quick_charge_active : d.quick_discharge_active;
-  const label    = type === 'charge' ? 'Quick Charge' : 'Quick Discharge';
+  const label    = type === 'charge' ? '1hr Quick Charge' : '1hr Quick Discharge';
   if (!isActive && !confirm('Start ' + label + ' for up to 1 hour?\n\nThis will force grid ' + (type === 'charge' ? 'charging' : 'export') + ' and requires exclusive inverter control.')) return;
   _qaInFlight = true;
   updateQuickActions(d);   // grey buttons immediately while in-flight
@@ -2309,6 +2318,35 @@ $('pw-modal').addEventListener('click', e => { if (e.target === $('pw-modal')) _
 
 $('sett-back').addEventListener('click', () => { _adminPw = ''; showView('live'); });
 
+async function lookupPostcode() {
+  const btn   = $('s-wxlookup');
+  const hint  = $('s-wxhash-hint');
+  const pc    = $('s-wxpostcode').value.trim();
+  if (!pc) { hint.style.display=''; hint.style.color='var(--red)'; hint.textContent='Enter a postcode first.'; return; }
+  btn.disabled = true; btn.textContent = '…';
+  hint.style.display = ''; hint.style.color = 'var(--muted)'; hint.textContent = 'Looking up…';
+  try {
+    const r = await fetch('/api/weather/lookup_postcode', {
+      method: 'POST',
+      headers: _ctrlHeaders(),
+      body: JSON.stringify({ postcode: pc })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      $('s-wxhash').value = j.geohash;
+      hint.style.color = 'var(--green)';
+      hint.textContent = '✓ Geohash: ' + j.geohash + '  (' + j.lat.toFixed(3) + ', ' + j.lng.toFixed(3) + ')';
+    } else {
+      hint.style.color = 'var(--red)';
+      hint.textContent = '✗ ' + (j.error || 'Lookup failed');
+    }
+  } catch (e) {
+    hint.style.color = 'var(--red)';
+    hint.textContent = '✗ Network error — try again';
+  }
+  btn.disabled = false; btn.textContent = 'Lookup';
+}
+
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
@@ -2327,11 +2365,19 @@ async function loadSettings() {
     $('s-bkkeep').value        = s.backup_keep_days  || 7;
     $('s-bklast').textContent = s.last_backup || '—';
     $('s-bkmsg').textContent = '';
-    $('s-wxhash').value    = s.weather_geohash      || '';
-    $('s-wxpoll').value    = s.weather_poll_mins    || 30;
-    $('s-wxkey').value     = '';
+    $('s-wxpostcode').value = s.weather_postcode    || '';
+    $('s-wxhash').value     = s.weather_geohash     || '';
+    $('s-wxpoll').value     = s.weather_poll_mins   || 30;
+    $('s-wxkey').value      = '';
     $('s-wxkey').placeholder = s.weather_configured
       ? 'Key is set — paste new key to change' : 'Paste API key';
+    // Show geohash hint if already configured
+    if (s.weather_geohash) {
+      $('s-wxhash-hint').style.display = '';
+      $('s-wxhash-hint').textContent = '✓ Geohash: ' + s.weather_geohash;
+    } else {
+      $('s-wxhash-hint').style.display = 'none';
+    }
     $('s-qa-enabled').value  = s.quick_actions_enabled     ? 'yes' : 'no';
     $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
     $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
@@ -2370,6 +2416,7 @@ $('sett-save').addEventListener('click', async () => {
     backup_enabled:      $('s-bkenabled').value === 'yes',
     check_for_updates:   $('s-checkupdates').value === 'yes',
     backup_keep_days:    parseInt($('s-bkkeep').value) || 7,
+    weather_postcode:         $('s-wxpostcode').value.trim().toUpperCase(),
     weather_geohash:          $('s-wxhash').value.trim(),
     weather_api_key:          $('s-wxkey').value.trim(),
     weather_poll_mins:        parseInt($('s-wxpoll').value) || 30,
