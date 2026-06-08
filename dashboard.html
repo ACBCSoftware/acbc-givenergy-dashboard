@@ -1477,8 +1477,8 @@ function updateQuickActions(d) {
   const disBtn = $('qa-discharge-btn');
 
   const supported = _QA_PROFILES.has(d.inverter_profile);
-  bar.style.display = (d.quick_actions_enabled && supported) ? 'flex' : 'none';
-  if (!d.quick_actions_enabled || !supported) return;
+  bar.style.display = (d.quick_actions_enabled && supported && currentView === 'live') ? 'flex' : 'none';
+  if (!d.quick_actions_enabled || !supported || currentView !== 'live') return;
 
   const schedBlocking = !!d.scheduler_task_active;
   const chgActive = !!d.quick_charge_active;
@@ -2335,7 +2335,8 @@ async function lookupPostcode() {
     if (j.ok) {
       $('s-wxhash').value = j.geohash;
       hint.style.color = 'var(--green)';
-      hint.textContent = '✓ Geohash: ' + j.geohash + '  (' + j.lat.toFixed(3) + ', ' + j.lng.toFixed(3) + ')';
+      const area = j.area ? ' — ' + j.area : '';
+      hint.textContent = '✓ Nearest station: ' + j.geohash + area;
     } else {
       hint.style.color = 'var(--red)';
       hint.textContent = '✗ ' + (j.error || 'Lookup failed');

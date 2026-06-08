@@ -438,29 +438,20 @@ def _fetch_weather() -> dict:
         "updated":      latest.get("datetime", ""),
     }
 
-def _encode_geohash(lat: float, lng: float, precision: int = 6) -> str:
-    """Encode a lat/lng pair to a Geohash string (pure-Python, no dependencies).
-    Precision 6 ≈ 1.2 km × 0.6 km — appropriate for Met Office station lookup."""
-    _B32 = "0123456789bcdefghjkmnpqrstuvwxyz"
-    lat_lo, lat_hi = -90.0, 90.0
-    lng_lo, lng_hi = -180.0, 180.0
-    bits = [16, 8, 4, 2, 1]
-    result, bit, ch, use_lng = [], 0, 0, True
-    while len(result) < precision:
-        if use_lng:
-            mid = (lng_lo + lng_hi) / 2
-            if lng >= mid: ch |= bits[bit]; lng_lo = mid
-            else: lng_hi = mid
-        else:
-            mid = (lat_lo + lat_hi) / 2
-            if lat >= mid: ch |= bits[bit]; lat_lo = mid
-            else: lat_hi = mid
-        use_lng = not use_lng
-        if bit < 4:
-            bit += 1
-        else:
-            result.append(_B32[ch]); bit = 0; ch = 0
-    return "".join(result)
+
+def _met_nearest_station(lat: float, lng: float) -> dict:
+    """Call the Met Office /nearest endpoint to find the closest observation station.
+    Returns the first result dict, e.g. {"geohash": "gcj8ds", "area": "Devon", ...}.
+    Raises on any network or API error."""
+    url = (f"https://data.hub.api.metoffice.gov.uk/observation-land/1/nearest"
+           f"?lat={lat}&lon={lng}")
+    req = urllib.request.Request(
+        url, headers={"apikey": MET_API_KEY, "accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        results = json.loads(r.read())
+    if not results:
+        raise ValueError("No station found near that location")
+    return results[0]
 
 # ── Inverter data: shared field mapping ─────────────────────────────────────────
 def _build_from_input_page(g) -> dict:
@@ -801,6 +792,7 @@ def _maybe_weather():
             log.info("Weather: %s°C code=%s", wx["temp"], wx["weather_code"])
         except Exception as exc:
             log.error("Weather fetch failed: %s", exc)
+            _last_weather_ts = time.time()  # back off — don't retry every poll cycle
 
 # ── Update check ──────────────────────────────────────────────────────────────
 _update_info: dict = {}
@@ -2640,14 +2632,21 @@ def api_weather():
 
 @app.route("/api/weather/lookup_postcode", methods=["POST"])
 def weather_lookup_postcode():
-    """Resolve a UK postcode to a Met Office observation geohash via postcodes.io.
-    Requires admin auth. Returns {ok, geohash, lat, lng} or {ok:False, error}."""
+    """Resolve a UK postcode to a Met Office observation station geohash.
+    Step 1: postcodes.io → lat/lng.  Step 2: Met Office /nearest → station geohash.
+    Requires admin auth and a saved Met Office API key.
+    Returns {ok, geohash, area, lat, lng} or {ok:False, error}."""
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    if not MET_API_KEY:
+        return jsonify({"ok": False,
+                        "error": "Met Office API key not configured — "
+                                 "enter and save your API key first, then retry Lookup"}), 400
     data = request.get_json(force=True) or {}
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    # Step 1: postcode → lat/lng via postcodes.io (free, no auth)
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -2658,9 +2657,6 @@ def weather_lookup_postcode():
         lng = res.get("longitude")
         if lat is None or lng is None:
             return jsonify({"ok": False, "error": "Postcode lookup returned no coordinates"}), 400
-        geohash = _encode_geohash(float(lat), float(lng), 6)
-        log.info("Postcode %s → %.4f, %.4f → geohash %s", raw, lat, lng, geohash)
-        return jsonify({"ok": True, "geohash": geohash, "lat": lat, "lng": lng})
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return jsonify({"ok": False, "error": "Postcode not found — check and try again"}), 404
@@ -2668,6 +2664,16 @@ def weather_lookup_postcode():
     except Exception as exc:
         log.warning("Postcode lookup failed: %s", exc)
         return jsonify({"ok": False, "error": "Could not reach postcode service — enter geohash manually"}), 502
+    # Step 2: lat/lng → nearest Met Office station via /nearest
+    try:
+        station = _met_nearest_station(float(lat), float(lng))
+        geohash = station["geohash"]
+        area    = station.get("area", "")
+        log.info("Postcode %s → %.4f, %.4f → station %s (%s)", raw, lat, lng, geohash, area)
+        return jsonify({"ok": True, "geohash": geohash, "area": area, "lat": lat, "lng": lng})
+    except Exception as exc:
+        log.warning("Met Office /nearest failed: %s", exc)
+        return jsonify({"ok": False, "error": "Could not find nearest Met Office station — enter geohash manually"}), 502
 
 @app.route("/api/history")
 def api_history():
