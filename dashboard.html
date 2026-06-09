@@ -97,14 +97,45 @@ html,body{
   color:var(--text);font-size:.82rem;padding:8px 10px;width:58%;outline:none;
   transition:border-color .2s;
 }
+/* Windows Chrome renders select popups with the OS native control (white bg).
+   Hard-coded colours here ensure options are readable on all platforms. */
+select option{background:#172035;color:#ddeeff}
+select optgroup{background:#172035;color:#7fa8cc}
 .sett-row input:focus{border-color:#f59e0b}
-#sett-save{
+#sett-save,.sett-save-btn{
   background:rgba(245,158,11,.18);border:1px solid #f59e0b;border-radius:14px;
   color:#f59e0b;padding:13px;font-size:.88rem;font-weight:600;
   cursor:pointer;width:100%;transition:background .2s;
 }
-#sett-save:active{background:rgba(245,158,11,.35)}
-#sett-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px}
+#sett-save:active,.sett-save-btn:active{background:rgba(245,158,11,.35)}
+#sett-msg,.sett-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px}
+.sett-nav-link{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 4px;cursor:pointer;border-radius:8px;transition:background .15s;
+}
+.sett-nav-link:active{background:rgba(255,255,255,.06)}
+.sett-nav-link span:first-child{font-size:.83rem;color:var(--text)}
+.sett-nav-link span:last-child{font-size:1.1rem;color:var(--muted);opacity:.6}
+/* Tariff panel */
+#tariff-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#tariff-top-row{
+  display:flex;align-items:center;gap:12px;
+  padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border);
+}
+#tariff-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
+#tariff-body{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:14px}
+.tou-window{
+  background:rgba(255,255,255,.04);border:1px solid var(--border);
+  border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;position:relative;
+}
+.tou-remove{
+  position:absolute;top:8px;right:8px;
+  background:none;border:none;color:var(--muted);font-size:1.1rem;cursor:pointer;
+  opacity:.6;line-height:1;padding:2px 5px;
+}
+.tou-remove:hover{opacity:1;color:var(--red)}
+/* Tile value fades when alternating kWh ↔ cost */
+.tile-val{ transition: opacity 0.25s ease; }
 
 /* ── Control button ───────────────────────────── */
 #ctrl-btn, #sched-btn{
@@ -358,8 +389,59 @@ html,body{
 #hist-canvas{display:block;width:100%;height:100%}
 #hist-summary{
   flex-shrink:0;display:flex;gap:5px;overflow-x:auto;
-  padding:4px 12px calc(8px + env(safe-area-inset-bottom,0px));
+  padding:4px 12px 2px;
 }
+#hist-cost-card{
+  flex-shrink:0;padding:0 12px calc(10px + env(safe-area-inset-bottom,0px));
+}
+.tr-source-select{
+  flex:1;padding:7px 10px;background:var(--card);border:1px solid var(--border);
+  border-radius:8px;color:var(--text);font-size:.85rem;cursor:pointer;
+}
+.tr-api-row{display:flex;gap:6px;align-items:center;flex:1;flex-wrap:wrap}
+input.tr-region-input{flex:0 0 44px;max-width:44px;text-align:center;text-transform:uppercase}
+.tr-api-or{font-size:.75rem;color:var(--muted);flex-shrink:0}
+.tr-postcode-input{flex:1;min-width:80px}
+#tr-api-config{
+  background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:10px;
+  padding:10px 14px;margin:8px 0 0;
+}
+.tr-fetch-row{display:flex;align-items:center;gap:8px;margin-top:8px}
+.tr-fetch-status{font-size:.72rem;color:var(--muted);flex:1;line-height:1.4}
+.tr-fetch-status.ok{color:#4ade80}
+.tr-fetch-status.err{color:#f87171}
+.agile-info-card{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:10px 14px;margin-top:4px;
+}
+.agile-info-now{font-size:1.1rem;font-weight:700}
+.agile-info-sub{font-size:.72rem;color:var(--muted);margin-top:3px}
+.cost-card{
+  background:var(--card);border:1px solid var(--border);border-radius:10px;
+  padding:10px 14px;font-size:.8rem;
+}
+.cost-card-hdr{
+  display:flex;align-items:baseline;justify-content:space-between;
+  margin-bottom:7px;
+}
+.cost-card-title{ font-weight:600;font-size:.82rem }
+.cost-card-est{
+  font-size:.64rem;color:var(--muted);font-style:italic;
+}
+.cost-row{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.04);
+  line-height:1.4;
+}
+.cost-row:last-child{ border-bottom:none }
+.cost-row.cost-total{
+  margin-top:5px;padding-top:7px;font-weight:600;
+  border-top:1px solid rgba(255,255,255,0.13);border-bottom:none;
+}
+.cost-lbl{ color:var(--muted) }
+.cost-val{ font-variant-numeric:tabular-nums }
+.cost-val.is-income{ color:#4ade80 }
+.cost-val.is-cost  { color:#f87171 }
 
 /* ── Hourly panel ─────────────────────────────── */
 #hourly-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
@@ -653,16 +735,16 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     <div class="tile" data-series="grid_in_kwh">
       <div class="tile-icon" style="color:#f87171">&#9660;</div>
       <div class="tile-val" id="t-import">—</div>
-      <div class="tile-lbl">Grid import today</div>
+      <div class="tile-lbl" id="t-import-lbl">Grid import today</div>
     </div>
     <div class="tile" data-series="grid_out_kwh">
       <div class="tile-icon" style="color:#4ade80">&#9650;</div>
       <div class="tile-val" id="t-export">—</div>
-      <div class="tile-lbl">Grid export today</div>
+      <div class="tile-lbl" id="t-export-lbl">Grid export today</div>
     </div>
   </div>
 
-  <div id="ver-bar">V2.1 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
+  <div id="ver-bar">V2.2 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
   <!-- v1.2 includes inverter control + activity log -->
 
   <!-- Password modal -->
@@ -710,6 +792,15 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <span id="sett-title">Settings</span>
     </div>
     <div id="sett-body">
+      <button class="sett-save-btn" id="sett-save-top">Save Settings</button>
+      <div class="sett-section">
+        <div class="sett-heading">Tariff &amp; Costs</div>
+        <div class="sett-hint">Configure energy rates to see live cost estimates on the home screen.</div>
+        <div class="sett-nav-link" onclick="showView('tariff')">
+          <span>Tariff Settings &#8250;</span>
+          <span>&#8250;</span>
+        </div>
+      </div>
       <div class="sett-section">
         <div class="sett-heading">Inverter</div>
         <div class="sett-row"><label>IP Address</label><input id="s-ip" type="text" placeholder="192.168.x.x"></div>
@@ -819,8 +910,86 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
         <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
       </div>
-      <button id="sett-save">Save Settings</button>
-      <div id="sett-msg"></div>
+      <button id="sett-save" class="sett-save-btn">Save Settings</button>
+      <div id="sett-msg" class="sett-msg"></div>
+    </div>
+  </div>
+
+  <!-- Tariff panel -->
+  <div id="tariff-panel">
+    <div id="tariff-top-row">
+      <button id="tariff-back" class="hist-back-style">&#8592; Back</button>
+      <span id="tariff-title">&#163; Tariff &amp; Costs</span>
+    </div>
+    <div id="tariff-body">
+      <button class="sett-save-btn" id="tariff-save-top">Save Tariff Settings</button>
+
+      <!-- Source selector -->
+      <div class="sett-section" id="tr-source-section">
+        <div class="sett-heading">Tariff Source</div>
+        <div class="sett-hint">API sources fetch rates automatically. Rates can still be edited manually at any time.</div>
+        <div class="sett-row">
+          <label>Source</label>
+          <select id="tr-source" class="tr-source-select" onchange="_onTariffSourceChange()">
+            <option value="manual">Manual entry</option>
+            <option value="octopus_agile">Octopus Agile (half-hourly)</option>
+            <option value="octopus_tracker">Octopus Tracker (daily)</option>
+            <option value="octopus_cosy">Octopus Cosy</option>
+            <option value="octopus_go">Octopus Go</option>
+            <option value="octopus_flux">Octopus Flux</option>
+            <option value="octopus_intelligent_flux">Octopus Intelligent Flux</option>
+            <option value="octopus_flexible">Octopus Flexible</option>
+            <option value="edf_freephase">EDF FreePhase Dynamic</option>
+          </select>
+        </div>
+        <!-- API config — shown for non-manual sources -->
+        <div id="tr-api-config" style="display:none">
+          <div class="sett-row" style="margin-top:4px">
+            <label>Region</label>
+            <div class="tr-api-row">
+              <input id="tr-region" class="tr-region-input" type="text" maxlength="1" placeholder="C">
+              <span class="tr-api-or">or postcode</span>
+              <input id="tr-postcode" class="tr-postcode-input" type="text" placeholder="e.g. EX4 1AA" style="text-transform:uppercase">
+              <button class="ctrl-btn ctrl-btn-sm" onclick="lookupRegion()">Look up</button>
+            </div>
+          </div>
+          <div id="tr-region-hint" class="sett-hint" style="margin-top:2px">A=East Eng · B=E.Mids · C=London · D=Merseyside · E=W.Mids · F=NE · G=NW · H=Southern · J=SE · K=S.Wales · L=SW · M=Yorkshire · N=S.Scotland · P=N.Scotland</div>
+          <div class="tr-fetch-row">
+            <button class="ctrl-btn ctrl-btn-sm" id="tr-fetch-btn" onclick="fetchRatesNow()">Fetch now</button>
+            <span id="tr-fetch-status" class="tr-fetch-status"></span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Agile / FreePhase current-rate display -->
+      <div class="sett-section" id="tr-agile-section" style="display:none">
+        <div class="sett-heading">Current Agile Rate</div>
+        <div class="agile-info-card">
+          <div class="agile-info-now" id="tr-agile-now">—</div>
+          <div class="agile-info-sub" id="tr-agile-sub"></div>
+        </div>
+      </div>
+
+      <!-- Rates (always visible; auto-populated for API sources) -->
+      <div class="sett-section" id="tr-rates-section">
+        <div class="sett-heading">Rates</div>
+        <div class="sett-hint" id="tr-rates-hint">Set your energy rates to see live cost estimates on the home screen. Standing charge is added as a fixed daily amount.</div>
+        <div class="sett-row"><label>Currency symbol</label><input id="tr-currency" type="text" maxlength="4" placeholder="£" style="width:30%"></div>
+        <div class="sett-row"><label id="tr-import-lbl">Import rate (p/kWh)</label><input id="tr-import" type="number" min="0" step="0.01" placeholder="e.g. 24.50"></div>
+        <div class="sett-row"><label>Export rate (p/kWh)</label><input id="tr-export" type="number" min="0" step="0.01" placeholder="e.g. 15.00"></div>
+        <div class="sett-row"><label>Standing charge (p/day)</label><input id="tr-standing" type="number" min="0" step="0.01" placeholder="e.g. 53.00"></div>
+      </div>
+
+      <!-- TOU windows (hidden for Agile/Tracker/Flexible) -->
+      <div class="sett-section" id="tr-tou-section">
+        <div class="sett-heading">Time-of-use rates</div>
+        <div class="sett-hint">Define up to 3 time windows with separate import and export rates (e.g. peak / off-peak / overnight). The flat rates above apply outside any defined window. Supports overnight windows that cross midnight.</div>
+        <div id="tou-list"></div>
+        <button class="ctrl-btn ctrl-btn-sm" id="tou-add" onclick="touAddWindow()" style="margin-top:6px">+ Add window</button>
+      </div>
+
+      <button class="sett-save-btn" id="tariff-save-bot">Save Tariff Settings</button>
+      <div id="tariff-msg" class="sett-msg"></div>
     </div>
   </div>
 
@@ -938,8 +1107,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all discharge slots','discharge')" style="margin-top:4px">Save Discharge Slots</button>
       </div>
 
-      <div id="ctrl-msg"></div>
-
       <!-- Activity log -->
       <div class="ctrl-section">
         <div class="ctrl-heading">Activity</div>
@@ -948,6 +1115,16 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           View Activity Log
         </button>
       </div>
+
+      <!-- System utilities -->
+      <div class="ctrl-section">
+        <div class="ctrl-heading">System</div>
+        <div class="sett-hint" style="margin-bottom:6px">Sync the inverter&#8217;s internal clock to the server time. Useful after a power cut — clock drift breaks scheduler rules and corrupts history timestamps.</div>
+        <button class="ctrl-btn" onclick="syncInverterClock()">&#128336; Sync inverter clock</button>
+        <div id="sync-clock-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
+      </div>
+
+      <div id="ctrl-msg"></div>
     </div>
   </div>
 
@@ -1069,10 +1246,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="sbtn active" data-s="bat_dis_kwh">
           <span class="sdot" style="background:#c084fc"></span>Bat Dis
         </button>
+        <button class="sbtn active" id="hist-cost-btn">
+          <span class="sdot" style="background:#34d399"></span>Costs
+        </button>
       </div>
     </div>
     <div id="hist-chart-wrap"><canvas id="hist-canvas"></canvas></div>
     <div id="hist-summary"></div>
+    <div id="hist-cost-card"></div>
   </div>
 
   <!-- Hourly breakdown panel -->
@@ -1443,10 +1624,9 @@ function applyData(d) {
   const inv  = d.t_heatsink != null ? ` · Inv ${d.t_heatsink.toFixed(0)}°C` : '';
   $('bat-detail').textContent = `${batState}${temp}${inv}`;
 
-  // Tiles
-  $('t-solar').textContent  = fmtKwh(d.solar_today);
-  $('t-import').textContent = fmtKwh(d.grid_in_today);
-  $('t-export').textContent = fmtKwh(d.grid_out_today);
+  // Tiles — store data and (re)render with current rotation mode
+  _tileLiveData = d;
+  _renderTiles();
 
   // Status — store ts and label; the 1-s ticker (_tickAge) updates the "ago" part
   _lastDataTs     = d.ts || 0;
@@ -2335,7 +2515,387 @@ $('pw-cancel').addEventListener('click', _closePwModal);
 // Tap outside the box to dismiss
 $('pw-modal').addEventListener('click', e => { if (e.target === $('pw-modal')) _closePwModal(); });
 
-$('sett-back').addEventListener('click', () => { _adminPw = ''; showView('live'); });
+// ── Unsaved-changes dirty tracking ───────────────────────────────────────────
+let _settDirty   = false;
+let _tariffDirty = false;
+
+function _markSettDirty()   { _settDirty   = true; }
+function _markTariffDirty() { _tariffDirty = true; }
+
+function _confirmLeave(dirty, action) {
+  if (!dirty) { action(); return; }
+  if (confirm('You have unsaved changes. Leave without saving?')) action();
+}
+
+$('sett-back').addEventListener('click', () => {
+  _confirmLeave(_settDirty, () => { _settDirty = false; _adminPw = ''; showView('live'); });
+});
+$('sett-save-top').addEventListener('click', () => $('sett-save').click());
+
+// Wire dirty tracking on all App Settings inputs
+document.querySelectorAll('#sett-body input, #sett-body select').forEach(el => {
+  el.addEventListener('change', _markSettDirty);
+  el.addEventListener('input',  _markSettDirty);
+});
+
+// ── Tile rotation: kWh ↔ cost every 4 s ─────────────────────────────────────
+let _tileMode     = 'kwh';   // 'kwh' | 'cost'
+let _tileLiveData = null;    // cached from last live poll
+
+function _fmtCost(pence, sym) {
+  return sym + (pence / 100).toFixed(2);
+}
+
+function _renderTiles() {
+  if (!_tileLiveData) return;
+  const d = _tileLiveData;
+  const costOk = d.import_cost_p != null && d.currency_symbol;
+  $('t-solar').textContent = fmtKwh(d.solar_today);
+  if (_tileMode === 'cost' && costOk) {
+    const sym = d.currency_symbol;
+    const totalImport = d.import_cost_p + (d.standing_charge_p || 0);
+    $('t-import').textContent = _fmtCost(totalImport,         sym);
+    $('t-export').textContent = _fmtCost(d.export_income_p,  sym);
+    $('t-import-lbl').textContent = 'Total import cost';
+    $('t-export-lbl').textContent = 'Export earned today';
+  } else {
+    $('t-import').textContent = fmtKwh(d.grid_in_today);
+    $('t-export').textContent = fmtKwh(d.grid_out_today);
+    $('t-import-lbl').textContent = 'Grid import today';
+    $('t-export-lbl').textContent = 'Grid export today';
+  }
+}
+
+function _switchTileMode() {
+  if (!_tileLiveData || _tileLiveData.import_cost_p == null) return;
+  const els = [$('t-import'), $('t-export')];
+  els.forEach(e => { e.style.opacity = '0'; });
+  setTimeout(() => {
+    _tileMode = (_tileMode === 'kwh') ? 'cost' : 'kwh';
+    _renderTiles();
+    els.forEach(e => { e.style.opacity = '1'; });
+  }, 260);
+}
+setInterval(_switchTileMode, 10000);
+
+// ── Tariff settings ───────────────────────────────────────────────────────────
+let _touCount = 0;
+
+// Source-aware UI show/hide
+function _updateTariffSourceUI(src) {
+  const isApi    = src !== 'manual';
+  const isAgile  = src === 'octopus_agile' || src === 'edf_freephase';
+  const showTou  = src === 'manual' || src === 'octopus_cosy' || src === 'octopus_go'
+               || src === 'octopus_flux' || src === 'octopus_intelligent_flux';
+
+  $('tr-api-config').style.display   = isApi   ? '' : 'none';
+  $('tr-agile-section').style.display = isAgile ? '' : 'none';
+  $('tr-tou-section').style.display  = showTou ? '' : 'none';
+
+  // Label tweak: Agile uses import rate as a fallback only
+  $('tr-import-lbl').textContent = isAgile
+    ? 'Fallback import rate (p/kWh)'
+    : 'Import rate (p/kWh)';
+
+  const hint = $('tr-rates-hint');
+  hint.textContent = isAgile
+    ? 'Rates are fetched automatically from the API. The fallback import rate is used if no slot data is available for a given time.'
+    : isApi
+    ? 'Rates are auto-populated from the API and can be overridden here.'
+    : 'Set your energy rates to see live cost estimates on the home screen. Standing charge is added as a fixed daily amount.';
+}
+
+function _onTariffSourceChange() {
+  _updateTariffSourceUI($('tr-source').value);
+  _markTariffDirty();
+}
+
+async function lookupRegion() {
+  const postcode = $('tr-postcode').value.trim();
+  const hint     = $('tr-region-hint');
+  if (!postcode) { hint.textContent = 'Enter a postcode first.'; hint.style.color = '#f87171'; return; }
+  hint.style.color = 'var(--muted)';
+  hint.textContent = 'Looking up…';
+  try {
+    const r = await fetch('/api/tariff/lookup-region', {
+      method: 'POST', headers: _settHeaders(), body: JSON.stringify({ postcode })
+    });
+    const d = await r.json();
+    if (d.ok) {
+      $('tr-region').value = d.region;
+      hint.textContent = `✓ Region ${d.region} found`;
+      hint.style.color = '#4ade80';
+      _markTariffDirty();
+    } else {
+      hint.textContent = '✗ ' + (d.error || 'Not found');
+      hint.style.color = '#f87171';
+    }
+  } catch(e) {
+    hint.textContent = 'Lookup failed';
+    hint.style.color = '#f87171';
+  }
+}
+
+async function fetchRatesNow() {
+  const btn    = $('tr-fetch-btn');
+  const status = $('tr-fetch-status');
+  btn.disabled = true;
+
+  // Auto-save settings first so TARIFF_SOURCE / region are up to date on the server
+  status.textContent = 'Saving settings…';
+  status.className   = 'tr-fetch-status';
+  try {
+    const sr = await fetch('/api/tariff', {
+      method: 'POST', headers: _settHeaders(), body: JSON.stringify(_buildTariffBody())
+    });
+    if (sr.status === 401) {
+      status.textContent = '✗ Session expired — re-enter password';
+      status.className   = 'tr-fetch-status err';
+      btn.disabled = false;
+      return;
+    }
+    const sd = await sr.json();
+    if (!sd.ok) {
+      status.textContent = '✗ Save failed: ' + (sd.error || 'unknown');
+      status.className   = 'tr-fetch-status err';
+      btn.disabled = false;
+      return;
+    }
+    _tariffDirty = false;   // settings are now persisted
+  } catch(e) {
+    status.textContent = '✗ Save failed — check connection';
+    status.className   = 'tr-fetch-status err';
+    btn.disabled = false;
+    return;
+  }
+
+  // Now fetch the rates
+  status.textContent = 'Fetching rates…';
+  try {
+    const r = await fetch('/api/tariff/fetch-now', { method:'POST', headers:_settHeaders() });
+    const d = await r.json();
+    if (d.ok) {
+      status.textContent = '✓ ' + d.msg;
+      status.className   = 'tr-fetch-status ok';
+      loadTariff();
+      // If a background fetch was already in progress, reload again after it finishes
+      if (d.msg && d.msg.toLowerCase().includes('in progress')) {
+        setTimeout(loadTariff, 6000);
+      }
+    } else {
+      status.textContent = '✗ ' + (d.msg || 'Fetch failed');
+      status.className   = 'tr-fetch-status err';
+    }
+  } catch(e) {
+    status.textContent = '✗ Network error';
+    status.className   = 'tr-fetch-status err';
+  }
+  btn.disabled = false;
+}
+
+async function _loadAgileCurrentRate() {
+  try {
+    const r = await fetch('/api/tariff/octopus-status', {
+      cache:'no-store', headers:{'X-Admin-Password':_adminPw}
+    });
+    const d = await r.json();
+    const sym = $('tr-currency').value || '£';
+    if (d.current_rate_p != null) {
+      $('tr-agile-now').textContent = d.current_rate_p.toFixed(2) + 'p/kWh import';
+    }
+    const parts = [];
+    if (d.next_rate_p != null)    parts.push('Next: ' + d.next_rate_p.toFixed(2) + 'p');
+    if (d.current_export_p != null && d.current_export_p > 0)
+      parts.push('Export: ' + d.current_export_p.toFixed(2) + 'p');
+    if (d.slots_tomorrow != null) parts.push(d.slots_tomorrow + ' slots for tomorrow');
+    $('tr-agile-sub').textContent = parts.join(' · ');
+  } catch(e) {}
+}
+
+function touAddWindow(w) {
+  if (_touCount >= 3) return;
+  _touCount++;
+  const idx = _touCount;
+  const div = document.createElement('div');
+  div.className = 'tou-window';
+  div.dataset.idx = idx;
+  div.innerHTML = `
+    <button class="tou-remove" title="Remove" onclick="touRemoveWindow(this)">&#10005;</button>
+    <div class="sett-heading" style="font-size:.68rem">Window ${idx}</div>
+    <div class="sett-row"><label>Name</label><input class="tou-name" type="text" placeholder="e.g. Off-peak" value="${(w&&w.name)||''}"></div>
+    <div class="sett-row"><label>Start</label><input class="tou-start" type="time" value="${(w&&w.start)||''}"></div>
+    <div class="sett-row"><label>End</label><input class="tou-end"   type="time" value="${(w&&w.end)||''}"></div>
+    <div class="sett-row"><label>Import rate (p/kWh)</label><input class="tou-rate"        type="number" min="0" step="0.01" placeholder="e.g. 7.50" value="${(w&&w.rate_p!=null)?w.rate_p:''}"></div>
+    <div class="sett-row"><label>Export rate (p/kWh)</label><input class="tou-export-rate" type="number" min="0" step="0.01" placeholder="e.g. 15.00" value="${(w&&w.export_rate_p!=null)?w.export_rate_p:''}"></div>
+  `;
+  div.querySelectorAll('input').forEach(el => el.addEventListener('input', _markTariffDirty));
+  $('tou-list').appendChild(div);
+  $('tou-add').style.display = _touCount >= 3 ? 'none' : '';
+  _markTariffDirty();
+}
+
+function touRemoveWindow(btn) {
+  btn.closest('.tou-window').remove();
+  _touCount = $('tou-list').querySelectorAll('.tou-window').length;
+  // Re-number headings
+  $('tou-list').querySelectorAll('.tou-window').forEach((d, i) => {
+    d.querySelector('.sett-heading').textContent = `Window ${i + 1}`;
+  });
+  $('tou-add').style.display = _touCount >= 3 ? 'none' : '';
+  _markTariffDirty();
+}
+
+async function loadTariff() {
+  try {
+    const r = await fetch('/api/tariff', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
+    if (r.status === 401) { showView('live'); return; }
+    const s = await r.json();
+
+    // Source + region
+    const src = s.tariff_source || 'manual';
+    $('tr-source').value   = src;
+    $('tr-region').value   = s.octopus_region   || '';
+    $('tr-postcode').value = s.octopus_postcode  || '';
+
+    // Rates
+    $('tr-currency').value = s.currency_symbol    || '£';
+    $('tr-import').value   = s.import_rate_p   != null ? s.import_rate_p   : '';
+    $('tr-export').value   = s.export_rate_p   != null ? s.export_rate_p   : '';
+    $('tr-standing').value = s.standing_charge_p != null ? s.standing_charge_p : '';
+
+    // TOU windows
+    $('tou-list').innerHTML = '';
+    _touCount = 0;
+    (s.tou_windows || []).forEach(w => touAddWindow(w));
+
+    // Source-driven UI visibility
+    _updateTariffSourceUI(src);
+
+    // Fetch status
+    if (src !== 'manual') {
+      const fs      = s.fetch_status || {};
+      const fetched = s.rates_last_fetched;
+      let   statusTxt = fetched
+        ? '✓ Last fetched ' + new Date(fetched).toLocaleString('en-GB',{dateStyle:'short',timeStyle:'short'})
+        : 'Not yet fetched';
+      if (fs.slots_tomorrow) statusTxt += ' · ' + fs.slots_tomorrow + ' slots for tomorrow';
+      const el = $('tr-fetch-status');
+      el.textContent = statusTxt;
+      el.className   = 'tr-fetch-status' + (fetched ? ' ok' : '');
+    }
+
+    // Agile current rate
+    if (src === 'octopus_agile' || src === 'edf_freephase') {
+      _loadAgileCurrentRate();
+    }
+
+    $('tariff-msg').textContent = '';
+    $('tr-region-hint').style.color = '';  // reset any lookup colour
+    _tariffDirty = false;
+  } catch(e) {}
+}
+
+function _buildTariffBody() {
+  const windows = [];
+  $('tou-list').querySelectorAll('.tou-window').forEach(d => {
+    const name       = d.querySelector('.tou-name').value.trim();
+    const start      = d.querySelector('.tou-start').value.trim();
+    const end        = d.querySelector('.tou-end').value.trim();
+    const rate       = parseFloat(d.querySelector('.tou-rate').value)        || 0;
+    const exportRate = parseFloat(d.querySelector('.tou-export-rate').value) || 0;
+    if (name && start && end) windows.push({ name, start, end, rate_p: rate, export_rate_p: exportRate });
+  });
+  return {
+    currency_symbol:   $('tr-currency').value.trim() || '£',
+    import_rate_p:     parseFloat($('tr-import').value)   || 0,
+    export_rate_p:     parseFloat($('tr-export').value)   || 0,
+    standing_charge_p: parseFloat($('tr-standing').value) || 0,
+    tou_windows:       windows,
+    tariff_source:     $('tr-source').value,
+    octopus_region:    ($('tr-region').value   || '').toUpperCase().trim(),
+    octopus_postcode:  ($('tr-postcode').value || '').trim(),
+  };
+}
+
+// Sources that automatically provide each rate — no manual entry needed for these
+const _AUTO_IMPORT_SOURCES = new Set([
+  'octopus_agile', 'octopus_tracker', 'octopus_cosy', 'octopus_go',
+  'octopus_flux', 'octopus_intelligent_flux', 'octopus_flexible',
+  'edf_freephase'   // import rates come from DB slots, same as Agile
+]);
+const _AUTO_EXPORT_SOURCES = new Set([
+  'octopus_agile', 'octopus_flux', 'octopus_intelligent_flux'
+]);
+
+async function saveTariff() {
+  const body = _buildTariffBody();
+  const src  = body.tariff_source;
+
+  // Warn about rates that won't be auto-fetched but are still 0
+  const missing = [];
+  if (!_AUTO_IMPORT_SOURCES.has(src) && body.import_rate_p === 0)
+    missing.push('Import rate (p/kWh) — not auto-fetched for this tariff');
+  if (!_AUTO_EXPORT_SOURCES.has(src) && body.export_rate_p === 0)
+    missing.push('Export rate (p/kWh) — not auto-fetched for this tariff');
+
+  if (missing.length > 0) {
+    const msg = 'The following rates are set to 0 and will not be populated automatically:\n\n'
+      + missing.map(m => '  • ' + m).join('\n')
+      + '\n\nExport earnings and/or cost calculations will be inaccurate until these are set.'
+      + '\n\nSave anyway?';
+    if (!confirm(msg)) return;
+  }
+
+  try {
+    const r   = await fetch('/api/tariff', { method:'POST', headers:_settHeaders(), body:JSON.stringify(body) });
+    if (r.status === 401) { $('tariff-msg').style.color='#f87171'; $('tariff-msg').textContent='Session expired — re-enter password'; return; }
+    const res = await r.json();
+    if (res.ok) {
+      $('tariff-msg').style.color = '#4ade80';
+      $('tariff-msg').textContent = '✓ Saved';
+      _tariffDirty = false;
+    } else {
+      $('tariff-msg').style.color = '#f87171';
+      $('tariff-msg').textContent = '✗ ' + (res.error || 'Save failed');
+    }
+  } catch(e) {
+    $('tariff-msg').style.color = '#f87171';
+    $('tariff-msg').textContent = 'Save failed';
+  }
+}
+
+$('tariff-back').addEventListener('click', () => {
+  _confirmLeave(_tariffDirty, () => { _tariffDirty = false; showView('settings'); });
+});
+['tariff-save-top','tariff-save-bot'].forEach(id => {
+  $( id).addEventListener('click', saveTariff);
+});
+// Dirty-track tariff flat fields
+document.querySelectorAll('#tariff-body > .sett-section input').forEach(el => {
+  el.addEventListener('input', _markTariffDirty);
+});
+
+// ── Inverter clock sync ───────────────────────────────────────────────────────
+async function syncInverterClock() {
+  const now = new Date();
+  const ts = now.toLocaleTimeString('en-GB') + ' ' + now.toLocaleDateString('en-GB');
+  if (!confirm('Set inverter clock to ' + ts + '?')) return;
+  $('sync-clock-msg').style.color = 'var(--muted)';
+  $('sync-clock-msg').textContent = 'Syncing…';
+  try {
+    const r = await fetch('/api/control', {
+      method: 'POST',
+      headers: _ctrlHeaders(),
+      body: JSON.stringify({ command: 'sync_time', params: {} })
+    });
+    const res = await r.json();
+    $('sync-clock-msg').style.color = res.ok ? '#4ade80' : '#f87171';
+    $('sync-clock-msg').textContent = res.ok ? '✓ ' + res.message : '✗ ' + res.message;
+  } catch(e) {
+    $('sync-clock-msg').style.color = '#f87171';
+    $('sync-clock-msg').textContent = '✗ ' + e.message;
+  }
+}
 
 async function lookupPostcode() {
   const btn   = $('s-wxlookup');
@@ -2404,6 +2964,7 @@ async function loadSettings() {
     $('s-qa-chg-soc').value  = s.quick_charge_target_soc   ?? 100;
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
+    _settDirty = false;
     if (s.chart_colors) {
       ['solar','home','grid_in','grid_out','bat_chg','bat_dis','soc',
        'graph_solar','graph_home','graph_bat_chg','graph_bat_dis','graph_grid','graph_soc'].forEach(k => {
@@ -2469,6 +3030,7 @@ $('sett-save').addEventListener('click', async () => {
       if (newPw) _adminPw = newPw;   // keep session in sync with new password
       _weatherConfigured = res.weather_configured;
       applyChartColors(body.chart_colors);
+      _settDirty = false;
       $('sett-msg').style.color = '#4ade80';
       $('sett-msg').textContent = '✓ Saved';
       $('s-wxkey').value = ''; $('s-newpw').value = ''; $('s-confirmpw').value = '';
@@ -2589,6 +3151,7 @@ let histPeriod   = 'day';
 let histOffset   = 0;
 let histData     = [];
 let activeSeries = new Set(['solar_kwh','home_kwh','grid_in_kwh','grid_out_kwh','bat_chg_kwh','bat_dis_kwh']);
+let _showCostCard = true;
 let currentView  = 'live';
 
 function showView(v) {
@@ -2599,6 +3162,7 @@ function showView(v) {
   $('tiles').style.display          = live         ? '' : 'none';
   $('hist-panel').style.display     = v==='history'? 'flex' : 'none';
   $('settings-panel').style.display = v==='settings'? 'flex' : 'none';
+  $('tariff-panel').style.display   = v==='tariff'  ? 'flex' : 'none';
   $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
@@ -2616,8 +3180,9 @@ function showView(v) {
   }
   $('ver-bar').style.display        = live         ? '' : 'none';
   if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
-  if (v==='history') loadHistory();
+  if (v==='history')  loadHistory();
   if (v==='settings') loadSettings();
+  if (v==='tariff')   loadTariff();
   if (v==='control')  loadControlState();
   if (v==='logs')     loadLogs();
   if (v==='schedule') loadSchedules();
@@ -2659,6 +3224,7 @@ function renderHistory() {
 
   drawHistChart();
   updateHistSummary();
+  updateCostCard(histData.length ? (histData[0].cost || null) : null);
 
   if (dayMode) {
     $('hist-summary').innerHTML =
@@ -2835,11 +3401,50 @@ function updateHistSummary() {
   $('hist-summary').innerHTML = '';
 }
 
+function updateCostCard(cost) {
+  const el = $('hist-cost-card');
+  if (!cost) { el.innerHTML = ''; return; }
+
+  const sym = cost.currency_symbol || '£';
+  function fmtP(pence) {
+    return sym + (Math.abs(pence) / 100).toFixed(2);
+  }
+
+  const net        = cost.net_cost_p;
+  const netEarned  = -net;                                   // positive = ahead, negative = behind
+  const netClass   = netEarned >= 0 ? 'is-income' : 'is-cost';
+  const netDisplay = (netEarned >= 0 ? '' : '−') + fmtP(netEarned);
+
+  el.innerHTML = `
+    <div class="cost-card">
+      <div class="cost-card-hdr">
+        <span class="cost-card-title">Estimated costs</span>
+        <span class="cost-card-est">estimated — based on current tariff rates</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-lbl">Import Cost</span>
+        <span class="cost-val is-cost">${fmtP(cost.import_cost_p)}</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-lbl">Standing Charge</span>
+        <span class="cost-val is-cost">${fmtP(cost.standing_charge_p)}</span>
+      </div>
+      <div class="cost-row">
+        <span class="cost-lbl">Export Income</span>
+        <span class="cost-val is-income">${fmtP(cost.export_income_p)}</span>
+      </div>
+      <div class="cost-row cost-total">
+        <span class="cost-lbl">Net Earned</span>
+        <span class="cost-val ${netClass}">${netDisplay}</span>
+      </div>
+    </div>`;
+}
+
 // Tap any bottom tile to open history with all series showing
 document.querySelectorAll('#tiles .tile').forEach(tile =>
   tile.addEventListener('click', () => {
     activeSeries = new Set(SERIES_DEF.map(s => s.key));
-    document.querySelectorAll('#hist-series-row .sbtn').forEach(b => b.classList.add('active'));
+    document.querySelectorAll('#hist-series-row .sbtn[data-s]').forEach(b => b.classList.add('active'));
     showView('history');
   })
 );
@@ -2855,7 +3460,7 @@ function _navStep() {
 $('hist-prev').addEventListener('click', () => { histOffset += _navStep(); loadHistory(); });
 $('hist-next').addEventListener('click', () => { histOffset = Math.max(0, histOffset - _navStep()); loadHistory(); });
 
-document.querySelectorAll('#hist-series-row .sbtn').forEach(b =>
+document.querySelectorAll('#hist-series-row .sbtn[data-s]').forEach(b =>
   b.addEventListener('click', () => {
     const k = b.dataset.s;
     if (activeSeries.has(k)) activeSeries.delete(k); else activeSeries.add(k);
@@ -2863,6 +3468,12 @@ document.querySelectorAll('#hist-series-row .sbtn').forEach(b =>
     drawHistChart();
     updateHistSummary();
   }));
+
+$('hist-cost-btn').addEventListener('click', () => {
+  _showCostCard = !_showCostCard;
+  $('hist-cost-btn').classList.toggle('active', _showCostCard);
+  $('hist-cost-card').style.display = _showCostCard ? '' : 'none';
+});
 
 // Tap the chart in Day view → hourly breakdown for that day
 $('hist-canvas').addEventListener('click', () => {

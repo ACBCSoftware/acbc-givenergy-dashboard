@@ -18,7 +18,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, jsonify, make_response, request, send_file, send_from_directory
@@ -50,7 +50,7 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser()
@@ -141,6 +141,705 @@ def _authorised():
     """Check X-Admin-Password header against stored hash."""
     pw = request.headers.get("X-Admin-Password", "")
     return hashlib.sha256(pw.encode()).hexdigest() == ADMIN_HASH
+
+# ── Tariff / cost estimation ──────────────────────────────────────────────────
+TARIFF_CURRENCY   = _cfg.get("tariff",    "currency_symbol",   fallback="£")
+TARIFF_STANDING_P = _cfg.getfloat("tariff", "standing_charge_p", fallback=0.0)
+TARIFF_EXPORT_P   = _cfg.getfloat("tariff", "export_rate_p",     fallback=0.0)
+TARIFF_IMPORT_P   = _cfg.getfloat("tariff", "import_rate_p",     fallback=0.0)
+TARIFF_TOU: list[dict] = []
+for _i in range(1, 4):
+    _tn  = _cfg.get("tariff", f"tou_{_i}_name",          fallback="")
+    _ts  = _cfg.get("tariff", f"tou_{_i}_start",         fallback="")
+    _te  = _cfg.get("tariff", f"tou_{_i}_end",           fallback="")
+    _tr  = _cfg.getfloat("tariff", f"tou_{_i}_rate_p",          fallback=0.0)
+    _ter = _cfg.getfloat("tariff", f"tou_{_i}_export_rate_p",   fallback=0.0)
+    if _tn and _ts and _te:
+        TARIFF_TOU.append({"name": _tn, "start": _ts, "end": _te,
+                           "rate_p": _tr, "export_rate_p": _ter})
+
+# ── Auto-tariff source ────────────────────────────────────────────────────────
+TARIFF_SOURCE     = _cfg.get("tariff", "tariff_source",      fallback="manual")
+OCTOPUS_REGION    = _cfg.get("tariff", "octopus_region",     fallback="").upper().strip()
+OCTOPUS_POSTCODE  = _cfg.get("tariff", "octopus_postcode",   fallback="").strip()
+_RATES_LAST_FETCHED = _cfg.get("tariff", "rates_last_fetched", fallback="")
+_PRODUCT_OVERRIDE = {
+    "octopus_agile":            _cfg.get("tariff", "product_agile",            fallback=""),
+    "octopus_tracker":          _cfg.get("tariff", "product_tracker",          fallback=""),
+    "octopus_cosy":             _cfg.get("tariff", "product_cosy",             fallback=""),
+    "octopus_go":               _cfg.get("tariff", "product_go",               fallback=""),
+    "octopus_flux":             _cfg.get("tariff", "product_flux",             fallback=""),
+    "octopus_intelligent_flux": _cfg.get("tariff", "product_intelligent_flux", fallback=""),
+    "octopus_flexible":         _cfg.get("tariff", "product_flexible",         fallback=""),
+    "edf_freephase":            _cfg.get("tariff", "product_edf",              fallback=""),
+}
+
+_PRODUCT_DEFAULTS = {
+    "octopus_agile":             "AGILE-24-10-01",
+    "octopus_tracker":           "SILVER-25-04-15",
+    "octopus_cosy":              "COSY-22-12-08",
+    "octopus_go":                "GO-VAR-22-10-14",
+    "octopus_flux":              "FLUX-IMPORT-23-02-14",
+    "octopus_intelligent_flux":  "INTELLI-FLUX-IMPORT-23-07-14",
+    "octopus_flexible":          "VAR-22-11-01",
+    "edf_freephase":             "EDF_FREEPHASE_DYNAMIC_12M_HH",
+}
+_AGILE_EXPORT_PRODUCT  = "AGILE-OUTGOING-19-05-13"
+_EXPORT_PRODUCT_DEFAULTS = {
+    # Separate export product with distinct rates
+    "octopus_flux": "FLUX-EXPORT-23-02-14",
+}
+# Sources where export rates mirror import rates (no separate export product)
+_MIRROR_EXPORT_SOURCES = frozenset({"octopus_intelligent_flux"})
+_OCTOPUS_BASE          = "https://api.octopus.energy/v1"
+_EDF_BASE              = "https://api.edfgb-kraken.energy/v1"
+_VARIABLE_RATE_SOURCES = frozenset({"octopus_agile", "edf_freephase"})
+_fetch_lock            = threading.Lock()
+_fetch_status: dict    = {"ok": None, "msg": "Never fetched", "fetched_at": "",
+                           "slots_today": 0, "slots_tomorrow": 0}
+
+_today_import_cost_p   = 0.0
+_today_export_income_p = 0.0
+_today_cost_date       = ""    # YYYY-MM-DD; empty forces recompute on first poll
+_tariff_dirty          = False  # set True when config saved; poll thread recomputes
+_last_cost_poll_ts     = 0.0   # Unix ts of last TOU accumulation (0 = use POLL_INTERVAL)
+_today_register_date   = ""    # YYYY-MM-DD; updated every poll for end-of-day capture
+_prev_grid_in_today    = 0.0   # register kWh from previous poll (for day-end flat save)
+_prev_grid_out_today   = 0.0
+
+
+def _tariff_configured() -> bool:
+    if TARIFF_SOURCE not in ("manual", ""):
+        return True   # API-managed source is always "configured"
+    return TARIFF_IMPORT_P > 0 or bool(TARIFF_TOU)
+
+
+def _tariff_import_rate(ts: float) -> float:
+    """Return import tariff rate (p/kWh) for a Unix timestamp."""
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        return _agile_rate_at(ts, "import")
+    if not TARIFF_TOU:
+        return TARIFF_IMPORT_P
+    dt = datetime.fromtimestamp(ts)
+    tod = dt.hour * 60 + dt.minute
+    for w in TARIFF_TOU:
+        s = int(w["start"][:2]) * 60 + int(w["start"][3:5])
+        e = int(w["end"][:2])   * 60 + int(w["end"][3:5])
+        if s == e:
+            continue
+        active = (s <= tod < e) if s < e else (tod >= s or tod < e)
+        if active:
+            return w["rate_p"]
+    return TARIFF_IMPORT_P
+
+
+def _tariff_export_rate(ts: float) -> float:
+    """Return export tariff rate (p/kWh) for a Unix timestamp.
+    Checks per-window export_rate_p; falls back to flat TARIFF_EXPORT_P."""
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        return _agile_rate_at(ts, "export")
+    if not TARIFF_TOU:
+        return TARIFF_EXPORT_P
+    dt = datetime.fromtimestamp(ts)
+    tod = dt.hour * 60 + dt.minute
+    for w in TARIFF_TOU:
+        s = int(w["start"][:2]) * 60 + int(w["start"][3:5])
+        e = int(w["end"][:2])   * 60 + int(w["end"][3:5])
+        if s == e:
+            continue
+        active = (s <= tod < e) if s < e else (tod >= s or tod < e)
+        if active:
+            return w.get("export_rate_p", TARIFF_EXPORT_P)
+    return TARIFF_EXPORT_P
+
+
+def _in_tou_window(ts: float) -> bool:
+    """Return True if ts falls within any defined TOU window.
+    For variable-rate sources (Agile/FreePhase) always True — every slot is variable."""
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        return True
+    if not TARIFF_TOU:
+        return False
+    dt = datetime.fromtimestamp(ts)
+    tod = dt.hour * 60 + dt.minute
+    for w in TARIFF_TOU:
+        s = int(w["start"][:2]) * 60 + int(w["start"][3:5])
+        e = int(w["end"][:2])   * 60 + int(w["end"][3:5])
+        if s == e:
+            continue
+        active = (s <= tod < e) if s < e else (tod >= s or tod < e)
+        if active:
+            return True
+    return False
+
+
+# ── Auto-tariff fetch infrastructure ─────────────────────────────────────────
+
+def _agile_slot_start(ts: float) -> str:
+    """Return the UTC ISO8601 30-min slot-start string for a Unix timestamp."""
+    dt  = datetime.utcfromtimestamp(ts)
+    m30 = 0 if dt.minute < 30 else 30
+    return dt.replace(minute=m30, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _agile_rate_at(ts: float, direction: str = "import") -> float:
+    """Return the inc-VAT Agile/FreePhase rate (p/kWh) for the slot at ts.
+    Falls back to the flat TARIFF_IMPORT_P / TARIFF_EXPORT_P if no DB row found."""
+    slot = _agile_slot_start(ts)
+    col  = "import_p" if direction == "import" else "export_p"
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                f"SELECT {col} FROM agile_rates WHERE slot_start = ?", (slot,)
+            ).fetchone()
+        if row and row[0] is not None:
+            return max(0.0, float(row[0]))
+    except Exception:
+        pass
+    return TARIFF_IMPORT_P if direction == "import" else TARIFF_EXPORT_P
+
+
+def _http_get_json(url: str, timeout: int = 15) -> dict:
+    """GET a URL and return parsed JSON. Raises on HTTP error or timeout."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "ACBC-GivEnergy-Dashboard/2.2"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def _get_product_code(source: str) -> str:
+    return _PRODUCT_OVERRIDE.get(source) or _PRODUCT_DEFAULTS.get(source, "")
+
+
+def _octopus_tariff_code(product: str, region: str) -> str:
+    return f"E-1R-{product}-{region}"
+
+
+def _tariff_api_base(product: str) -> str:
+    return _EDF_BASE if product.upper().startswith("EDF_") else _OCTOPUS_BASE
+
+
+def _fetch_octopus_unit_rates(product: str, tariff_code: str,
+                               period_from: str = "", period_to: str = "") -> list:
+    """Fetch standard unit rates. Returns list of result dicts."""
+    base = _tariff_api_base(product)
+    url  = (f"{base}/products/{product}/electricity-tariffs/{tariff_code}"
+            f"/standard-unit-rates/?page_size=100")
+    if period_from:
+        url += f"&period_from={urllib.parse.quote(period_from)}"
+    if period_to:
+        url += f"&period_to={urllib.parse.quote(period_to)}"
+    return _http_get_json(url).get("results", [])
+
+
+def _fetch_standing_charge(product: str, tariff_code: str) -> float:
+    """Return current standing charge (p/day inc VAT), or 0 on failure."""
+    base = _tariff_api_base(product)
+    url  = (f"{base}/products/{product}/electricity-tariffs/{tariff_code}"
+            f"/standing-charges/?page_size=1")
+    try:
+        results = _http_get_json(url).get("results", [])
+        return float(results[0]["value_inc_vat"]) if results else 0.0
+    except Exception:
+        return 0.0
+
+
+def _lookup_region(postcode: str) -> str:
+    """Look up DNO region code (A-P) from a UK postcode via Octopus API."""
+    pc  = urllib.parse.quote_plus(postcode.replace(" ", ""))
+    url = f"{_OCTOPUS_BASE}/industry/grid-supply-points/?postcode={pc}"
+    results = _http_get_json(url).get("results", [])
+    return results[0].get("group_id", "").lstrip("_").upper() if results else ""
+
+
+def _is_bst(dt: datetime) -> bool:
+    """Approximate UK BST detection for a naive UTC datetime."""
+    m, d = dt.month, dt.day
+    return (4 <= m <= 9) or (m == 3 and d >= 25) or (m == 10 and d < 25)
+
+
+def _dominant_rate(slots: list) -> float:
+    """Return the rate that covers the greatest total duration in a slot list.
+
+    Used for export products where the cheapest rate is an anomalous overnight
+    window — the dominant rate gives a more representative base flat rate.
+    """
+    rate_dur: dict = {}
+    for r in slots:
+        vf = r.get("valid_from", "");  vt = r.get("valid_to", "")
+        if not vf or not vt:
+            continue
+        try:
+            secs = (datetime.strptime(vt[:16], "%Y-%m-%dT%H:%M") -
+                    datetime.strptime(vf[:16], "%Y-%m-%dT%H:%M")).total_seconds()
+        except ValueError:
+            secs = 0
+        key = round(float(r.get("value_inc_vat", 0)), 2)
+        rate_dur[key] = rate_dur.get(key, 0.0) + secs
+    return float(max(rate_dur, key=rate_dur.get)) if rate_dur else 0.0
+
+
+def _extract_tou_windows(slots: list) -> list:
+    """
+    Derive TOU windows from unit-rate records.
+
+    Handles both wide-window tariffs (e.g. Cosy/Flux: a few multi-hour records)
+    and half-hourly slot tariffs (e.g. IntelligentFlux: ~48 records/day with
+    2–3 distinct rate values).
+
+    Algorithm:
+    1. Sort by start time and merge consecutive same-rate runs into contiguous bands.
+    2. Identify the cheapest rate as the base flat rate (set via import_p by the caller).
+    3. Return only the above-base bands as named TOU windows (up to 3).
+
+    Returns list of {name, start, end, rate_p, export_rate_p} dicts.
+    """
+    if not slots:
+        return []
+
+    # Parse to (local_start_dt, local_end_dt, rate)
+    parsed = []
+    for r in slots:
+        vf = r.get("valid_from", "");  vt = r.get("valid_to", "")
+        if not vf or not vt:
+            continue
+        try:
+            dt_f = datetime.strptime(vf[:16], "%Y-%m-%dT%H:%M")
+            dt_t = datetime.strptime(vt[:16], "%Y-%m-%dT%H:%M")
+        except ValueError:
+            continue
+        off  = timedelta(hours=1 if _is_bst(dt_f) else 0)
+        rate = round(float(r.get("value_inc_vat", 0)), 4)
+        parsed.append((dt_f + off, dt_t + off, rate))
+
+    if not parsed:
+        return []
+    parsed.sort(key=lambda x: x[0])
+
+    # Merge contiguous same-rate runs (handles half-hourly slot tariffs)
+    merged = []
+    rs, re, rr = parsed[0]
+    for s, e, r in parsed[1:]:
+        if r == rr and s <= re:     # same rate, adjacent or overlapping
+            re = max(re, e)
+        else:
+            merged.append((rs.strftime("%H:%M"), re.strftime("%H:%M"), rr))
+            rs, re, rr = s, e, r
+    merged.append((rs.strftime("%H:%M"), re.strftime("%H:%M"), rr))
+
+    # Base rate = cheapest band
+    base_rate = min(r for _, _, r in merged)
+
+    # Group above-base windows by their DISTINCT rate value.
+    # This ensures we always capture the highest rate band even when lower bands
+    # appear more times (e.g. Cosy has 4 windows at 26.70p and 1 at 40.06p —
+    # taking cheapest-first [:3] would drop the peak entirely).
+    def _win_duration(s, e):
+        sm = int(s[:2]) * 60 + int(s[3:])
+        em = int(e[:2]) * 60 + int(e[3:])
+        return (24 * 60 - sm + em) if em <= sm else (em - sm)
+
+    rate_buckets: dict = {}   # rate_value → list of (start, end) strings
+    for s, e, r in merged:
+        if r > base_rate:
+            rate_buckets.setdefault(r, []).append((s, e))
+
+    distinct_rates = sorted(rate_buckets)   # cheapest non-base first → Off-peak … Peak
+
+    n = len(distinct_rates)
+    if n == 1:
+        name_list = ["Peak"]
+    elif n == 2:
+        name_list = ["Standard", "Peak"]
+    else:
+        name_list = ["Off-peak", "Standard", "Peak"]
+
+    result = []
+    for i, rate in enumerate(distinct_rates[:3]):
+        # For this rate band, pick the longest contiguous window as representative
+        best = max(rate_buckets[rate], key=lambda w: _win_duration(w[0], w[1]))
+        result.append({"name": name_list[i], "start": best[0], "end": best[1],
+                        "rate_p": rate, "export_rate_p": 0.0})
+    return result
+
+
+def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
+                         tou_windows=None) -> None:
+    """Write fetched rates to config.ini, update in-memory globals, mark dirty.
+
+    Safety rule: a fetched value only overwrites an existing value when it is
+    valid (> 0).  This prevents a bad API response or a missing rate from
+    silently zeroing out a rate the user entered manually.
+    Standing charge is exempt — 0 is a legitimate value for that field.
+    """
+    global TARIFF_IMPORT_P, TARIFF_EXPORT_P, TARIFF_STANDING_P
+    global TARIFF_TOU, _RATES_LAST_FETCHED, _tariff_dirty
+    cfg = configparser.ConfigParser()
+    cfg.read(Path(__file__).parent / "config.ini")
+    if not cfg.has_section("tariff"):
+        cfg.add_section("tariff")
+    if import_p is not None and float(import_p) > 0:
+        TARIFF_IMPORT_P = float(import_p)
+        cfg.set("tariff", "import_rate_p", str(round(float(import_p), 4)))
+    if export_p is not None and float(export_p) > 0:
+        TARIFF_EXPORT_P = float(export_p)
+        cfg.set("tariff", "export_rate_p", str(round(float(export_p), 4)))
+    if standing_p is not None:                          # 0 is a valid standing charge
+        TARIFF_STANDING_P = float(standing_p)
+        cfg.set("tariff", "standing_charge_p", str(round(float(standing_p), 4)))
+    if tou_windows is not None:
+        # Strip any window whose import rate is 0 — these are bad API data
+        valid_windows = [w for w in tou_windows if float(w.get("rate_p", 0)) > 0]
+        TARIFF_TOU = valid_windows
+        for i in range(1, 4):
+            for k in (f"tou_{i}_name", f"tou_{i}_start", f"tou_{i}_end",
+                      f"tou_{i}_rate_p", f"tou_{i}_export_rate_p"):
+                cfg.remove_option("tariff", k)
+        for i, w in enumerate(valid_windows[:3], 1):
+            if w.get("name"):
+                cfg.set("tariff", f"tou_{i}_name",          str(w["name"]))
+                cfg.set("tariff", f"tou_{i}_start",         str(w["start"]))
+                cfg.set("tariff", f"tou_{i}_end",           str(w["end"]))
+                cfg.set("tariff", f"tou_{i}_rate_p",        str(round(float(w.get("rate_p", 0)), 4)))
+                cfg.set("tariff", f"tou_{i}_export_rate_p", str(round(float(w.get("export_rate_p", 0)), 4)))
+    ts_now = datetime.now().isoformat(timespec="seconds")
+    _RATES_LAST_FETCHED = ts_now
+    cfg.set("tariff", "rates_last_fetched", ts_now)
+    with open(Path(__file__).parent / "config.ini", "w") as f:
+        cfg.write(f)
+    _tariff_dirty = True
+
+
+def _fetch_agile_rates() -> dict:
+    """Fetch Agile / EDF FreePhase half-hourly import+export slots (today + tomorrow)."""
+    global _RATES_LAST_FETCHED
+    region  = OCTOPUS_REGION
+    product = _get_product_code("edf_freephase" if TARIFF_SOURCE == "edf_freephase"
+                                else "octopus_agile")
+    tariff  = _octopus_tariff_code(product, region)
+    now_utc = datetime.utcnow()
+    from_s  = now_utc.strftime("%Y-%m-%dT00:00Z")
+    to_s    = (now_utc + timedelta(days=2)).strftime("%Y-%m-%dT00:00Z")
+
+    try:
+        import_slots = _fetch_octopus_unit_rates(product, tariff, from_s, to_s)
+    except Exception as exc:
+        msg = f"Agile import fetch failed: {exc}"
+        log.warning(msg)
+        _fetch_status.update({"ok": False, "msg": msg})
+        return {"ok": False, "msg": msg}
+
+    export_dict: dict = {}
+    if TARIFF_SOURCE == "octopus_agile":
+        try:
+            et = _octopus_tariff_code(_AGILE_EXPORT_PRODUCT, region)
+            export_dict = {
+                s["valid_from"]: float(s["value_inc_vat"])
+                for s in _fetch_octopus_unit_rates(_AGILE_EXPORT_PRODUCT, et, from_s, to_s)
+            }
+        except Exception as exc:
+            log.warning("Agile export fetch failed (non-fatal): %s", exc)
+
+    if not import_slots:
+        msg = "No Agile slots returned from API"
+        _fetch_status.update({"ok": False, "msg": msg})
+        return {"ok": False, "msg": msg}
+
+    # Validate each slot before writing.
+    # Note: zero and negative import rates ARE valid for Agile (grid oversupply),
+    # so we only reject slots that are structurally malformed.
+    rows = []
+    skipped = 0
+    for s in import_slots:
+        vf = s.get("valid_from", "")
+        vt = s.get("valid_to", "")
+        raw = s.get("value_inc_vat")
+        if not vf or not vt or raw is None:
+            skipped += 1
+            continue
+        try:
+            imp_p = float(raw)
+        except (TypeError, ValueError):
+            skipped += 1
+            continue
+        exp_p = export_dict.get(vf)
+        # Only use the fetched export rate if it looks valid; otherwise keep
+        # whatever is already in the DB (by omitting this slot's export_p update
+        # via the fallback to the existing stored value isn't possible with
+        # INSERT OR REPLACE — so fall back to TARIFF_EXPORT_P as a safe default)
+        if exp_p is None or not isinstance(exp_p, (int, float)):
+            exp_p = TARIFF_EXPORT_P
+        rows.append((vf, vt, imp_p, exp_p))
+
+    if skipped:
+        log.warning("Agile fetch: skipped %d malformed slot(s)", skipped)
+
+    # Refuse to write if we got a suspiciously low number of valid slots —
+    # a partial/corrupt API response should not overwrite good existing data
+    if len(rows) < 24:
+        msg = f"Agile fetch returned only {len(rows)} valid slot(s) — minimum 24 required; aborting write"
+        log.warning(msg)
+        _fetch_status.update({"ok": False, "msg": msg})
+        return {"ok": False, "msg": msg}
+
+    with _db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO agile_rates (slot_start, slot_end, import_p, export_p)"
+            " VALUES (?,?,?,?)", rows
+        )
+        conn.execute(
+            "DELETE FROM agile_rates"
+            " WHERE slot_end < strftime('%Y-%m-%dT%H:%M:%SZ','now','-7 days')"
+        )
+        conn.commit()
+
+    try:
+        sc = _fetch_standing_charge(product, tariff)
+        if sc > 0:
+            _save_fetched_rates(standing_p=sc)
+    except Exception as exc:
+        log.warning("Agile standing charge fetch failed: %s", exc)
+
+    today_s = now_utc.strftime("%Y-%m-%d")
+    tom_s   = (now_utc + timedelta(days=1)).strftime("%Y-%m-%d")
+    st      = sum(1 for r in rows if r[0].startswith(today_s))
+    sm      = sum(1 for r in rows if r[0].startswith(tom_s))
+    ts_now  = datetime.now().isoformat(timespec="seconds")
+    _RATES_LAST_FETCHED = ts_now
+    _fetch_status.update({
+        "ok": True, "fetched_at": ts_now, "slots_today": st, "slots_tomorrow": sm,
+        "msg": f"{len(rows)} slots loaded ({sm} for tomorrow)",
+    })
+    return {"ok": True, "msg": _fetch_status["msg"]}
+
+
+def _fetch_tracker_rates() -> dict:
+    """Fetch today's single Octopus Tracker rate."""
+    global _RATES_LAST_FETCHED
+    region  = OCTOPUS_REGION
+    product = _get_product_code("octopus_tracker")
+    tariff  = _octopus_tariff_code(product, region)
+    now_utc = datetime.utcnow()
+    from_s  = now_utc.strftime("%Y-%m-%dT00:00Z")
+    to_s    = (now_utc + timedelta(days=1)).strftime("%Y-%m-%dT00:00Z")
+    try:
+        slots = _fetch_octopus_unit_rates(product, tariff, from_s, to_s)
+        if not slots:
+            return {"ok": False, "msg": "No Tracker rate returned from API"}
+        # API returns newest first; find the slot currently active (valid_from <= now)
+        now_str = now_utc.strftime("%Y-%m-%dT%H:%M")
+        active = sorted(
+            [s for s in slots if s.get("valid_from", "") <= now_str],
+            key=lambda s: s.get("valid_from", ""), reverse=True
+        )
+        rate = float((active[0] if active else slots[-1])["value_inc_vat"])
+        sc   = _fetch_standing_charge(product, tariff)
+        _save_fetched_rates(import_p=rate,
+                            standing_p=sc if sc > 0 else None,
+                            tou_windows=[])
+        msg = f"Tracker: {rate:.2f}p/kWh"
+        _fetch_status.update({"ok": True, "msg": msg, "fetched_at": _RATES_LAST_FETCHED,
+                              "slots_today": 1, "slots_tomorrow": 0})
+        return {"ok": True, "msg": msg}
+    except Exception as exc:
+        msg = f"Tracker fetch failed: {exc}"
+        log.warning(msg)
+        _fetch_status.update({"ok": False, "msg": msg})
+        return {"ok": False, "msg": msg}
+
+
+def _fetch_static_rates(source: str) -> dict:
+    """Fetch rates for Cosy, Go, Flux, or Flexible Octopus."""
+    global _RATES_LAST_FETCHED
+    region  = OCTOPUS_REGION
+    product = _get_product_code(source)
+    tariff  = _octopus_tariff_code(product, region)
+    now_utc = datetime.utcnow()
+    from_s  = now_utc.strftime("%Y-%m-%dT00:00Z")
+    to_s    = (now_utc + timedelta(days=1)).strftime("%Y-%m-%dT00:00Z")
+    try:
+        slots = _fetch_octopus_unit_rates(product, tariff, from_s, to_s)
+        if not slots:
+            slots = _fetch_octopus_unit_rates(product, tariff)   # no date filter fallback
+        if not slots:
+            return {"ok": False, "msg": f"No rates returned for {source}"}
+        sc    = _fetch_standing_charge(product, tariff)
+        rates = {round(float(r["value_inc_vat"]), 2) for r in slots}
+        label = source.replace('octopus_', '').replace('_', ' ').title()
+
+        # Resolve export rates:
+        #   a) Mirror sources — export rate == import rate per window (no separate product)
+        #   b) Sources with a known export product — fetch and cross-reference by time
+        exp_product   = _EXPORT_PRODUCT_DEFAULTS.get(source, "")
+        exp_base_rate = None
+        exp_window_rates: dict = {}   # window_start_hhmm → export_rate_p
+
+        if source in _MIRROR_EXPORT_SOURCES:
+            pass   # handled after windows are built (import rates copied to export)
+        elif exp_product:
+            try:
+                exp_tariff  = _octopus_tariff_code(exp_product, region)
+                exp_slots   = _fetch_octopus_unit_rates(exp_product, exp_tariff, from_s, to_s)
+                if not exp_slots:
+                    exp_slots = _fetch_octopus_unit_rates(exp_product, exp_tariff)
+                if exp_slots:
+                    exp_rates_set = {round(float(r["value_inc_vat"]), 2) for r in exp_slots}
+                    # Dominant-by-duration gives the representative standard rate,
+                    # not an anomalous overnight minimum
+                    exp_base_rate = _dominant_rate(exp_slots)
+                    if len(exp_rates_set) > 1:
+                        for w in _extract_tou_windows(exp_slots):
+                            exp_window_rates[w["start"]] = round(w["rate_p"], 4)
+            except Exception as exc:
+                log.warning("Export rate fetch failed for %s: %s", source, exc)
+
+        if len(rates) <= 1:
+            rate = float(slots[0]["value_inc_vat"])
+            _save_fetched_rates(import_p=rate,
+                                export_p=exp_base_rate,
+                                standing_p=sc if sc > 0 else None,
+                                tou_windows=[])
+            msg = f"{label}: {rate:.2f}p/kWh flat"
+        else:
+            base_rate = min(float(r["value_inc_vat"]) for r in slots)
+            windows   = _extract_tou_windows(slots)
+            if not windows:
+                # _extract_tou_windows() found nothing (e.g. all slots have
+                # valid_to=None — open-ended flat tariff with a recent rate change).
+                # Pick the most recently started currently-active rate instead.
+                now_str = now_utc.strftime("%Y-%m-%dT%H:%M")
+                active = sorted(
+                    [s for s in slots if s.get("valid_from", "") <= now_str],
+                    key=lambda s: s.get("valid_from", ""), reverse=True
+                )
+                if active:
+                    base_rate = float(active[0]["value_inc_vat"])
+                _save_fetched_rates(import_p=base_rate,
+                                    export_p=exp_base_rate,
+                                    standing_p=sc if sc > 0 else None,
+                                    tou_windows=[])
+                msg = f"{label}: {base_rate:.2f}p/kWh flat"
+                _fetch_status.update({"ok": True, "msg": msg,
+                                      "fetched_at": _RATES_LAST_FETCHED,
+                                      "slots_today": 0, "slots_tomorrow": 0})
+                return {"ok": True, "msg": msg}
+            # Annotate each TOU window with its export rate
+            if source in _MIRROR_EXPORT_SOURCES:
+                # Export rate == import rate for this tariff
+                for w in windows:
+                    w["export_rate_p"] = w["rate_p"]
+                exp_base_rate = base_rate
+            else:
+                for w in windows:
+                    if w["start"] in exp_window_rates:
+                        w["export_rate_p"] = exp_window_rates[w["start"]]
+            _save_fetched_rates(import_p=base_rate,
+                                export_p=exp_base_rate,
+                                standing_p=sc if sc > 0 else None,
+                                tou_windows=windows)
+            if windows:
+                peak_desc = ", ".join(
+                    f"{w['name']} {w['start']}–{w['end']} "
+                    f"{w['rate_p']:.2f}p in"
+                    + (f"/{w['export_rate_p']:.2f}p out" if w.get('export_rate_p') else "")
+                    for w in windows
+                )
+                msg = f"{label}: {base_rate:.2f}p base · {peak_desc}"
+            else:
+                msg = f"{label}: {base_rate:.2f}p/kWh"
+        _fetch_status.update({"ok": True, "msg": msg, "fetched_at": _RATES_LAST_FETCHED,
+                              "slots_today": 0, "slots_tomorrow": 0})
+        return {"ok": True, "msg": msg}
+    except Exception as exc:
+        msg = f"{source} fetch failed: {exc}"
+        log.warning(msg)
+        _fetch_status.update({"ok": False, "msg": msg})
+        return {"ok": False, "msg": msg}
+
+
+def _do_rate_fetch() -> dict:
+    """Thread-safe dispatcher: fetch rates from the configured tariff source."""
+    if TARIFF_SOURCE in ("manual", ""):
+        return {"ok": False, "msg": "Manual tariff — no fetch needed"}
+    if not OCTOPUS_REGION:
+        return {"ok": False, "msg": "Region code not configured — enter your region (A–P) or use postcode look-up"}
+    if not _fetch_lock.acquire(blocking=False):
+        return {"ok": True, "msg": "Fetch in progress — rates will update shortly"}
+    try:
+        src = TARIFF_SOURCE
+        if src in _VARIABLE_RATE_SOURCES:
+            return _fetch_agile_rates()
+        if src == "octopus_tracker":
+            return _fetch_tracker_rates()
+        if src in ("octopus_cosy", "octopus_go", "octopus_flux",
+                   "octopus_intelligent_flux", "octopus_flexible"):
+            return _fetch_static_rates(src)
+        return {"ok": False, "msg": f"Unknown source: {src}"}
+    except Exception as exc:
+        msg = f"Rate fetch error: {exc}"
+        log.error(msg)
+        return {"ok": False, "msg": msg}
+    finally:
+        _fetch_lock.release()
+
+
+def _startup_fetch() -> None:
+    """Fetch rates at startup if data is missing or stale."""
+    if TARIFF_SOURCE in ("manual", "") or not OCTOPUS_REGION:
+        return
+    should_fetch = not _RATES_LAST_FETCHED
+    if not should_fetch and TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        try:
+            with _db() as conn:
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM agile_rates WHERE slot_start LIKE ?",
+                    (today + "%",)
+                ).fetchone()[0]
+            should_fetch = cnt < 20
+        except Exception:
+            should_fetch = True
+    elif not should_fetch:
+        try:
+            last = datetime.fromisoformat(_RATES_LAST_FETCHED)
+            should_fetch = last.date() < datetime.now().date()
+        except Exception:
+            should_fetch = True
+    if should_fetch:
+        log.info("Auto-tariff: fetching rates at startup")
+        _do_rate_fetch()
+
+
+def _rate_fetch_loop() -> None:
+    """Background thread: daily fetch at 16:30 + Agile retry at 20:00."""
+    _startup_fetch()
+    last_day_fetched = ""
+    last_day_retried = ""
+    while True:
+        time.sleep(60)
+        now  = datetime.now()
+        date = now.strftime("%Y-%m-%d")
+        if now.hour == 16 and now.minute == 30 and date != last_day_fetched:
+            last_day_fetched = date
+            _do_rate_fetch()
+        if (TARIFF_SOURCE in _VARIABLE_RATE_SOURCES
+                and now.hour == 20 and now.minute == 0
+                and date != last_day_retried):
+            last_day_retried = date
+            tom = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+            try:
+                with _db() as conn:
+                    cnt = conn.execute(
+                        "SELECT COUNT(*) FROM agile_rates WHERE slot_start LIKE ?",
+                        (tom + "%",)
+                    ).fetchone()[0]
+            except Exception:
+                cnt = 0
+            if cnt < 45:
+                log.info("Agile: only %d slots for tomorrow — retrying fetch", cnt)
+                _do_rate_fetch()
+
 
 DB_PATH       = Path(__file__).parent / "history.db"
 BACKUPS_DIR   = Path(__file__).parent / "backups"
@@ -309,6 +1008,22 @@ def init_db():
         sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
         if "power_pct" not in sched_cols:
             conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_costs (
+                date              TEXT PRIMARY KEY,   -- YYYY-MM-DD
+                import_cost_p     REAL NOT NULL DEFAULT 0,
+                export_income_p   REAL NOT NULL DEFAULT 0,
+                standing_charge_p REAL NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS agile_rates (
+                slot_start TEXT PRIMARY KEY,   -- '2026-06-09T16:00:00Z' (UTC)
+                slot_end   TEXT NOT NULL,
+                import_p   REAL NOT NULL DEFAULT 0,
+                export_p   REAL NOT NULL DEFAULT 0
+            )
+        """)
         conn.commit()
 
 def _log_snapshot(data):
@@ -347,6 +1062,248 @@ def _log_event(kind, message):
             "INSERT INTO event_log (ts, kind, message) VALUES (?,?,?)",
             (int(time.time()), kind, message))
         conn.commit()
+
+
+def _recompute_today_cost(grid_in_today: float = 0.0, grid_out_today: float = 0.0):
+    """Recompute today's costs from snapshot history.  Call from poll thread only.
+
+    Uses actual timestamp deltas between consecutive snapshots rather than
+    POLL_INTERVAL to avoid the ~20% undercount caused by per-poll processing
+    overhead (actual interval ≈ 12–13 s vs configured 10 s).
+
+    Separates energy into TOU-window and flat-rate portions.  The flat-rate
+    portion is back-filled from the inverter register totals (grid_in_today /
+    grid_out_today) so that any service-stop gaps don't undercount costs.
+    """
+    global _today_import_cost_p, _today_export_income_p, _today_cost_date
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    imp_tou  = 0.0   # pence: cost from snapshots within TOU windows
+    exp_tou  = 0.0
+    tou_imp_kwh = 0.0  # kWh inside TOU windows (to subtract from register)
+    tou_exp_kwh = 0.0
+
+    if _tariff_configured():
+        try:
+            with _db() as conn:
+                snap_rows = list(conn.execute(
+                    "SELECT ts, grid_w, grid_importing, grid_exporting "
+                    "FROM snapshots "
+                    "WHERE date(ts,'unixepoch','localtime')=date('now','localtime') "
+                    "ORDER BY ts"
+                ))
+            prev_ts = None
+            for row in snap_rows:
+                if prev_ts is None:
+                    prev_ts = row["ts"]
+                    continue
+                delta = min(row["ts"] - prev_ts, 120.0)   # cap at 2 min (skip big service gaps)
+                prev_ts = row["ts"]
+                kwh = (row["grid_w"] or 0) / 1000.0 * delta / 3600.0
+                if _in_tou_window(row["ts"]):
+                    if row["grid_importing"]:
+                        imp_tou     += kwh * _tariff_import_rate(row["ts"])
+                        tou_imp_kwh += kwh
+                    elif row["grid_exporting"]:
+                        exp_tou     += kwh * _tariff_export_rate(row["ts"])
+                        tou_exp_kwh += kwh
+        except Exception:
+            pass
+
+    # Flat-rate portion: prefer register total minus TOU kWh.  This automatically
+    # fills any snapshot gap (service restarts, skipped polls, etc.) because the
+    # inverter daily counter is always accurate.
+    flat_imp = max(0.0, grid_in_today  - tou_imp_kwh) * TARIFF_IMPORT_P
+    flat_exp = max(0.0, grid_out_today - tou_exp_kwh) * TARIFF_EXPORT_P
+
+    _today_import_cost_p   = imp_tou  + flat_imp
+    _today_export_income_p = exp_tou  + flat_exp
+    _today_cost_date       = today_str
+
+
+def _save_day_end_cost(date_str: str, import_cost_p: float, export_income_p: float):
+    """Persist a day's final cost totals to daily_costs.  Overwrites if exists."""
+    try:
+        with _db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO daily_costs "
+                "(date, import_cost_p, export_income_p, standing_charge_p) "
+                "VALUES (?,?,?,?)",
+                (date_str, import_cost_p, export_income_p, TARIFF_STANDING_P),
+            )
+            conn.commit()
+    except Exception as exc:
+        log.warning("Failed to save daily cost for %s: %s", date_str, exc)
+
+
+def _dates_for_period(period_type: str, period_key: str) -> list:
+    """Return list of YYYY-MM-DD strings for every day in the period up to today."""
+    today = datetime.now().date()
+    dates: list = []
+    if period_type == "day":
+        return [period_key]
+    if period_type == "week":
+        try:
+            monday = datetime.strptime(period_key, "%Y-%m-%d").date()
+        except ValueError:
+            return []
+        for i in range(7):
+            d = monday + timedelta(days=i)
+            if d <= today:
+                dates.append(d.isoformat())
+    elif period_type == "month":
+        try:
+            y, m = map(int, period_key.split("-"))
+        except ValueError:
+            return []
+        d = datetime(y, m, 1).date()
+        while d.month == m and d <= today:
+            dates.append(d.isoformat())
+            d += timedelta(days=1)
+    elif period_type == "year":
+        try:
+            y = int(period_key)
+        except ValueError:
+            return []
+        d = datetime(y, 1, 1).date()
+        while d.year == y and d <= today:
+            dates.append(d.isoformat())
+            d += timedelta(days=1)
+    return dates
+
+
+def _batch_compute_and_store_costs(dates: list):
+    """Compute costs for a list of past days in one DB scan and store in daily_costs.
+    Handles both flat-rate (uses last-snapshot register) and TOU (uses actual ts deltas)."""
+    if not dates:
+        return
+    ph = ",".join("?" * len(dates))
+    imp_tou_by_day     = {d: 0.0 for d in dates}
+    exp_tou_by_day     = {d: 0.0 for d in dates}
+    tou_imp_kwh_by_day = {d: 0.0 for d in dates}
+    tou_exp_kwh_by_day = {d: 0.0 for d in dates}
+    grid_in_by_day     = {d: 0.0 for d in dates}
+    grid_out_by_day    = {d: 0.0 for d in dates}
+    try:
+        with _db() as conn:
+            # Last register reading per day (flat-rate back-fill basis)
+            for row in conn.execute(
+                f"SELECT date(ts,'unixepoch','localtime') AS day, "
+                f"grid_in_today, grid_out_today FROM snapshots "
+                f"WHERE ts IN ("
+                f"  SELECT MAX(ts) FROM snapshots "
+                f"  WHERE date(ts,'unixepoch','localtime') IN ({ph}) "
+                f"  GROUP BY date(ts,'unixepoch','localtime'))",
+                dates,
+            ):
+                grid_in_by_day[row["day"]]  = row["grid_in_today"]  or 0.0
+                grid_out_by_day[row["day"]] = row["grid_out_today"] or 0.0
+            # All snapshots ordered by day then ts (for actual-delta computation)
+            snap_rows = list(conn.execute(
+                f"SELECT ts, grid_w, grid_importing, grid_exporting, "
+                f"date(ts,'unixepoch','localtime') AS day "
+                f"FROM snapshots "
+                f"WHERE date(ts,'unixepoch','localtime') IN ({ph}) "
+                f"ORDER BY day, ts",
+                dates,
+            ))
+    except Exception as exc:
+        log.warning("_batch_compute_and_store_costs DB error: %s", exc)
+        return
+    prev_by_day: dict = {}
+    for row in snap_rows:
+        day = row["day"]
+        if day not in prev_by_day:
+            prev_by_day[day] = row["ts"]
+            continue
+        delta = min(row["ts"] - prev_by_day[day], 120.0)
+        prev_by_day[day] = row["ts"]
+        kwh = (row["grid_w"] or 0) / 1000.0 * delta / 3600.0
+        if _in_tou_window(row["ts"]):
+            if row["grid_importing"]:
+                imp_tou_by_day[day]     += kwh * _tariff_import_rate(row["ts"])
+                tou_imp_kwh_by_day[day] += kwh
+            elif row["grid_exporting"]:
+                exp_tou_by_day[day]     += kwh * _tariff_export_rate(row["ts"])
+                tou_exp_kwh_by_day[day] += kwh
+    rows_to_insert = []
+    for day in dates:
+        flat_imp = max(0.0, grid_in_by_day[day]  - tou_imp_kwh_by_day[day]) * TARIFF_IMPORT_P
+        flat_exp = max(0.0, grid_out_by_day[day] - tou_exp_kwh_by_day[day]) * TARIFF_EXPORT_P
+        imp = imp_tou_by_day[day] + flat_imp
+        exp = exp_tou_by_day[day] + flat_exp
+        if imp > 0 or exp > 0 or grid_in_by_day[day] > 0:
+            rows_to_insert.append((day, round(imp, 4), round(exp, 4), TARIFF_STANDING_P))
+    if rows_to_insert:
+        try:
+            with _db() as conn:
+                conn.executemany(
+                    "INSERT OR REPLACE INTO daily_costs "
+                    "(date, import_cost_p, export_income_p, standing_charge_p) VALUES (?,?,?,?)",
+                    rows_to_insert,
+                )
+                conn.commit()
+        except Exception as exc:
+            log.warning("Failed to store batch daily costs: %s", exc)
+
+
+def _ensure_daily_costs(dates: list):
+    """Check daily_costs for missing past dates and compute them in batch."""
+    if not dates or not _tariff_configured():
+        return
+    ph = ",".join("?" * len(dates))
+    try:
+        with _db() as conn:
+            cached = {r[0] for r in conn.execute(
+                f"SELECT date FROM daily_costs WHERE date IN ({ph})", dates
+            )}
+    except Exception:
+        cached = set()
+    missing = [d for d in dates if d not in cached]
+    if missing:
+        _batch_compute_and_store_costs(missing)
+
+
+def _get_costs_for_period(period_type: str, period_key: str) -> dict:
+    """Aggregate cost totals for a history period using daily_costs cache.
+    Returns dict with import/export/standing/total/net keys (all in pence)."""
+    if not _tariff_configured():
+        return {}
+    dates = _dates_for_period(period_type, period_key)
+    if not dates:
+        return {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    past_dates = [d for d in dates if d != today]
+    _ensure_daily_costs(past_dates)
+    imp = exp = sc = 0.0
+    if past_dates:
+        ph = ",".join("?" * len(past_dates))
+        try:
+            with _db() as conn:
+                r = conn.execute(
+                    f"SELECT COALESCE(SUM(import_cost_p),0), "
+                    f"COALESCE(SUM(export_income_p),0), "
+                    f"COALESCE(SUM(standing_charge_p),0) "
+                    f"FROM daily_costs WHERE date IN ({ph})",
+                    past_dates,
+                ).fetchone()
+            imp += r[0]; exp += r[1]; sc += r[2]
+        except Exception:
+            pass
+    # Today: read from the live cache (thread-safe via _lock)
+    if today in dates:
+        with _lock:
+            imp += _cached.get("import_cost_p",   0) or 0
+            exp += _cached.get("export_income_p", 0) or 0
+        sc += TARIFF_STANDING_P
+    return {
+        "import_cost_p":     round(imp, 2),
+        "export_income_p":   round(exp, 2),
+        "standing_charge_p": round(sc,  2),
+        "total_cost_p":      round(imp + sc, 2),
+        "net_cost_p":        round(imp + sc - exp, 2),
+    }
+
 
 # ── Shared state ───────────────────────────────────────────────────────────────
 _lock        = threading.Lock()
@@ -759,9 +1716,85 @@ def _note_heartbeat() -> float:
 def _handle_reading(data: dict, st: dict):
     """Process one fresh reading (from either mode): log to DB, smooth, publish
     to the cache, log recovery, and track inverter status changes + purging."""
-    global _cached, _error
+    global _cached, _error, _today_import_cost_p, _today_export_income_p
+    global _tariff_dirty, _last_cost_poll_ts
+    global _today_register_date, _prev_grid_in_today, _prev_grid_out_today
     data = _smooth(data)             # suppress zero-blips before DB write and display
     _log_snapshot(data)              # smoothed values to DB
+
+    # ── Cost estimation ─────────────────────────────────────────────────────────
+    # Flat rate: inverter register × rate (authoritative, unaffected by restarts).
+    # TOU: snapshot accumulator with register correction for accuracy.
+    _today_date = datetime.now().strftime("%Y-%m-%d")
+
+    # End-of-day capture: when the date rolls over, persist yesterday's final cost
+    _use_accumulator = bool(TARIFF_TOU) or TARIFF_SOURCE in _VARIABLE_RATE_SOURCES
+    if _tariff_configured() and _today_register_date and _today_date != _today_register_date:
+        if _use_accumulator:
+            _save_day_end_cost(_today_register_date,
+                               _today_import_cost_p, _today_export_income_p)
+        else:
+            _save_day_end_cost(
+                _today_register_date,
+                _prev_grid_in_today  * TARIFF_IMPORT_P,
+                _prev_grid_out_today * TARIFF_EXPORT_P,
+            )
+    _today_register_date = _today_date
+
+    if _tariff_configured():
+        if not _use_accumulator:
+            # Flat rate: inverter register × rate — always accurate
+            data["import_cost_p"]   = data.get("grid_in_today",  0) * TARIFF_IMPORT_P
+            data["export_income_p"] = data.get("grid_out_today", 0) * TARIFF_EXPORT_P
+        else:
+            # TOU / Agile accumulator with register-corrected recompute.
+            # On a true day rollover (not a config change or first-run), don't
+            # pass the inverter register to the recompute — the inverter may not
+            # have reset its daily counter yet (midnight carryover bug).
+            if _tariff_dirty or _today_date != _today_cost_date:
+                _trust_reg = _tariff_dirty or (_today_cost_date == "")
+                _recompute_today_cost(
+                    grid_in_today  = float(data.get("grid_in_today",  0) or 0) if _trust_reg else 0.0,
+                    grid_out_today = float(data.get("grid_out_today", 0) or 0) if _trust_reg else 0.0,
+                )
+                _tariff_dirty      = False
+                _last_cost_poll_ts = 0.0
+            else:
+                now   = time.time()
+                delta = (min(now - _last_cost_poll_ts, 120.0)
+                         if _last_cost_poll_ts > 0 else float(POLL_INTERVAL))
+                kwh   = data.get("grid_w", 0) / 1000.0 * delta / 3600.0
+                if data.get("grid_importing"):
+                    _today_import_cost_p   += kwh * _tariff_import_rate(now)
+                elif data.get("grid_exporting"):
+                    _today_export_income_p += kwh * _tariff_export_rate(now)
+                _last_cost_poll_ts = now
+
+            # Register-consistency guard — catches any carryover that still
+            # slipped through (e.g. service was already running when this fix
+            # was deployed).  Runs every poll so it self-heals within one cycle.
+            _gin      = float(data.get("grid_in_today",  0) or 0)
+            _gout     = float(data.get("grid_out_today", 0) or 0)
+            # For Agile the cap is 100p/kWh; for TOU use the highest window rate
+            _max_rate = (100.0 if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES
+                         else (max([TARIFF_IMPORT_P] + [w["rate_p"] for w in TARIFF_TOU]) or 100.0))
+            if _gout < 0.01 and _today_export_income_p > 1.0:
+                # Register shows no export today → income must be zero
+                _today_export_income_p = 0.0
+            if (_gin < 0.01 and _today_import_cost_p > 1.0) or \
+               (_gin > 0  and _today_import_cost_p > _gin * _max_rate * 1.1):
+                # Cost implies more energy than the register recorded → recompute
+                _recompute_today_cost(_gin, _gout)
+
+            data["import_cost_p"]   = _today_import_cost_p
+            data["export_income_p"] = _today_export_income_p
+        data["currency_symbol"]   = TARIFF_CURRENCY
+        data["standing_charge_p"] = TARIFF_STANDING_P
+
+    # Track previous-poll register values for flat-rate end-of-day capture
+    _prev_grid_in_today  = float(data.get("grid_in_today",  0) or 0)
+    _prev_grid_out_today = float(data.get("grid_out_today", 0) or 0)
+
     with _lock:
         _cached = data
         _error  = ""
@@ -1582,6 +2615,32 @@ def _log_control(command, params, success, message=""):
 def _execute_control(command: str, params: dict) -> dict:
     """Write a control command to the inverter via library-free HR writes.
     Returns {ok, message}."""
+
+    # sync_time works on any profile — handle before detection
+    if command == "sync_time":
+        try:
+            slave = _inverter_slave or 0x11
+            now = datetime.now()
+            # HR 35–40 = year (2-digit offset from 2000), month, day, hour, minute, second.
+            # Confirmed: givenergy-local-modbus.json 'system_time' RW, reg 35-40;
+            # givenergy-modbus library decodes as year+2000, so we write year-2000.
+            _hr_write(slave, 35, now.year - 2000)
+            _hr_write(slave, 36, now.month)
+            _hr_write(slave, 37, now.day)
+            _hr_write(slave, 38, now.hour)
+            _hr_write(slave, 39, now.minute)
+            _hr_write(slave, 40, now.second)
+            synced = now.strftime("%H:%M:%S %d/%m/%Y")
+            msg = f"Inverter clock set to {synced}"
+            _log_control(command, params, True, msg)
+            log.warning("Control: %s", msg)
+            return {"ok": True, "message": msg, "synced_to": synced}
+        except Exception as exc:
+            err = str(exc)
+            _log_control(command, params, False, err)
+            log.error("Control failed sync_time: %s", err)
+            return {"ok": False, "message": err}
+
     slave, profile, model = _detect_inverter()
 
     if profile == "unknown":
@@ -2558,6 +3617,165 @@ def save_settings():
         cfg.write(f)
     return jsonify({"ok": True, "weather_configured": bool(MET_API_KEY and MET_GEOHASH)})
 
+
+@app.route("/api/tariff", methods=["GET"])
+def get_tariff():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    return jsonify({
+        "ok":                True,
+        "currency_symbol":   TARIFF_CURRENCY,
+        "standing_charge_p": TARIFF_STANDING_P,
+        "export_rate_p":     TARIFF_EXPORT_P,
+        "import_rate_p":     TARIFF_IMPORT_P,
+        "tou_windows":       TARIFF_TOU,
+        # Auto-tariff fields
+        "tariff_source":     TARIFF_SOURCE,
+        "octopus_region":    OCTOPUS_REGION,
+        "octopus_postcode":  OCTOPUS_POSTCODE,
+        "rates_last_fetched": _RATES_LAST_FETCHED,
+        "fetch_status":      _fetch_status,
+    })
+
+
+@app.route("/api/tariff", methods=["POST"])
+def save_tariff():
+    global TARIFF_CURRENCY, TARIFF_STANDING_P, TARIFF_EXPORT_P, TARIFF_IMPORT_P
+    global TARIFF_TOU, _tariff_dirty
+    global TARIFF_SOURCE, OCTOPUS_REGION, OCTOPUS_POSTCODE
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data = request.get_json(force=True) or {}
+    cfg  = configparser.ConfigParser()
+    cfg.read(Path(__file__).parent / "config.ini")
+    if not cfg.has_section("tariff"):
+        cfg.add_section("tariff")
+
+    source_changed = False
+    if "tariff_source" in data:
+        new_src = str(data["tariff_source"])
+        if new_src != TARIFF_SOURCE:
+            source_changed = True
+        TARIFF_SOURCE = new_src
+        cfg.set("tariff", "tariff_source", TARIFF_SOURCE)
+    if "octopus_region" in data:
+        OCTOPUS_REGION = str(data["octopus_region"]).upper().strip()
+        cfg.set("tariff", "octopus_region", OCTOPUS_REGION)
+    if "octopus_postcode" in data:
+        OCTOPUS_POSTCODE = str(data["octopus_postcode"]).strip()
+        cfg.set("tariff", "octopus_postcode", OCTOPUS_POSTCODE)
+
+    if "currency_symbol" in data:
+        TARIFF_CURRENCY = str(data["currency_symbol"])[:4] or "£"
+        cfg.set("tariff", "currency_symbol", TARIFF_CURRENCY)
+    if "standing_charge_p" in data:
+        TARIFF_STANDING_P = max(0.0, float(data["standing_charge_p"]))
+        cfg.set("tariff", "standing_charge_p", str(TARIFF_STANDING_P))
+    if "export_rate_p" in data:
+        TARIFF_EXPORT_P = max(0.0, float(data["export_rate_p"]))
+        cfg.set("tariff", "export_rate_p", str(TARIFF_EXPORT_P))
+    if "import_rate_p" in data:
+        TARIFF_IMPORT_P = max(0.0, float(data["import_rate_p"]))
+        cfg.set("tariff", "import_rate_p", str(TARIFF_IMPORT_P))
+
+    windows = data.get("tou_windows")
+    if isinstance(windows, list):
+        TARIFF_TOU = []
+        for i in range(1, 4):
+            cfg.remove_option("tariff", f"tou_{i}_name")
+            cfg.remove_option("tariff", f"tou_{i}_start")
+            cfg.remove_option("tariff", f"tou_{i}_end")
+            cfg.remove_option("tariff", f"tou_{i}_rate_p")
+            cfg.remove_option("tariff", f"tou_{i}_export_rate_p")
+        for i, w in enumerate(windows[:3], 1):
+            name       = str(w.get("name",   "")).strip()
+            start      = str(w.get("start",  "")).strip()
+            end        = str(w.get("end",    "")).strip()
+            rate       = max(0.0, float(w.get("rate_p",        0)))
+            export_rt  = max(0.0, float(w.get("export_rate_p", 0)))
+            if name and start and end:
+                TARIFF_TOU.append({"name": name, "start": start, "end": end,
+                                   "rate_p": rate, "export_rate_p": export_rt})
+                cfg.set("tariff", f"tou_{i}_name",           name)
+                cfg.set("tariff", f"tou_{i}_start",          start)
+                cfg.set("tariff", f"tou_{i}_end",            end)
+                cfg.set("tariff", f"tou_{i}_rate_p",         str(rate))
+                cfg.set("tariff", f"tou_{i}_export_rate_p",  str(export_rt))
+
+    with open(Path(__file__).parent / "config.ini", "w") as f:
+        cfg.write(f)
+
+    _tariff_dirty = True   # signal poll thread to recompute today's cost totals
+    # Clear cached daily costs so history is recomputed with the new rates
+    try:
+        with _db() as conn:
+            conn.execute("DELETE FROM daily_costs")
+            conn.commit()
+    except Exception:
+        pass
+    # If the source or region changed, kick off a background fetch
+    if source_changed and TARIFF_SOURCE not in ("manual", "") and OCTOPUS_REGION:
+        threading.Thread(target=_do_rate_fetch, daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/tariff/octopus-status")
+def tariff_octopus_status():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    now_ts = time.time()
+    cur_rate = nxt_rate = cur_exp = nxt_exp = None
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        cur_rate = round(_agile_rate_at(now_ts,         "import"), 4)
+        nxt_rate = round(_agile_rate_at(now_ts + 1800,  "import"), 4)
+        cur_exp  = round(_agile_rate_at(now_ts,         "export"), 4)
+    now_utc  = datetime.utcnow()
+    today_s  = now_utc.strftime("%Y-%m-%d")
+    tom_s    = (now_utc + timedelta(days=1)).strftime("%Y-%m-%d")
+    st = sm  = 0
+    try:
+        with _db() as conn:
+            st = conn.execute("SELECT COUNT(*) FROM agile_rates WHERE slot_start LIKE ?",
+                              (today_s + "%",)).fetchone()[0]
+            sm = conn.execute("SELECT COUNT(*) FROM agile_rates WHERE slot_start LIKE ?",
+                              (tom_s + "%",)).fetchone()[0]
+    except Exception:
+        pass
+    return jsonify({
+        "ok": True, "source": TARIFF_SOURCE, "region": OCTOPUS_REGION,
+        "current_rate_p": cur_rate, "next_rate_p": nxt_rate,
+        "current_export_p": cur_exp,
+        "slots_today": st, "slots_tomorrow": sm,
+        "fetched_at": _RATES_LAST_FETCHED,
+        "fetch_status": _fetch_status,
+    })
+
+
+@app.route("/api/tariff/fetch-now", methods=["POST"])
+def tariff_fetch_now():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    result = _do_rate_fetch()
+    return jsonify(result)
+
+
+@app.route("/api/tariff/lookup-region", methods=["POST"])
+def tariff_lookup_region():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data     = request.get_json(force=True) or {}
+    postcode = data.get("postcode", "").strip()
+    if not postcode:
+        return jsonify({"ok": False, "error": "Postcode required"}), 400
+    try:
+        region = _lookup_region(postcode)
+        if region:
+            return jsonify({"ok": True, "region": region})
+        return jsonify({"ok": False, "error": "Region not found for that postcode"})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+
+
 @app.route("/api/backup/export")
 def backup_export():
     if not _authorised():
@@ -2769,6 +3987,32 @@ def api_history():
             if old in d and 'period' not in d:
                 d['period'] = d.pop(old)
         result.append(d)
+
+    # ── Cost estimates (if tariff configured) ───────────────────────────────────
+    if result and _tariff_configured():
+        row  = result[0]
+        pkey = row.get("period", "")
+        if not TARIFF_TOU:
+            # Flat rate: costs derive directly from the kWh columns already in the result
+            n_days   = len(_dates_for_period(period, pkey))
+            imp_cost = round((row.get("grid_in_kwh",  0) or 0) * TARIFF_IMPORT_P, 2)
+            exp_inc  = round((row.get("grid_out_kwh", 0) or 0) * TARIFF_EXPORT_P, 2)
+            standing = round(TARIFF_STANDING_P * n_days, 2)
+            row["cost"] = {
+                "currency_symbol":   TARIFF_CURRENCY,
+                "import_cost_p":     imp_cost,
+                "export_income_p":   exp_inc,
+                "standing_charge_p": standing,
+                "total_cost_p":      round(imp_cost + standing, 2),
+                "net_cost_p":        round(imp_cost + standing - exp_inc, 2),
+            }
+        else:
+            # TOU: aggregate from per-day cost cache (computing any missing days)
+            c = _get_costs_for_period(period, pkey)
+            if c:
+                c["currency_symbol"] = TARIFF_CURRENCY
+                row["cost"] = c
+
     return jsonify(result)
 
 @app.route("/api/hourly")
@@ -2905,6 +4149,9 @@ if __name__ == "__main__":
 
     # Scheduler block engine — inert until the master switch is enabled.
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+
+    # Auto-tariff rate fetcher — startup check + daily 16:30 / 20:00 cron.
+    threading.Thread(target=_rate_fetch_loop, daemon=True).start()
 
     # Delayed first update check — runs 30s after startup so the inverter
     # connection settles before we make an outbound request.
