@@ -1868,11 +1868,12 @@ async function loadControlState() {
     _renderSlots('discharge', d.discharge_slots || [], d.profile);
 
     // Read-only banner for unconfirmed inverter types
-    const roMsg = d.writable === false
+    let roMsg = d.writable === false
       ? (d.profile === 'gateway_aio'
           ? 'Gateway AIO detected — monitoring works fully. Write control not yet confirmed for this hardware.'
           : 'Write control is not yet confirmed for three-phase/AIO inverters.')
       : '';
+    if (d.slot_read_warning) roMsg = (roMsg ? roMsg + ' ' : '') + d.slot_read_warning;
     _ctrlMsg(roMsg, roMsg === '');
 
     $('ctrl-msg').textContent = roMsg;

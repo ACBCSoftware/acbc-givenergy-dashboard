@@ -2529,12 +2529,21 @@ def _read_control_state() -> dict:
         def hr_ext(n):
             return hr(n)
 
+    _aio_slots_ok = True
     if profile == "three_phase_aio":
-        # Three-phase slot registers live in the 1100 range
-        regs_1100 = _hr_read(slave, 1100, 22)   # HR 1100-1121
-        def hr_3ph(n):
-            if 1100 <= n < 1122: return regs_1100[n - 1100]
-            return hr(n)
+        # Three-phase slot registers live in the 1100 range.
+        # Some AIO models/firmware revisions do not respond to this range —
+        # wrap in try/except so the control page still loads (read-only) rather
+        # than returning a hard error to the frontend.
+        try:
+            regs_1100 = _hr_read(slave, 1100, 22)   # HR 1100-1121
+            def hr_3ph(n):
+                if 1100 <= n < 1122: return regs_1100[n - 1100]
+                return hr(n)
+        except Exception as exc:
+            log.warning("AIO: HR 1100-1121 read failed (%s) — slot registers unavailable on this model/firmware", exc)
+            _aio_slots_ok = False
+            def hr_3ph(n): return 0   # return 0 for all 3-phase slot registers
 
     # ── Build slot arrays ─────────────────────────────────────────────────────
     num_charge_slots    = _CHARGE_SLOT_COUNT[profile]
@@ -2596,6 +2605,12 @@ def _read_control_state() -> dict:
         "max_charge_w":    MAX_CHARGE_W,
         "max_discharge_w": MAX_DISCHARGE_W,
     }
+    if not _aio_slots_ok:
+        result["slot_read_warning"] = (
+            "Slot registers (HR 1100+) did not respond on this inverter — "
+            "charge and discharge slots cannot be read. This may indicate the "
+            "registers are not supported on this firmware version."
+        )
     return result
 
 
@@ -2941,6 +2956,9 @@ _CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 # Quick-action runtime state (epoch timestamps; 0 = inactive)
 _quick_charge_until    = 0.0
 _quick_discharge_until = 0.0
+# Snapshot of register values captured just before a quick action starts.
+# Used by _quick_action_revert() to restore the user's pre-action state.
+_quick_action_snapshot: dict = {}   # {HR_number: value, ...}
 
 
 def _sched_task_active() -> bool:
@@ -2956,10 +2974,35 @@ def _sched_task_active() -> bool:
 def _quick_action_do(action: str):
     """Write the registers for a quick charge or discharge.
     Returns (slot_start_hhmm, slot_end_hhmm) integers on success; raises on error."""
+    global _quick_action_snapshot
     from datetime import datetime
     slave, profile, model = _detect_inverter()
     if profile not in _SCHED_PROFILES:
         raise RuntimeError(f"Quick actions are not supported on this inverter ({model})")
+
+    # Snapshot the registers we are about to change so _quick_action_revert()
+    # can restore exactly the user's pre-action state rather than a hardcoded baseline.
+    try:
+        snap_raw = _hr_read(slave, 20, 97)   # HR 20-116 — covers all relevant registers
+        def _snap(n): return snap_raw[n - 20]
+        _quick_action_snapshot = {
+            _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),   # HR 20
+            _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),     # HR 27
+            _DISCHARGE_SLOT_HR[0][0]:       _snap(_DISCHARGE_SLOT_HR[0][0]),      # HR 56
+            _DISCHARGE_SLOT_HR[0][1]:       _snap(_DISCHARGE_SLOT_HR[0][1]),      # HR 57
+            _HR["ENABLE_DISCHARGE"]:        _snap(_HR["ENABLE_DISCHARGE"]),       # HR 59
+            _CHARGE_SLOT_HR[0][0]:          _snap(_CHARGE_SLOT_HR[0][0]),         # HR 94
+            _CHARGE_SLOT_HR[0][1]:          _snap(_CHARGE_SLOT_HR[0][1]),         # HR 95
+            _HR["ENABLE_CHARGE"]:           _snap(_HR["ENABLE_CHARGE"]),          # HR 96
+            _HR["BATTERY_SOC_RESERVE"]:     _snap(_HR["BATTERY_SOC_RESERVE"]),    # HR 110
+            _HR["BATTERY_CHARGE_LIMIT"]:    _snap(_HR["BATTERY_CHARGE_LIMIT"]),   # HR 111
+            _HR["BATTERY_DISCHARGE_LIMIT"]: _snap(_HR["BATTERY_DISCHARGE_LIMIT"]),# HR 112
+            _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),      # HR 116
+        }
+        log.info("Quick action: snapshot saved (%d registers)", len(_quick_action_snapshot))
+    except Exception as exc:
+        _quick_action_snapshot = {}
+        log.warning("Quick action: snapshot failed (%s) — revert will use safe baseline", exc)
 
     now_dt     = datetime.now()
     start_mins = now_dt.hour * 60 + now_dt.minute
@@ -3004,28 +3047,56 @@ def _quick_action_do(action: str):
 
 
 def _quick_action_revert():
-    """Clear quick-action slots and restore eco baseline.  Best-effort — logged on failure."""
+    """Restore inverter to its pre-action state.  Best-effort — logged on failure.
+
+    If a register snapshot was saved by _quick_action_do() the exact pre-action
+    values are written back.  If the snapshot is missing (e.g. snapshot read
+    failed) a safe eco baseline is used as a fallback.
+    """
     try:
         slave, profile, _model = _detect_inverter()
         if profile not in _SCHED_PROFILES:
             return
-        reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
-        writes  = [
-            (_CHARGE_SLOT_HR[0][0],       0),  # HR 94 clear
-            (_CHARGE_SLOT_HR[0][1],       0),  # HR 95 clear
-            (_DISCHARGE_SLOT_HR[0][0],    0),  # HR 56 clear
-            (_DISCHARGE_SLOT_HR[0][1],    0),  # HR 57 clear
-            (_HR["ENABLE_CHARGE"],         0),
-            (_HR["ENABLE_CHARGE_TARGET"],  0),
-            (_HR["BATTERY_POWER_MODE"],    1),  # eco
-            (_HR["BATTERY_SOC_RESERVE"], reserve),
-            (_HR["ENABLE_DISCHARGE"],      1),
-        ]
+
+        if _quick_action_snapshot:
+            def _sv(reg, fallback=0):
+                return _quick_action_snapshot.get(reg, fallback)
+            writes = [
+                # Restore both slot 0 start/end to whatever they were before the
+                # action.  If the user had an overnight charge slot, this brings
+                # it back; if the slot was empty (0,0) it stays cleared.
+                (_CHARGE_SLOT_HR[0][0],        _sv(_CHARGE_SLOT_HR[0][0])),
+                (_CHARGE_SLOT_HR[0][1],        _sv(_CHARGE_SLOT_HR[0][1])),
+                (_DISCHARGE_SLOT_HR[0][0],     _sv(_DISCHARGE_SLOT_HR[0][0])),
+                (_DISCHARGE_SLOT_HR[0][1],     _sv(_DISCHARGE_SLOT_HR[0][1])),
+                (_HR["ENABLE_CHARGE"],         _sv(_HR["ENABLE_CHARGE"])),
+                (_HR["ENABLE_CHARGE_TARGET"],  _sv(_HR["ENABLE_CHARGE_TARGET"])),
+                (_HR["BATTERY_POWER_MODE"],    _sv(_HR["BATTERY_POWER_MODE"], 1)),
+                (_HR["BATTERY_SOC_RESERVE"],   _sv(_HR["BATTERY_SOC_RESERVE"], 4)),
+                (_HR["ENABLE_DISCHARGE"],      _sv(_HR["ENABLE_DISCHARGE"], 1)),
+            ]
+            label = "Quick action: reverted to pre-action state"
+        else:
+            # Snapshot unavailable — fall back to a safe eco baseline
+            reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
+            writes = [
+                (_CHARGE_SLOT_HR[0][0],       0),
+                (_CHARGE_SLOT_HR[0][1],       0),
+                (_DISCHARGE_SLOT_HR[0][0],    0),
+                (_DISCHARGE_SLOT_HR[0][1],    0),
+                (_HR["ENABLE_CHARGE"],         0),
+                (_HR["ENABLE_CHARGE_TARGET"],  0),
+                (_HR["BATTERY_POWER_MODE"],    1),  # eco
+                (_HR["BATTERY_SOC_RESERVE"], reserve),
+                (_HR["ENABLE_DISCHARGE"],      1),
+            ]
+            label = "Quick action: reverted to safe baseline (no snapshot)"
+
         for reg, val in writes:
             _hr_write(slave, reg, val)
             time.sleep(_SCHED_WRITE_GAP)
-        _log_control("quick_action", {"action": "revert"}, True, "Quick action: reverted to baseline")
-        log.warning("Quick action: reverted to baseline")
+        _log_control("quick_action", {"action": "revert"}, True, label)
+        log.warning(label)
     except Exception as exc:
         log.warning("Quick action revert failed: %s", exc)
 
