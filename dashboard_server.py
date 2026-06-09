@@ -2532,17 +2532,31 @@ def _read_control_state() -> dict:
     _aio_slots_ok = True
     if profile == "three_phase_aio":
         # Three-phase slot registers live in the 1100 range.
-        # Some AIO models/firmware revisions do not respond to this range —
-        # wrap in try/except so the control page still loads (read-only) rather
-        # than returning a hard error to the frontend.
-        try:
-            regs_1100 = _hr_read(slave, 1100, 22)   # HR 1100-1121
+        # Some AIO models/firmware revisions do not respond to this range.
+        # Retry up to 3 times (the inverter may be momentarily busy) before
+        # giving up and falling back to empty slots, so the control page still
+        # loads (read-only) rather than returning a hard error to the frontend.
+        _AIO_READ_ATTEMPTS = 3
+        regs_1100 = None
+        for _attempt in range(_AIO_READ_ATTEMPTS):
+            try:
+                regs_1100 = _hr_read(slave, 1100, 22, timeout=3.0)   # HR 1100-1121
+                break
+            except Exception as exc:
+                if _attempt < _AIO_READ_ATTEMPTS - 1:
+                    log.warning("AIO: HR 1100-1121 read attempt %d/%d failed (%s) — retrying",
+                                _attempt + 1, _AIO_READ_ATTEMPTS, exc)
+                    time.sleep(0.5)
+                else:
+                    log.warning("AIO: HR 1100-1121 read failed after %d attempts (%s) "
+                                "— slot registers unavailable on this model/firmware",
+                                _AIO_READ_ATTEMPTS, exc)
+                    _aio_slots_ok = False
+        if regs_1100 is not None:
             def hr_3ph(n):
                 if 1100 <= n < 1122: return regs_1100[n - 1100]
                 return hr(n)
-        except Exception as exc:
-            log.warning("AIO: HR 1100-1121 read failed (%s) — slot registers unavailable on this model/firmware", exc)
-            _aio_slots_ok = False
+        else:
             def hr_3ph(n): return 0   # return 0 for all 3-phase slot registers
 
     # ── Build slot arrays ─────────────────────────────────────────────────────
@@ -2982,8 +2996,26 @@ def _quick_action_do(action: str):
 
     # Snapshot the registers we are about to change so _quick_action_revert()
     # can restore exactly the user's pre-action state rather than a hardcoded baseline.
-    try:
-        snap_raw = _hr_read(slave, 20, 97)   # HR 20-116 — covers all relevant registers
+    # Retry up to 3 times — the inverter may be momentarily busy or the dongle
+    # may need a moment after the detection read above.  Only proceed without a
+    # snapshot if all attempts fail; in that case the revert falls back to the
+    # safe eco baseline and a warning is logged.
+    _SNAP_ATTEMPTS = 3
+    snap_raw = None
+    for _attempt in range(_SNAP_ATTEMPTS):
+        try:
+            snap_raw = _hr_read(slave, 20, 97, timeout=3.0)   # HR 20-116
+            break
+        except Exception as exc:
+            if _attempt < _SNAP_ATTEMPTS - 1:
+                log.warning("Quick action: snapshot read attempt %d/%d failed (%s) — retrying",
+                            _attempt + 1, _SNAP_ATTEMPTS, exc)
+                time.sleep(0.5)
+            else:
+                log.warning("Quick action: snapshot failed after %d attempts (%s) "
+                            "— revert will use safe baseline", _SNAP_ATTEMPTS, exc)
+
+    if snap_raw is not None:
         def _snap(n): return snap_raw[n - 20]
         _quick_action_snapshot = {
             _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),   # HR 20
@@ -3000,9 +3032,8 @@ def _quick_action_do(action: str):
             _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),      # HR 116
         }
         log.info("Quick action: snapshot saved (%d registers)", len(_quick_action_snapshot))
-    except Exception as exc:
+    else:
         _quick_action_snapshot = {}
-        log.warning("Quick action: snapshot failed (%s) — revert will use safe baseline", exc)
 
     now_dt     = datetime.now()
     start_mins = now_dt.hour * 60 + now_dt.minute
