@@ -1879,6 +1879,13 @@ def _maybe_check_update():
 def _run_poll(st: dict):
     """Active-poll loop (Gen2). One reading per POLL_INTERVAL."""
     global _cached, _error
+    if _LIB is None:
+        # _data_loop falls back to listen mode before calling us, so this only
+        # fires if that guard is ever lost — fail with a clear message rather
+        # than a NameError from the missing library shims (issue #2).
+        raise RuntimeError(
+            "Poll mode requires the givenergy-modbus library, which is not "
+            "installed. Set mode=listen in config.ini or install the library.")
     fail = 0
     FAIL_THRESHOLD = 3   # tolerate brief Modbus blips before flagging offline
     if _API_V2:
