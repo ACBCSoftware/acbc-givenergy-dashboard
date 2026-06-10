@@ -1362,6 +1362,14 @@ def _smooth(data: dict) -> dict:
             log.warning("SOC spike suppressed: %d%% → %d%% (held at %d%%)",
                         _last_soc, soc, _last_soc)
             out["soc"] = _last_soc
+        elif soc == 0 and not _last_soc:
+            # IR59 stuck at 0 with no good prior value: estimate from the BMS
+            # capacity registers (rate-limited). _last_soc stays unseeded so a
+            # real IR59 value is accepted the moment one appears.
+            est = _bms_soc_fallback_value()
+            if est:
+                out["soc"] = est
+                out["soc_source"] = "bms"
         else:
             _last_soc = soc
 
@@ -3568,9 +3576,71 @@ def _read_battery_module(s: socket.socket, slave: int) -> "dict | None":
                     "bms_fw":      g(38),               # IR98
                     "warning":     g(34),               # IR94 warning bytes (0 = healthy)
                     "status_ok":   g(34) == 0,
+                    # Capacity registers (uint32 pairs, high word first — only the
+                    # remaining/design RATIO is consumed, so word order cannot skew it)
+                    "cap_design":    (g(26) << 16) | g(27),   # IR86-87
+                    "cap_remaining": (g(28) << 16) | g(29),   # IR88-89
                 }
         # no decodable response with this CRC — try the next variant
     return None
+
+
+# ── Capacity-weighted SOC fallback ─────────────────────────────────────────────
+# When IR59 reads 0 with no good prior value (corrupt/blank reads from startup),
+# estimate SOC from the LV battery modules' capacity registers instead:
+# sum(cap_remaining) / sum(cap_design) × 100.  Only profiles with LV modules.
+_BMS_SOC_PROFILES   = ("single_phase_2slot", "single_phase_ac_coupled",
+                       "single_phase_extended")
+_BMS_SOC_RETRY_SECS = 300.0   # opens a second socket (kicks the listen loop) — be sparing
+_bms_soc_cache = {"ts": 0.0, "soc": None}
+
+
+def _capacity_weighted_soc(modules) -> "int | None":
+    """Capacity-weighted SOC % across decoded battery module dicts.
+    Pure ratio math — modules with a missing or zero design capacity are skipped."""
+    total_rem = total_des = 0
+    for m in modules:
+        rem, des = m.get("cap_remaining"), m.get("cap_design")
+        if rem is None or not des:
+            continue
+        total_rem += rem
+        total_des += des
+    if total_des <= 0:
+        return None
+    return max(0, min(100, round(total_rem * 100 / total_des)))
+
+
+def _bms_soc_fallback_value() -> "int | None":
+    """Rate-limited capacity-weighted SOC estimate from the battery BMS.
+    Returns the cached estimate between reads; None when unavailable.
+    The BMS read opens a fresh socket, which briefly kicks the listen loop
+    (recovers in ~5 s) — hence the long retry interval."""
+    if _inverter_profile not in _BMS_SOC_PROFILES:
+        return None
+    now = time.time()
+    if now - _bms_soc_cache["ts"] < _BMS_SOC_RETRY_SECS:
+        return _bms_soc_cache["soc"]
+    _bms_soc_cache["ts"] = now          # failures also wait out the full interval
+    modules = []
+    try:
+        s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=5)
+        s.settimeout(3)
+        try:
+            for i in range(max(1, NUM_BATTERIES)):
+                m = _read_battery_module(s, 0x32 + i)
+                if not m:
+                    break
+                modules.append(m)
+        finally:
+            s.close()
+    except OSError as exc:
+        log.warning("BMS SOC fallback read failed: %s", exc)
+    est = _capacity_weighted_soc(modules)
+    _bms_soc_cache["soc"] = est
+    if est is not None:
+        log.warning("SOC fallback: IR59 reads 0 — using BMS capacity estimate %d%%", est)
+    return est
+
 
 @app.route("/api/battery")
 def api_battery():

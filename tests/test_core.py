@@ -220,6 +220,80 @@ def test_soc_missing_key_untouched():
     assert "soc" not in out
 
 
+# ── Capacity-weighted SOC fallback (v2.4) ──────────────────────────────────────
+
+def test_capacity_weighted_soc_single_module():
+    assert ds._capacity_weighted_soc(
+        [{"cap_remaining": 5000, "cap_design": 10000}]) == 50
+
+def test_capacity_weighted_soc_is_capacity_weighted():
+    # 90% of a small pack + 11% of a big pack must weight by capacity:
+    # (900+1000)/(1000+9000) = 19%, NOT the 50% a naive average would give.
+    modules = [{"cap_remaining": 900,  "cap_design": 1000},
+               {"cap_remaining": 1000, "cap_design": 9000}]
+    assert ds._capacity_weighted_soc(modules) == 19
+
+def test_capacity_weighted_soc_skips_blank_modules():
+    modules = [{"cap_remaining": 0,    "cap_design": 0},      # blank module
+               {"cap_remaining": None, "cap_design": 8000},   # missing field
+               {"cap_remaining": 4000, "cap_design": 8000}]
+    assert ds._capacity_weighted_soc(modules) == 50
+
+def test_capacity_weighted_soc_no_usable_modules():
+    assert ds._capacity_weighted_soc([]) is None
+    assert ds._capacity_weighted_soc([{"cap_remaining": 5, "cap_design": 0}]) is None
+
+def test_capacity_weighted_soc_clamped():
+    # Remaining > design (drifted BMS calibration) must clamp to 100
+    assert ds._capacity_weighted_soc(
+        [{"cap_remaining": 11000, "cap_design": 10000}]) == 100
+
+def test_smooth_soc_zero_uses_bms_fallback():
+    _reset_smooth()
+    orig = ds._bms_soc_fallback_value
+    ds._bms_soc_fallback_value = lambda: 42
+    try:
+        out = ds._smooth({"soc": 0})
+        assert out["soc"] == 42
+        assert out["soc_source"] == "bms"
+        # The estimate must NOT seed the spike filter — a real IR59 reading
+        # is accepted the moment it appears, however far from the estimate.
+        assert ds._smooth({"soc": 98})["soc"] == 98
+    finally:
+        ds._bms_soc_fallback_value = orig
+
+def test_smooth_soc_zero_without_fallback_passes_through():
+    _reset_smooth()
+    orig = ds._bms_soc_fallback_value
+    ds._bms_soc_fallback_value = lambda: None
+    try:
+        out = ds._smooth({"soc": 0})
+        assert out["soc"] == 0
+        assert "soc_source" not in out
+    finally:
+        ds._bms_soc_fallback_value = orig
+
+def test_smooth_soc_fallback_not_used_once_soc_known():
+    _reset_smooth()
+    orig = ds._bms_soc_fallback_value
+    ds._bms_soc_fallback_value = lambda: 42
+    try:
+        ds._smooth({"soc": 50})
+        # A later corrupt 0 is held at the last good value by the spike
+        # filter — the BMS estimate must not override a known-good SOC.
+        assert ds._smooth({"soc": 0})["soc"] == 50
+    finally:
+        ds._bms_soc_fallback_value = orig
+
+def test_bms_fallback_gated_by_profile():
+    # With no detected profile (the state in tests), the fallback must bail
+    # out before touching the cache or any socket.
+    ds._bms_soc_cache["ts"] = 0.0
+    ds._bms_soc_cache["soc"] = None
+    assert ds._bms_soc_fallback_value() is None
+    assert ds._bms_soc_cache["ts"] == 0.0      # untouched — bailed at the gate
+
+
 # ── Slot register maps ─────────────────────────────────────────────────────────
 
 def test_slot_map_lengths():
