@@ -53,7 +53,7 @@ except Exception:
 APP_VERSION = "2.2"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-_cfg = configparser.ConfigParser()
+_cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
 _cfg.read(Path(__file__).parent / "config.ini")
 
 INVERTER_IP   = _cfg.get("inverter", "ip",            fallback="192.168.68.65")
@@ -475,7 +475,7 @@ def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
     """
     global TARIFF_IMPORT_P, TARIFF_EXPORT_P, TARIFF_STANDING_P
     global TARIFF_TOU, _RATES_LAST_FETCHED, _tariff_dirty
-    cfg = configparser.ConfigParser()
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("tariff"):
         cfg.add_section("tariff")
