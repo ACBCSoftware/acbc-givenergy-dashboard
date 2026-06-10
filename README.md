@@ -92,6 +92,13 @@ systemd service that starts on boot.
    - Offer to open `config.ini` for editing
 4. Set your inverter IP in `config.ini`, then use **Start Dashboard** from the Start Menu.
 
+> **Windows Defender blocking the installer?** It isn't code-signed (a signing certificate is a costly yearly subscription for a free app), so Defender sometimes flags it — a **false positive**; the full source is in this repo. Two cases:
+>
+> - **Blue "Windows protected your PC" box:** click **More info** → **Run anyway**.
+> - **File vanishes / "Threat found" alert** (Defender quarantined it, no "More info" link): open **Windows Security → Virus & threat protection → Protection history**, find the quarantined `ACBC-GivEnergy-Dashboard-Setup-v2.3.exe`, click it, then **Actions → Allow** (or **Restore**). Re-download if needed and run again.
+>
+> Still cautious? Read [`installer.iss`](installer.iss) to see exactly what it runs, or use **Option B** below to skip the installer entirely.
+
 > To compile the installer yourself: install [Inno Setup 6](https://jrsoftware.org/isinfo.php), open `installer.iss` and press `Ctrl+F9`.
 
 #### Option B — Manual setup
