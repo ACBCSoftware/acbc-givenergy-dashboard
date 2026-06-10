@@ -50,7 +50,7 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
@@ -302,7 +302,7 @@ def _agile_rate_at(ts: float, direction: str = "import") -> float:
 def _http_get_json(url: str, timeout: int = 15) -> dict:
     """GET a URL and return parsed JSON. Raises on HTTP error or timeout."""
     req = urllib.request.Request(
-        url, headers={"User-Agent": "ACBC-GivEnergy-Dashboard/2.2"}
+        url, headers={"User-Agent": "ACBC-GivEnergy-Dashboard/2.3"}
     )
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
