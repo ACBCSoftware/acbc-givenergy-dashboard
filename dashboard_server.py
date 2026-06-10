@@ -2882,9 +2882,9 @@ def _sched_load_rules() -> list:
 def _sched_compute_writes(desired: dict):
     """Translate a desired-state dict into (slave, [(reg,val),...], summary).
     Writes charge/discharge slot registers so the firmware will actually allow
-    forced grid charge/export on standalone (non-cloud-managed) installs.
-    Set SCHEDULER_SKIP_SLOT_WRITES=true in config.ini for installs where a cloud
-    integration (Octopus, Predbat, etc.) owns the slot registers.
+    forced grid charge/export — the scheduler therefore requires EXCLUSIVE
+    inverter control (not compatible with cloud integrations like Octopus
+    Intelligent Flux or Predbat, which own the slot registers).
     The register writes are absolute sets, so re-applying the full list is idempotent
     (a partial apply self-heals on the next retry). Raises on unsupported hardware."""
     slave, profile, model = _detect_inverter()
@@ -3391,7 +3391,7 @@ def save_schedule_config():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
-    cfg  = configparser.ConfigParser()
+    cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("scheduler"):
         cfg.add_section("scheduler")
@@ -3651,7 +3651,7 @@ def save_settings():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
 
     data = request.get_json(force=True) or {}
-    cfg  = configparser.ConfigParser()
+    cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
 
     def _set(section, key, val):
@@ -3755,7 +3755,7 @@ def save_tariff():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
-    cfg  = configparser.ConfigParser()
+    cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("tariff"):
         cfg.add_section("tariff")
