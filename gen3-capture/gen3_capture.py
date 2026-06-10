@@ -18,6 +18,14 @@ Flags:
                   Answers the key question: does active polling return fresh
                   data, or only the last 5-minute cloud-sync snapshot?
                   Key values decoded: solar, home, battery, grid, SOC.
+  --slots         Charge/discharge slot register hunt (All in One).
+                  Reads the holding-register ranges where schedule slots
+                  could live — HR(0,60), HR(60,60), HR(120,60), HR(240,60),
+                  HR(1100,22), HR(1113,9) — plus two IR(0,60) control reads,
+                  and highlights any register holding a plausible HH:MM time.
+                  Set distinctive schedule times in the GivEnergy app first
+                  (e.g. 01:00-01:30) so the slot registers are unmistakable.
+                  Finishes by itself in about a minute.
 """
 import socket
 import sys
@@ -33,6 +41,7 @@ HANDSHAKE_MODE  = "--handshake"   in sys.argv
 SEQUENTIAL_MODE = "--sequential"  in sys.argv
 GIVTCP_MODE     = "--givtcp"      in sys.argv
 AIO_MODE        = "--aio"         in sys.argv
+SLOTS_MODE      = "--slots"       in sys.argv
 
 POKE_INTERVAL   = 10.0
 HB_WAIT_TIMEOUT = 240.0   # 4 minutes to wait for first heartbeat
@@ -753,6 +762,193 @@ def _run_aio(s, st, log, logf, binf):
     log("(the .log AND .bin files)")
 
 
+# ── Slot register hunt (All in One) ───────────────────────────────────────────
+
+def _decode_reply(frame):
+    """Decode any HR/IR read response (any base, any count ≥ 1).
+    Returns dict, or {"exception": code} for a Modbus exception response."""
+    if len(frame) < 30 or frame[7] != 0x02:
+        return None
+    func = frame[27]
+    if func & 0x80:
+        return {"slave": frame[26], "func": func,
+                "exception": frame[28] if len(frame) > 28 else None}
+    if func not in (0x03, 0x04) or len(frame) < 44:
+        return None
+    base  = (frame[38] << 8) | frame[39]
+    count = (frame[40] << 8) | frame[41]
+    if count < 1 or len(frame) < 42 + count * 2:
+        return None
+    def g(n):
+        o = 42 + n * 2
+        return (frame[o] << 8) | frame[o + 1]
+    return {"slave": frame[26], "func": func, "base": base, "count": count,
+            "regs": [g(n) for n in range(count)]}
+
+
+def _hhmm_candidates(base, regs):
+    """Return [(reg_number, value, 'HH:MM')] for values that decode as a
+    plausible time-of-day in the HHMM encoding GivEnergy slots use
+    (e.g. 130 = 01:30, 1800 = 18:00). Zero is excluded — an unset slot."""
+    out = []
+    for i, v in enumerate(regs):
+        if 0 < v <= 2359 and (v % 100) <= 59 and (v // 100) <= 23:
+            out.append((base + i, v, f"{v // 100:02d}:{v % 100:02d}"))
+    return out
+
+
+def _run_slots(s, st, log, logf, binf):
+    """
+    Slot register hunt for All in One inverters (issue #21).
+
+    The AIO2 (DTC 0x82xx) does not answer the three-phase slot block
+    (HR 1100+). This mode sweeps the single-phase HR ranges to find where
+    the schedule slots actually live. Run it with distinctive schedule
+    times set in the GivEnergy app so the slot registers stand out.
+
+    Single-phase slot map (where a Gen2/Gen3 hybrid keeps them):
+      charge slot 1 = HR 94/95     charge slot 2  = HR 31/32
+      discharge 1   = HR 56/57     discharge 2    = HR 44/45
+      extended slots 3-10 + SOC targets = HR 240-299 (Gen3 fw>302)
+    """
+    PROBE_WAIT = 6.0   # seconds to wait for each reply
+    buf = bytearray()
+
+    PROBES = [
+        ("CTRL-1", 0x04,    0, 60, "IR(0,60)    control - live data, should always work"),
+        ("HR-A",   0x03,    0, 60, "HR(0,60)    charge2 31/32, dis2 44/45, dis1 56/57"),
+        ("HR-B",   0x03,   60, 60, "HR(60,60)   charge1 94/95, enable 96, target 116"),
+        ("HR-C",   0x03,  120, 60, "HR(120,60)  config block 3"),
+        ("HR-D",   0x03,  240, 60, "HR(240,60)  extended slots 3-10 + SOC targets"),
+        ("HR-E",   0x03, 1100, 22, "HR(1100,22) three-phase slot block - expect timeout"),
+        ("HR-F",   0x03, 1113,  9, "HR(1113,9)  three-phase slots at exact base"),
+        ("CTRL-2", 0x04,    0, 60, "IR(0,60)    control - link still alive at the end"),
+    ]
+
+    def recv_until(deadline, pending):
+        """Receive frames until deadline; return decoded match or exception."""
+        while time.time() < deadline:
+            s.settimeout(min(deadline - time.time(), 0.5) or 0.1)
+            try:
+                data = s.recv(8192)
+            except socket.timeout:
+                continue
+            if not data:
+                raise ConnectionError("socket closed by remote host")
+            binf.write(data); binf.flush()
+            st["bytes"] += len(data)
+            buf.extend(data)
+            for frame in _pop_frames(buf):
+                st["frames"] += 1
+                outer = frame[7] if len(frame) > 7 else 0
+                logf.write(f"[{_ts()}] FRAME #{st['frames']} len={len(frame)} "
+                           f"func={outer:02x}\n")
+                logf.write(hexdump(frame) + "\n"); logf.flush()
+                if outer == 0x01:
+                    if len(frame) >= 18:
+                        st["adapter_serial"] = frame[8:18]
+                    _ack_heartbeat(s, frame, st, log)
+                    continue
+                if outer != 0x02:
+                    continue
+                d = _decode_reply(frame)
+                if d is None:
+                    continue
+                if "exception" in d:
+                    code = d["exception"]
+                    log(f"RX MODBUS EXCEPTION slave=0x{d['slave']:02x} "
+                        f"func=0x{d['func']:02x} code="
+                        f"{'?' if code is None else f'0x{code:02x}'}")
+                    if d["slave"] == pending["slave"] and \
+                       (d["func"] & 0x7F) == pending["func"]:
+                        return d
+                    continue
+                if (d["slave"] == pending["slave"] and
+                        d["func"] == pending["func"] and
+                        d["base"] == pending["base"]):
+                    st["replies"] += 1; st["slaves"].add(d["slave"])
+                    return d
+                log(f"RX background slave=0x{d['slave']:02x} "
+                    f"func=0x{d['func']:02x} base={d['base']} (ignored)")
+        return None
+
+    log("=" * 64)
+    log("SLOT REGISTER HUNT (All in One)")
+    log("=" * 64)
+    log("")
+    log("Sweeps the holding-register ranges where schedule slots could live")
+    log("and flags every value that looks like an HH:MM time.")
+    log("Make sure your schedules are still set in the GivEnergy app!")
+    log("")
+
+    reg_prefix = {0x03: "HR", 0x04: "IR"}
+    results = []
+    all_time_hits = []
+
+    for label, func, base, count, desc in PROBES:
+        log(f"--- Probe {label}: {desc} ---")
+        req = _make_request(0x11, func, base, count)
+        logf.write(f"[{_ts()}] TX HEX: {req.hex()}\n"); logf.flush()
+        print(f"  TX {desc} ... ", end="", flush=True)
+        t0 = time.time()
+        try:
+            s.sendall(req)
+        except Exception as exc:
+            log(f"  SEND FAILED: {exc}")
+            results.append((label, desc, "send failed", None))
+            continue
+        d = recv_until(t0 + PROBE_WAIT, {"slave": 0x11, "func": func, "base": base})
+        elapsed = time.time() - t0
+        if d is None:
+            log(f"Probe {label} RESULT: NO RESPONSE in {PROBE_WAIT:.0f}s")
+            print("no response", flush=True)
+            results.append((label, desc, "timeout", None))
+        elif "exception" in d:
+            code = d["exception"]
+            code_s = "?" if code is None else f"0x{code:02x}"
+            log(f"Probe {label} RESULT: ! Modbus exception code={code_s}")
+            print(f"exception {code_s}", flush=True)
+            results.append((label, desc, f"exception {code_s}", None))
+        else:
+            log(f"Probe {label} RESULT: OK - MATCHED in {elapsed:.3f}s")
+            print(f"MATCHED in {elapsed:.3f}s", flush=True)
+            pfx = reg_prefix[func]
+            nonzero = [(d["base"] + i, v) for i, v in enumerate(d["regs"]) if v != 0]
+            log(f"  Register dump (slave=0x11 {pfx} base={d['base']} count={d['count']}):")
+            if not nonzero:
+                log("    (all registers are zero)")
+            for i in range(0, len(nonzero), 6):
+                log("    " + "  ".join(f"{pfx}{r:04d}={v:5d}" for r, v in nonzero[i:i+6]))
+            hits = _hhmm_candidates(d["base"], d["regs"]) if func == 0x03 else []
+            for reg, v, t in hits:
+                log(f"    >>> HR {reg} = {v:<5d} could be a time: {t}")
+            all_time_hits.extend(hits)
+            results.append((label, desc, "ok", elapsed))
+        time.sleep(1.0)
+
+    log("")
+    log("=" * 64)
+    log("SLOT HUNT SUMMARY")
+    log("=" * 64)
+    for label, desc, outcome, elapsed in results:
+        mark = "OK" if outcome == "ok" else "X " if outcome == "timeout" else "! "
+        timing = f" in {elapsed:.3f}s" if elapsed is not None else ""
+        log(f"  {label:<7} {desc:<52} {mark} {outcome}{timing}")
+    log("")
+    if all_time_hits:
+        log("Registers holding plausible HH:MM times:")
+        for reg, v, t in all_time_hits:
+            log(f"  HR {reg:>4} = {v:<5d} -> {t}")
+        log("")
+        log("Compare these against the schedule times you set in the GivEnergy")
+        log("app — matching pairs are the slot start/end registers.")
+    else:
+        log("No HR registers held a plausible HH:MM time. Either the schedule")
+        log("slots are unset, or they live in a range this sweep didn't cover.")
+    log("")
+    log("Done — you can close this window.")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     ip, port = load_config()
@@ -764,10 +960,16 @@ def main():
 
     def log(msg, to_console=True):
         line = f"[{_ts()}] {msg}"
-        if to_console: print(line, flush=True)
+        if to_console:
+            try:
+                print(line, flush=True)
+            except UnicodeEncodeError:
+                # Windows consoles often use cp1252, which lacks ✓/✗ etc.
+                print(line.encode("ascii", "replace").decode("ascii"), flush=True)
         logf.write(line + "\n"); logf.flush()
 
-    mode_str = ("AIO refresh-rate diagnostic"          if AIO_MODE        else
+    mode_str = ("SLOT HUNT (HR sweep for schedule slots)" if SLOTS_MODE   else
+                "AIO refresh-rate diagnostic"          if AIO_MODE        else
                 "GIVTCP (5-frame burst at 0x11)"       if GIVTCP_MODE     else
                 "SEQUENTIAL (real serial + A-F test)" if SEQUENTIAL_MODE else
                 "HANDSHAKE (IR+HR poke-and-listen)"   if HANDSHAKE_MODE  else
@@ -839,7 +1041,10 @@ def main():
                 st["sock"] = s
                 log("Connected.")
 
-                if AIO_MODE:
+                if SLOTS_MODE:
+                    _run_slots(s, st, log, logf, binf)
+                    break   # finite probe sequence; exit outer loop
+                elif AIO_MODE:
                     _run_aio(s, st, log, logf, binf)
                     break   # _run_aio has its own run-time; exit outer loop
                 elif GIVTCP_MODE:
@@ -883,6 +1088,12 @@ def main():
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
+                if SLOTS_MODE:
+                    # Finite diagnostic — do not loop forever on errors.
+                    log(f"ERROR: {exc}")
+                    log("Slot hunt aborted — check the IP in gen3_config.ini, "
+                        "make sure nothing else is using the inverter, and re-run.")
+                    break
                 log(f"Connection error: {exc} — reconnecting in 5s")
                 time.sleep(5)
 

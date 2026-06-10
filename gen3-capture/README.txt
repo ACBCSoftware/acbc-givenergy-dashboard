@@ -59,6 +59,25 @@ SEND BACK:  capture_<timestamp>.bin  +  capture_<timestamp>.log
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SLOT REGISTER HUNT (All in One owners)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Finds where your inverter keeps its charge/discharge schedule slots.
+
+1. In the GivEnergy app, set distinctive schedule times first, e.g.:
+     charge slot 1    01:00 - 01:30
+     charge slot 2    02:00 - 02:30
+     discharge slot 1 18:00 - 19:00
+     discharge slot 2 20:00 - 21:00
+2. Double-click  run-slots.bat
+3. It probes a handful of register ranges (about a minute, then stops
+   by itself) and prints any value that looks like an HH:MM time.
+4. Send back both capture files as usual.
+
+Pi/Linux:  python3 gen3_capture.py --slots
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 WHAT THE TEST DOES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
