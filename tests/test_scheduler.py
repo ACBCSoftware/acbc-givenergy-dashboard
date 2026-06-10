@@ -139,7 +139,6 @@ _HR56, _HR57 = 56, 57    # discharge slot 1 start/end
 def test_compute_charge_writes_slot1():
     """Charge mode must write HR 94/95 (charge slot 1) before ENABLE_CHARGE."""
     _gen2()
-    ds.SCHEDULER_SKIP_SLOT_WRITES = False
     # "00:30"-"04:30" → slot reg values: 30 (00:30) and 430 (04:30)
     _, w, summary = ds._sched_compute_writes(
         {"mode": "charge", "target_soc": 90, "power_pct": 50,
