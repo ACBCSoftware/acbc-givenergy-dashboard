@@ -1358,7 +1358,7 @@ def _smooth(data: dict) -> dict:
     # SOC spike filter — reject single-poll jumps that exceed the physical maximum
     soc = out.get("soc")
     if soc is not None:
-        if _last_soc is not None and abs(soc - _last_soc) > _SOC_MAX_DELTA:
+        if _last_soc is not None and _last_soc > 0 and abs(soc - _last_soc) > _SOC_MAX_DELTA:
             log.warning("SOC spike suppressed: %d%% → %d%% (held at %d%%)",
                         _last_soc, soc, _last_soc)
             out["soc"] = _last_soc
