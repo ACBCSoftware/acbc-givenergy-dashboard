@@ -83,7 +83,7 @@ systemd service that starts on boot.
 #### Option A — Installer (recommended)
 
 1. Install [Python 3.11+](https://python.org/downloads/) — **tick "Add Python to PATH"** during setup.
-2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v2.3.exe`**.
+2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v2.4.exe`**.
 3. The installer will:
    - Create a Python virtual environment
    - Install all required packages
@@ -95,7 +95,7 @@ systemd service that starts on boot.
 > **Windows Defender blocking the installer?** It isn't code-signed (a signing certificate is a costly yearly subscription for a free app), so Defender sometimes flags it — a **false positive**; the full source is in this repo. Two cases:
 >
 > - **Blue "Windows protected your PC" box:** click **More info** → **Run anyway**.
-> - **File vanishes / "Threat found" alert** (Defender quarantined it, no "More info" link): open **Windows Security → Virus & threat protection → Protection history**, find the quarantined `ACBC-GivEnergy-Dashboard-Setup-v2.3.exe`, click it, then **Actions → Allow** (or **Restore**). Re-download if needed and run again.
+> - **File vanishes / "Threat found" alert** (Defender quarantined it, no "More info" link): open **Windows Security → Virus & threat protection → Protection history**, find the quarantined `ACBC-GivEnergy-Dashboard-Setup-v2.4.exe`, click it, then **Actions → Allow** (or **Restore**). Re-download if needed and run again.
 >
 > Still cautious? Read [`installer.iss`](installer.iss) to see exactly what it runs, or use **Option B** below to skip the installer entirely.
 
