@@ -841,8 +841,9 @@ def _rate_fetch_loop() -> None:
                 _do_rate_fetch()
 
 
-DB_PATH       = Path(__file__).parent / "history.db"
-BACKUPS_DIR   = Path(__file__).parent / "backups"
+DB_PATH           = Path(__file__).parent / "history.db"
+_QA_STATE_PATH    = Path(__file__).parent / "quick_action_state.json"
+BACKUPS_DIR       = Path(__file__).parent / "backups"
 PENDING_IMPORT = Path(str(DB_PATH) + ".pending")   # history.db.pending
 
 # ── Backup / restore ─────────────────────────────────────────────────────────
@@ -3018,21 +3019,100 @@ def _sched_task_active() -> bool:
         return False
 
 
+# ── Quick-action disk persistence ────────────────────────────────────────────
+
+def _qa_save_state(state: dict) -> None:
+    try:
+        _QA_STATE_PATH.write_text(json.dumps(state), encoding="utf-8")
+    except Exception as exc:
+        log.warning("Quick action: failed to save state: %s", exc)
+
+def _qa_clear_state() -> None:
+    try:
+        _QA_STATE_PATH.unlink(missing_ok=True)
+    except Exception as exc:
+        log.warning("Quick action: failed to clear state file: %s", exc)
+
+def _qa_load_state() -> dict:
+    try:
+        return json.loads(_QA_STATE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning("Quick action: failed to read state file: %s", exc)
+        return None
+
+
+# ── Free-slot selection (task #12) ────────────────────────────────────────────
+# On extended profiles (10 slots) write to a free slot so the user's schedule
+# is never touched. On 2-slot/gateway profiles fall back to slot 1 with
+# snapshot-restore (the only slot available).
+
+def _qa_find_free_discharge_slot(slave: int, profile: str, snap_raw) -> tuple:
+    """Return (start_hr, end_hr, is_free) for the discharge quick action.
+    is_free=True means we picked an unused slot; False means slot 1 with snapshot restore."""
+    if profile != "single_phase_extended":
+        return _DISCHARGE_SLOT_HR[0][0], _DISCHARGE_SLOT_HR[0][1], False
+
+    # Discharge slot 2 (44/45) is in the snapshot range (HR 20-116).
+    s2_hr, e2_hr = _DISCHARGE_SLOT_HR[1]
+    snap_base = 20
+    if snap_raw is not None:
+        s2_free = (snap_raw[s2_hr - snap_base] == 0 and snap_raw[e2_hr - snap_base] == 0)
+    else:
+        try:
+            r = _hr_read(slave, 2, s2_hr, timeout=3.0)
+            s2_free = len(r) >= 2 and r[0] == 0 and r[1] == 0
+        except Exception:
+            s2_free = False
+    if s2_free:
+        return s2_hr, e2_hr, True
+
+    # Check slots 3-10 (HR 276-298) in one read.
+    try:
+        ext = _hr_read(slave, 23, 276, timeout=3.0)
+        for idx in range(2, len(_DISCHARGE_SLOT_HR)):
+            s_hr, e_hr = _DISCHARGE_SLOT_HR[idx]
+            if ext[s_hr - 276] == 0 and ext[e_hr - 276] == 0:
+                return s_hr, e_hr, True
+    except Exception as exc:
+        log.warning("Quick action: discharge slot scan failed (%s) - using slot 1", exc)
+
+    log.warning("Quick action: no free discharge slot on extended profile - using slot 1")
+    return _DISCHARGE_SLOT_HR[0][0], _DISCHARGE_SLOT_HR[0][1], False
+
+
+def _qa_find_free_charge_slot(slave: int, profile: str) -> tuple:
+    """Return (start_hr, end_hr, is_free) for the charge quick action."""
+    slot_hrs = _charge_slot_hrs(profile)
+    if profile != "single_phase_extended":
+        return slot_hrs[0][0], slot_hrs[0][1], False
+
+    # Read extended charge slots 2-10 (HR 243-268) in one read.
+    try:
+        ext = _hr_read(slave, 26, 243, timeout=3.0)
+        for idx in range(1, len(slot_hrs)):
+            s_hr, e_hr = slot_hrs[idx]
+            if ext[s_hr - 243] == 0 and ext[e_hr - 243] == 0:
+                return s_hr, e_hr, True
+    except Exception as exc:
+        log.warning("Quick action: charge slot scan failed (%s) - using slot 1", exc)
+
+    log.warning("Quick action: no free charge slot on extended profile - using slot 1")
+    return slot_hrs[0][0], slot_hrs[0][1], False
+
+
 def _quick_action_do(action: str):
     """Write the registers for a quick charge or discharge.
-    Returns (slot_start_hhmm, slot_end_hhmm) integers on success; raises on error."""
+    Returns (slot_start_hhmm, slot_end_hhmm, end_epoch) on success; raises on error."""
     global _quick_action_snapshot
     from datetime import datetime
     slave, profile, model = _detect_inverter()
     if profile not in _SCHED_PROFILES:
         raise RuntimeError(f"Quick actions are not supported on this inverter ({model})")
 
-    # Snapshot the registers we are about to change so _quick_action_revert()
-    # can restore exactly the user's pre-action state rather than a hardcoded baseline.
-    # Retry up to 3 times — the inverter may be momentarily busy or the dongle
-    # may need a moment after the detection read above.  Only proceed without a
-    # snapshot if all attempts fail; in that case the revert falls back to the
-    # safe eco baseline and a warning is logged.
+    # Snapshot registers we may change, for the legacy in-memory revert fallback.
+    # Retry up to 3 times. On total failure revert falls back to safe eco baseline.
     _SNAP_ATTEMPTS = 3
     snap_raw = None
     for _attempt in range(_SNAP_ATTEMPTS):
@@ -3041,28 +3121,30 @@ def _quick_action_do(action: str):
             break
         except Exception as exc:
             if _attempt < _SNAP_ATTEMPTS - 1:
-                log.warning("Quick action: snapshot read attempt %d/%d failed (%s) — retrying",
+                log.warning("Quick action: snapshot attempt %d/%d failed (%s) - retrying",
                             _attempt + 1, _SNAP_ATTEMPTS, exc)
                 time.sleep(0.5)
             else:
                 log.warning("Quick action: snapshot failed after %d attempts (%s) "
-                            "— revert will use safe baseline", _SNAP_ATTEMPTS, exc)
+                            "- revert will use safe baseline", _SNAP_ATTEMPTS, exc)
+
+    def _snap(n, fallback=0):
+        return snap_raw[n - 20] if snap_raw is not None else fallback
 
     if snap_raw is not None:
-        def _snap(n): return snap_raw[n - 20]
         _quick_action_snapshot = {
-            _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),   # HR 20
-            _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),     # HR 27
-            _DISCHARGE_SLOT_HR[0][0]:       _snap(_DISCHARGE_SLOT_HR[0][0]),      # HR 56
-            _DISCHARGE_SLOT_HR[0][1]:       _snap(_DISCHARGE_SLOT_HR[0][1]),      # HR 57
-            _HR["ENABLE_DISCHARGE"]:        _snap(_HR["ENABLE_DISCHARGE"]),       # HR 59
-            _CHARGE_SLOT_HR[0][0]:          _snap(_CHARGE_SLOT_HR[0][0]),         # HR 94
-            _CHARGE_SLOT_HR[0][1]:          _snap(_CHARGE_SLOT_HR[0][1]),         # HR 95
-            _HR["ENABLE_CHARGE"]:           _snap(_HR["ENABLE_CHARGE"]),          # HR 96
-            _HR["BATTERY_SOC_RESERVE"]:     _snap(_HR["BATTERY_SOC_RESERVE"]),    # HR 110
-            _HR["BATTERY_CHARGE_LIMIT"]:    _snap(_HR["BATTERY_CHARGE_LIMIT"]),   # HR 111
-            _HR["BATTERY_DISCHARGE_LIMIT"]: _snap(_HR["BATTERY_DISCHARGE_LIMIT"]),# HR 112
-            _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),      # HR 116
+            _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),
+            _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),
+            _DISCHARGE_SLOT_HR[0][0]:       _snap(_DISCHARGE_SLOT_HR[0][0]),
+            _DISCHARGE_SLOT_HR[0][1]:       _snap(_DISCHARGE_SLOT_HR[0][1]),
+            _HR["ENABLE_DISCHARGE"]:        _snap(_HR["ENABLE_DISCHARGE"]),
+            _CHARGE_SLOT_HR[0][0]:          _snap(_CHARGE_SLOT_HR[0][0]),
+            _CHARGE_SLOT_HR[0][1]:          _snap(_CHARGE_SLOT_HR[0][1]),
+            _HR["ENABLE_CHARGE"]:           _snap(_HR["ENABLE_CHARGE"]),
+            _HR["BATTERY_SOC_RESERVE"]:     _snap(_HR["BATTERY_SOC_RESERVE"]),
+            _HR["BATTERY_CHARGE_LIMIT"]:    _snap(_HR["BATTERY_CHARGE_LIMIT"]),
+            _HR["BATTERY_DISCHARGE_LIMIT"]: _snap(_HR["BATTERY_DISCHARGE_LIMIT"]),
+            _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),
         }
         log.info("Quick action: snapshot saved (%d registers)", len(_quick_action_snapshot))
     else:
@@ -3070,65 +3152,97 @@ def _quick_action_do(action: str):
 
     now_dt     = datetime.now()
     start_mins = now_dt.hour * 60 + now_dt.minute
-    end_mins   = min(start_mins + 60, 23 * 60 + 59)   # clamp to 23:59 — no midnight wrap
+    end_mins   = min(start_mins + 60, 23 * 60 + 59)
     cs         = _mins_to_hhmm(start_mins)
     ce         = _mins_to_hhmm(end_mins)
 
     if action == "charge":
+        s_hr, e_hr, free_slot = _qa_find_free_charge_slot(slave, profile)
         pct    = max(0, min(50, QUICK_CHARGE_POWER_PCT  * 50 // 100))
         target = QUICK_CHARGE_TARGET_SOC
         writes = [
-            (_CHARGE_SLOT_HR[0][0],                              cs),  # HR 94
-            (_CHARGE_SLOT_HR[0][1],                              ce),  # HR 95
-            (_HR["ENABLE_DISCHARGE"],                             0),
-            (_HR["BATTERY_POWER_MODE"],                           1),  # eco / demand
+            (s_hr,                                                   cs),
+            (e_hr,                                                   ce),
+            (_HR["ENABLE_DISCHARGE"],                                 0),
+            (_HR["BATTERY_POWER_MODE"],                               1),
             (_HR["ENABLE_CHARGE_TARGET"],   0 if target == 100 else 1),
-            (_HR["CHARGE_TARGET_SOC"],                       target),
-            (_HR["BATTERY_CHARGE_LIMIT"],                       pct),
-            (_HR["ENABLE_CHARGE"],                                1),
+            (_HR["CHARGE_TARGET_SOC"],                           target),
+            (_HR["BATTERY_CHARGE_LIMIT"],                           pct),
+            (_HR["ENABLE_CHARGE"],                                    1),
         ]
-        label = f"Quick charge started: slot {cs:04d}–{ce:04d}, target {target}%, power {pct*2}%"
+        restore_regs = [
+            [s_hr,                              0 if free_slot else _snap(s_hr)],
+            [e_hr,                              0 if free_slot else _snap(e_hr)],
+            [_HR["ENABLE_DISCHARGE"],           _snap(_HR["ENABLE_DISCHARGE"],          1)],
+            [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],        1)],
+            [_HR["ENABLE_CHARGE_TARGET"],       _snap(_HR["ENABLE_CHARGE_TARGET"],      0)],
+            [_HR["CHARGE_TARGET_SOC"],          _snap(_HR["CHARGE_TARGET_SOC"],       100)],
+            [_HR["BATTERY_CHARGE_LIMIT"],       _snap(_HR["BATTERY_CHARGE_LIMIT"],     50)],
+            [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],             0)],
+        ]
+        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {pct*2}%"
     else:
+        s_hr, e_hr, free_slot = _qa_find_free_discharge_slot(slave, profile, snap_raw)
         pct   = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
         stop  = max(4, SCHEDULER_BASELINE_SOC_RESERVE)
         writes = [
-            (_DISCHARGE_SLOT_HR[0][0],                           cs),  # HR 56
-            (_DISCHARGE_SLOT_HR[0][1],                           ce),  # HR 57
-            (_HR["ENABLE_CHARGE"],                                0),
-            (_HR["BATTERY_POWER_MODE"],                           0),  # export / max-power
-            (_HR["BATTERY_SOC_RESERVE"],                       stop),
-            (_HR["BATTERY_DISCHARGE_LIMIT"],                    pct),
-            (_HR["ENABLE_DISCHARGE"],                             1),
+            (s_hr,                                                   cs),
+            (e_hr,                                                   ce),
+            (_HR["ENABLE_CHARGE"],                                    0),
+            (_HR["BATTERY_POWER_MODE"],                               0),
+            (_HR["BATTERY_SOC_RESERVE"],                           stop),
+            (_HR["BATTERY_DISCHARGE_LIMIT"],                        pct),
+            (_HR["ENABLE_DISCHARGE"],                                 1),
         ]
-        label = f"Quick discharge started: slot {cs:04d}–{ce:04d}, stop {stop}% SOC, power {pct*2}%"
+        restore_regs = [
+            [s_hr,                              0 if free_slot else _snap(s_hr)],
+            [e_hr,                              0 if free_slot else _snap(e_hr)],
+            [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],              0)],
+            [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],         1)],
+            [_HR["BATTERY_SOC_RESERVE"],        _snap(_HR["BATTERY_SOC_RESERVE"],        4)],
+            [_HR["BATTERY_DISCHARGE_LIMIT"],    _snap(_HR["BATTERY_DISCHARGE_LIMIT"],   50)],
+            [_HR["ENABLE_DISCHARGE"],           _snap(_HR["ENABLE_DISCHARGE"],           1)],
+        ]
+        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {pct*2}%"
 
     for reg, val in writes:
         _hr_write(slave, reg, val)
         time.sleep(_SCHED_WRITE_GAP)
     _log_control("quick_action", {"action": action, "slot_start": cs, "slot_end": ce}, True, label)
     log.warning(label)
-    return cs, ce
+
+    end_epoch = time.time() + 3600
+    _qa_save_state({
+        "action":       action,
+        "slot_pair":    [s_hr, e_hr],
+        "free_slot":    free_slot,
+        "slot_start":   cs,
+        "end_epoch":    end_epoch,
+        "restore_regs": restore_regs,
+    })
+    return cs, ce, end_epoch
 
 
-def _quick_action_revert():
-    """Restore inverter to its pre-action state.  Best-effort — logged on failure.
+def _quick_action_revert(state: dict = None, trigger: str = "auto"):
+    """Restore inverter to pre-action state. Best-effort: each write is individually
+    retried via _hr_write, and a write failure is logged but does not abort the rest.
 
-    If a register snapshot was saved by _quick_action_do() the exact pre-action
-    values are written back.  If the snapshot is missing (e.g. snapshot read
-    failed) a safe eco baseline is used as a fallback.
+    state:   dict from _qa_load_state() with a 'restore_regs' list, or None.
+    trigger: 'auto' (timer expiry), 'manual' (user pressed stop), 'startup' (boot recovery).
     """
     try:
         slave, profile, _model = _detect_inverter()
         if profile not in _SCHED_PROFILES:
+            _qa_clear_state()
             return
 
-        if _quick_action_snapshot:
+        if state is not None and "restore_regs" in state:
+            restore_list = [(int(r), v) for r, v in state["restore_regs"]]
+            src = "state-file"
+        elif _quick_action_snapshot:
             def _sv(reg, fallback=0):
                 return _quick_action_snapshot.get(reg, fallback)
-            writes = [
-                # Restore both slot 0 start/end to whatever they were before the
-                # action.  If the user had an overnight charge slot, this brings
-                # it back; if the slot was empty (0,0) it stays cleared.
+            restore_list = [
                 (_CHARGE_SLOT_HR[0][0],        _sv(_CHARGE_SLOT_HR[0][0])),
                 (_CHARGE_SLOT_HR[0][1],        _sv(_CHARGE_SLOT_HR[0][1])),
                 (_DISCHARGE_SLOT_HR[0][0],     _sv(_DISCHARGE_SLOT_HR[0][0])),
@@ -3139,30 +3253,48 @@ def _quick_action_revert():
                 (_HR["BATTERY_SOC_RESERVE"],   _sv(_HR["BATTERY_SOC_RESERVE"], 4)),
                 (_HR["ENABLE_DISCHARGE"],      _sv(_HR["ENABLE_DISCHARGE"], 1)),
             ]
-            label = "Quick action: reverted to pre-action state"
+            src = "in-memory"
         else:
-            # Snapshot unavailable — fall back to a safe eco baseline
             reserve = max(4, min(100, SCHEDULER_BASELINE_SOC_RESERVE))
-            writes = [
+            restore_list = [
                 (_CHARGE_SLOT_HR[0][0],       0),
                 (_CHARGE_SLOT_HR[0][1],       0),
                 (_DISCHARGE_SLOT_HR[0][0],    0),
                 (_DISCHARGE_SLOT_HR[0][1],    0),
                 (_HR["ENABLE_CHARGE"],         0),
                 (_HR["ENABLE_CHARGE_TARGET"],  0),
-                (_HR["BATTERY_POWER_MODE"],    1),  # eco
+                (_HR["BATTERY_POWER_MODE"],    1),
                 (_HR["BATTERY_SOC_RESERVE"], reserve),
                 (_HR["ENABLE_DISCHARGE"],      1),
             ]
-            label = "Quick action: reverted to safe baseline (no snapshot)"
+            src = "safe-baseline"
 
-        for reg, val in writes:
-            _hr_write(slave, reg, val)
-            time.sleep(_SCHED_WRITE_GAP)
-        _log_control("quick_action", {"action": "revert"}, True, label)
-        log.warning(label)
+        ok_count = fail_count = 0
+        for reg, val in restore_list:
+            try:
+                _hr_write(slave, reg, val)
+                time.sleep(_SCHED_WRITE_GAP)
+                ok_count += 1
+            except Exception as exc:
+                fail_count += 1
+                log.warning("Quick action revert: HR%d write failed (%s)", reg, exc)
+
+        if fail_count == 0:
+            msg = (f"Quick action reverted ok "
+                   f"({ok_count} regs, src={src}, trigger={trigger})")
+        else:
+            msg = (f"Quick action revert partial "
+                   f"({ok_count} ok, {fail_count} failed, src={src}, trigger={trigger})")
+        log.warning(msg)
+        _log_control("quick_action",
+                     {"action": "revert", "trigger": trigger, "src": src},
+                     fail_count == 0, msg)
     except Exception as exc:
-        log.warning("Quick action revert failed: %s", exc)
+        msg = f"Quick action revert failed (trigger={trigger}): {exc}"
+        log.warning(msg)
+        _log_control("quick_action", {"action": "revert", "trigger": trigger}, False, msg)
+    finally:
+        _qa_clear_state()
 
 
 def _maybe_quick_action_tick():
@@ -3170,13 +3302,51 @@ def _maybe_quick_action_tick():
     global _quick_charge_until, _quick_discharge_until
     now = time.time()
     if _quick_charge_until > 0 and now >= _quick_charge_until:
-        log.warning("Quick charge: 1-hour window expired — reverting to baseline")
+        log.warning("Quick charge: 1-hour window expired - reverting")
         _quick_charge_until = 0.0
-        threading.Thread(target=_quick_action_revert, daemon=True).start()
+        state = _qa_load_state()
+        threading.Thread(target=_quick_action_revert,
+                         args=(state, "auto"), daemon=True).start()
     elif _quick_discharge_until > 0 and now >= _quick_discharge_until:
-        log.warning("Quick discharge: 1-hour window expired — reverting to baseline")
+        log.warning("Quick discharge: 1-hour window expired - reverting")
         _quick_discharge_until = 0.0
-        threading.Thread(target=_quick_action_revert, daemon=True).start()
+        state = _qa_load_state()
+        threading.Thread(target=_quick_action_revert,
+                         args=(state, "auto"), daemon=True).start()
+
+
+def _qa_startup_recovery():
+    """Check for a persisted quick-action state left over from a previous process.
+    Called as a background thread at startup. Waits for inverter detection first so
+    the recovery write doesn't race with the listen socket opening."""
+    global _quick_charge_until, _quick_discharge_until
+    state = _qa_load_state()
+    if state is None:
+        return
+    # Wait up to 30 s for the inverter to be detected on the listen socket.
+    for _ in range(60):
+        if _inverter_profile and _inverter_profile != "unknown":
+            break
+        time.sleep(0.5)
+    else:
+        log.warning("Quick action startup recovery: inverter not detected in 30 s - skipped")
+        return
+
+    now        = time.time()
+    end_epoch  = state.get("end_epoch", 0)
+    action     = state.get("action", "unknown")
+    if now >= end_epoch:
+        log.warning("Quick action startup recovery: window expired (action=%s) - running housekeeping", action)
+        _quick_action_revert(state, trigger="startup")
+    else:
+        remaining = int(end_epoch - now)
+        log.warning("Quick action startup recovery: re-arming %s timer (%d s remaining)", action, remaining)
+        if action == "charge":
+            _quick_charge_until    = end_epoch
+            _quick_discharge_until = 0.0
+        elif action == "discharge":
+            _quick_discharge_until = end_epoch
+            _quick_charge_until    = 0.0
 
 
 def _sched_apply(desired: dict) -> None:
@@ -3286,6 +3456,8 @@ def api_data():
     data["quick_discharge_remaining"]  = max(0, int(_quick_discharge_until - _now)) if _qd else 0
     # Inverter profile — needed by the frontend to hide quick-action bar on unsupported profiles
     data["inverter_profile"] = _inverter_profile or ""
+    # Running backend version — drives the footer so it can never lag the deployed code.
+    data["app_version"] = APP_VERSION
     return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
@@ -3457,28 +3629,32 @@ def quick_action_endpoint():
         return jsonify({"ok": False, "error": "action must be 'charge' or 'discharge'"})
 
     if not start:
-        # Cancel
+        # Manual cancel: load persisted state so revert only touches registers
+        # the action set. Slot time regs are cleared first so the firmware stops
+        # the export/charge immediately (firmware will not stop early on its own).
+        state = _qa_load_state()
         if action == "charge":
             _quick_charge_until = 0.0
         else:
             _quick_discharge_until = 0.0
-        threading.Thread(target=_quick_action_revert, daemon=True).start()
+        threading.Thread(target=_quick_action_revert,
+                         args=(state, "manual"), daemon=True).start()
         return jsonify({"ok": True, "message": f"Quick {action} cancelled"})
 
     # Start
     try:
-        cs, ce = _quick_action_do(action)
+        cs, ce, end_epoch = _quick_action_do(action)
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})
 
     if action == "charge":
-        _quick_charge_until    = time.time() + 3600
-        _quick_discharge_until = 0.0   # cancel any competing discharge
+        _quick_charge_until    = end_epoch
+        _quick_discharge_until = 0.0
     else:
-        _quick_discharge_until = time.time() + 3600
-        _quick_charge_until    = 0.0   # cancel any competing charge
+        _quick_discharge_until = end_epoch
+        _quick_charge_until    = 0.0
 
-    return jsonify({"ok": True, "message": f"Quick {action} started (slot {cs:04d}–{ce:04d})"})
+    return jsonify({"ok": True, "message": f"Quick {action} started (slot {cs:04d}-{ce:04d})"})
 
 
 @app.route("/api/logs")
@@ -4346,6 +4522,10 @@ if __name__ == "__main__":
 
     # Scheduler block engine — inert until the master switch is enabled.
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+
+    # Quick-action startup recovery: re-arm the in-memory timer or run housekeeping
+    # if a quick action was active when the process last stopped.
+    threading.Thread(target=_qa_startup_recovery, daemon=True).start()
 
     # Auto-tariff rate fetcher — startup check + daily 16:30 / 20:00 cron.
     threading.Thread(target=_rate_fetch_loop, daemon=True).start()

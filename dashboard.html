@@ -744,7 +744,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
   </div>
 
-  <div id="ver-bar">V2.3 &nbsp;&middot;&nbsp; &copy; ACBC Software</div>
+  <!-- Version is filled in from /api/data (app_version) so it never lags the backend. -->
+  <div id="ver-bar">&copy; ACBC Software</div>
   <!-- v1.2 includes inverter control + activity log -->
 
   <!-- Password modal -->
@@ -1572,6 +1573,13 @@ function updateBatFill(soc) {
 // ── Apply live data ─────────────────────────────────────────────────────────
 function applyData(d) {
   liveData  = d;
+  // Footer shows the running backend version (from /api/data) so it can never
+  // lag the deployed code. No manual bump needed — it follows APP_VERSION.
+  if (d.app_version) {
+    const vtxt = 'V' + d.app_version + ' · © ACBC Software';
+    const vb = $('ver-bar');
+    if (vb && vb.textContent !== vtxt) vb.textContent = vtxt;
+  }
   liveFlows = getFlows(d);
   setSchedIcon(d.scheduler_active);
   updateQuickActions(d);
@@ -3180,7 +3188,17 @@ function showView(v) {
     $('quick-action-bar').style.display = 'none';
   }
   $('ver-bar').style.display        = live         ? '' : 'none';
-  if (live) { layout(); particles.length = 0; }  // recalculate after any layout shift
+  if (live) {
+    // Defer layout until the next frame so getBoundingClientRect() reads
+    // positions after the browser has reflowed the newly-visible elements.
+    // Without the rAF, snapped ring centres can be stale (seen as animation
+    // triangle drifting right on Chrome mobile until a manual repaint).
+    requestAnimationFrame(() => {
+      layout(); particles.length = 0; render(); _resumeLoop();
+    });
+  } else {
+    _pauseLoop();
+  }
   if (v==='history')  loadHistory();
   if (v==='settings') loadSettings();
   if (v==='tariff')   loadTariff();
