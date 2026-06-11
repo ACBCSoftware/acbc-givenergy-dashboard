@@ -103,8 +103,8 @@ def test_classify_gateway_tester():
     assert ds._classify_model(0x7001, 0) == ("gateway_aio", "Gateway")
 
 def test_classify_aio2_tester():
-    # All in One 2 tester unit (DTC 0x8201)
-    assert ds._classify_model(0x8201, 0) == ("three_phase_aio", "All in One 2")
+    # All in One 2 (DTC 0x8201): single-phase 10-slot extended, same family as 0x80xx
+    assert ds._classify_model(0x8201, 0) == ("single_phase_extended", "All in One 2")
 
 def test_classify_hybrid_fw_century_rule():
     # 0x20xx family disambiguates on ARM firmware century
@@ -137,7 +137,9 @@ def test_classify_one_digit_families():
         ("single_phase_2slot", "Energy Management System")
     assert ds._classify_model(0x6001, 0) == \
         ("three_phase_aio", "Three-Phase AC Inverter")
-    assert ds._classify_model(0x8001, 0) == ("three_phase_aio", "All in One")
+    # All in One (0x8001, Gen1): single-phase 10-slot extended, confirmed on hardware
+    # (issue #21). NOT three_phase_aio — HR 1100+ does not exist on it.
+    assert ds._classify_model(0x8001, 0) == ("single_phase_extended", "All in One")
 
 def test_classify_unknown_dtc():
     profile, model = ds._classify_model(0x9999, 0)
@@ -154,6 +156,30 @@ def test_classify_no_gen4_anywhere():
         assert profile == "single_phase_extended"
         assert "Unknown" in model
         assert "Gen4" not in model and "Gen 4" not in model
+
+def test_classify_aio_family_all_extended():
+    # Every All-in-One DTC (0x80xx/0x81xx/0x82xx/0x83xx) is single-phase 10-slot
+    # extended, NOT three_phase_aio. Confirmed on AIO 0x8001 hardware (issue #21);
+    # corroborated by the psylsph simulator and home-energy-manager. HR 1100+ (the
+    # three-phase slot block) does not exist on these units.
+    for dtc in (0x8001, 0x8002, 0x8003, 0x8102, 0x8103, 0x8201, 0x8304):
+        profile, _ = ds._classify_model(dtc, 318)
+        assert profile == "single_phase_extended", f"{dtc:#06x} should be extended"
+    # True three-phase inverters stay three_phase_aio
+    assert ds._classify_model(0x4001, 0)[0] == "three_phase_aio"
+    assert ds._classify_model(0x6001, 0)[0] == "three_phase_aio"
+
+def test_charge_slot_hrs_per_profile():
+    # Only the extended profile uses the contiguous charge slot 2 (243/244) and reads
+    # the 240-299 block; everything else uses the legacy 31/32 (and never reads beyond
+    # HR 119). Routing gateway_aio to 31/32 avoids an out-of-range read on the AIO map.
+    assert ds._charge_slot_hrs("single_phase_extended")[1] == (243, 244)
+    assert ds._charge_slot_hrs("single_phase_2slot")[1]    == (31, 32)
+    assert ds._charge_slot_hrs("gateway_aio")[1]           == (31, 32)
+    # Slot 1 is HR 94/95 on every profile
+    for p in ("single_phase_extended", "single_phase_2slot",
+              "single_phase_ac_coupled", "gateway_aio"):
+        assert ds._charge_slot_hrs(p)[0] == (94, 95)
 
 
 # ── _smooth: zero-blip debounce ────────────────────────────────────────────────
@@ -305,14 +331,16 @@ def test_slot_map_lengths():
     assert len(ds._DISCHARGE_SLOT_HR_3PH) == 2
 
 def test_slot_map_known_registers():
-    # Confirmed from the givenergy-modbus library source (see PROJECT_MEMORY §7)
-    assert ds._CHARGE_SLOT_HR[0]     == (94, 95)
-    assert ds._CHARGE_SLOT_HR[1]     == (31, 32)
-    assert ds._DISCHARGE_SLOT_HR[0]  == (56, 57)
-    assert ds._DISCHARGE_SLOT_HR[1]  == (44, 45)
-    assert ds._CHARGE_SLOT_HR_3PH    == [(1113, 1114), (1115, 1116)]
-    assert ds._DISCHARGE_SLOT_HR_3PH == [(1118, 1119), (1120, 1121)]
-    assert ds._HR_3PH_CHARGE_TARGET  == 1111
+    # Extended (Gen3/HV/AIO) charge slot 2 is the contiguous 243/244, confirmed on the
+    # AIO 0x8001 hardware 11 Jun 2026. 2-slot / gateway profiles keep the legacy 31/32.
+    assert ds._CHARGE_SLOT_HR[0]      == (94, 95)
+    assert ds._CHARGE_SLOT_HR[1]      == (243, 244)
+    assert ds._CHARGE_SLOT_HR_2SLOT   == [(94, 95), (31, 32)]
+    assert ds._DISCHARGE_SLOT_HR[0]   == (56, 57)
+    assert ds._DISCHARGE_SLOT_HR[1]   == (44, 45)
+    assert ds._CHARGE_SLOT_HR_3PH     == [(1113, 1114), (1115, 1116)]
+    assert ds._DISCHARGE_SLOT_HR_3PH  == [(1118, 1119), (1120, 1121)]
+    assert ds._HR_3PH_CHARGE_TARGET   == 1111
 
 def test_extended_slot_patterns():
     # Extended slots 3-10: charge from 246, discharge from 276, stride 3

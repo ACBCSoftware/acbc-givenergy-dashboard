@@ -2280,8 +2280,8 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
 #
 # Profiles:
 #   single_phase_2slot     – Hybrid Gen 1/Gen 2, Gen 3 with ARM fw ≤302
-#   single_phase_extended  – Gen 3 (ARM fw >302), HV Gen 3 (0x81xx), 0x83xx (identity unconfirmed)
-#   three_phase_aio        – three-phase / AIO Commercial / All in One
+#   single_phase_extended  – Gen 3 (ARM fw >302), HV Gen 3 (0x81xx), All in One (0x8xxx), 0x83xx
+#   three_phase_aio        – true three-phase inverters only (0x4xxx / 0x6xxx)
 #   unknown                – detection failed, unrecognised DTC, or no-battery device (String Inverter)
 
 _inverter_profile: str = ""     # "" = not yet detected
@@ -2296,7 +2296,8 @@ _DTC_PREFIX_PROFILE = {
     "5": "single_phase_2slot",       # EMS
     "6": "three_phase_aio",          # three-phase AC
     "7": "single_phase_2slot",       # GATEWAY
-    "8": "three_phase_aio",          # ALL_IN_ONE family
+    "8": "single_phase_extended",    # ALL_IN_ONE family (0x8xxx): single-phase, 10-slot
+                                     # extended. Confirmed on AIO 0x8001 (Gen1), 11 Jun 2026.
 }
 
 # Specific two-digit DTC prefixes that override the coarse map
@@ -2307,7 +2308,7 @@ _DTC_TWO_PREFIX_PROFILE = {
     "51": "single_phase_2slot",    # EMS Commercial
     "70": "gateway_aio",           # Gateway / Giv-Gateway (DTC 0x70xx) — live data at IR base=1600
     "81": "single_phase_extended", # Hybrid Inverter Gen 3 HV (single-phase, 8/10 kW)
-    "82": "three_phase_aio",       # All in One 2 (AIO2 + MPPT)
+    "82": "single_phase_extended", # All in One 2 (AIO2 + MPPT): single-phase 10-slot, as 0x80xx
     "83": "single_phase_extended", # DTC 0x83xx — identity unconfirmed; community libs say HYBRID_GEN4 but GivEnergy sells no Gen4
 }
 
@@ -2444,15 +2445,16 @@ _HR = {
 }
 
 # Slot time-pair registers: (start_hr, end_hr).
-# EXTENDED_SLOTS keeps slots 1+2 at the same addresses as 2-slot; slots 3-10
-# are new registers.  Confirmed from the givenergy-modbus EXTENDED_SLOTS map.
-_CHARGE_SLOT_HR = [
+# Slot 1 (94/95) is shared across all profiles. Charge slot 2 differs: the extended
+# profile uses the contiguous block at 243/244 (confirmed on AIO 0x8001 hardware,
+# 11 Jun 2026); 2-slot/gateway use 31/32 (see _CHARGE_SLOT_HR_2SLOT). Slots 3-10 are
+# the extended-only contiguous block, matching the givenergy-modbus EXTENDED_SLOTS map.
+_CHARGE_SLOT_HR = [          # single_phase_extended layout (Gen3/HV-Gen3/AIO 0x8xxx/0x83xx)
     (94, 95),    # slot 1
-    (31, 32),    # slot 2  — same address in both 2-slot and extended profiles
-                 #           NOTE: GIV-AC3.0 (Gen2 AC) cannot write HR 31/32 — firmware
-                 #           silently times out the write.  Confirmed live 07 Jun 2026 with
-                 #           no cloud integration active.  Scheduler only ever uses slot 1.
-    (246, 247),  # slot 3  } extended (Gen3/HV-Gen3/0x83xx) only
+    (243, 244),  # slot 2  (contiguous extended block; confirmed on AIO 0x8001, 11 Jun 2026).
+                 #          2-slot and gateway profiles use HR 31/32 instead, via the helper
+                 #          below (they don't read the 240-299 block).
+    (246, 247),  # slot 3  } extended (Gen3/HV-Gen3/AIO/0x83xx) only
     (249, 250),  # slot 4  }
     (252, 253),  # slot 5  }
     (255, 256),  # slot 6  }
@@ -2473,6 +2475,22 @@ _DISCHARGE_SLOT_HR = [
     (294, 295),  # slot 9  }
     (297, 298),  # slot 10 }
 ]
+
+# Charge slot start/end for 2-slot and gateway profiles: charge slot 2 stays at the
+# legacy HR 31/32 (these profiles only read HR 0-119, not the 240-299 extended block).
+# NOTE: GIV-AC3.0 (Gen2 AC) cannot write HR 31/32 (firmware silently times out the write,
+# confirmed live 07 Jun 2026); it uses single_phase_ac_coupled with only 1 charge slot.
+_CHARGE_SLOT_HR_2SLOT = [
+    (94, 95),    # slot 1
+    (31, 32),    # slot 2  (legacy address)
+]
+
+def _charge_slot_hrs(profile: str):
+    """Charge slot start/end HR pairs for this profile.
+    Only single_phase_extended (Gen3/HV/AIO 0x8xxx) keeps charge slot 2 in the
+    contiguous block at HR 243/244 and reads the 240-299 range. Every other profile
+    uses the legacy HR 31/32 map (and never reads beyond HR 119)."""
+    return _CHARGE_SLOT_HR if profile == "single_phase_extended" else _CHARGE_SLOT_HR_2SLOT
 
 # Per-slot charge/discharge target SOC registers (extended profile only).
 # Pattern: slot N → base + (N-1)*3  where base=242/272.
@@ -2592,7 +2610,7 @@ def _read_control_state() -> dict:
         return slot
 
     charge_slots = [
-        read_slot(_CHARGE_SLOT_HR, _CHARGE_SOC_HR, i)
+        read_slot(_charge_slot_hrs(profile), _CHARGE_SOC_HR, i)
         for i in range(num_charge_slots)
     ]
     discharge_slots = [
@@ -2744,7 +2762,7 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
         max_slots = _CHARGE_SLOT_COUNT[profile]
         if not 1 <= slot <= max_slots:
             raise ValueError(f"Charge slot {slot} out of range for this inverter (max {max_slots})")
-        start_hr, end_hr = _CHARGE_SLOT_HR[slot - 1]
+        start_hr, end_hr = _charge_slot_hrs(profile)[slot - 1]
         wr(start_hr, _hhmm_to_bcd(params["start"]))
         wr(end_hr,   _hhmm_to_bcd(params["end"]))
         return f"Charge slot {slot} set to {params['start']}–{params['end']}"
