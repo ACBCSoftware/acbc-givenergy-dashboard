@@ -1065,7 +1065,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           <span class="ctrl-slider-val" id="cv-charge-limit">—</span>
         </div>
         <div class="ctrl-slider-wrap">
-          <input type="range" class="ctrl-slider" id="sl-charge-limit" min="0" max="50" value="32"
+          <input type="range" class="ctrl-slider" id="sl-charge-limit" min="0" max="100" value="64"
             oninput="ctrlLimitLabel('charge')">
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set charge power limit','charge')">Set</button>
         </div>
@@ -1099,7 +1099,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           <span class="ctrl-slider-val" id="cv-discharge-limit">—</span>
         </div>
         <div class="ctrl-slider-wrap">
-          <input type="range" class="ctrl-slider" id="sl-discharge-limit" min="0" max="50" value="32"
+          <input type="range" class="ctrl-slider" id="sl-discharge-limit" min="0" max="100" value="64"
             oninput="ctrlLimitLabel('discharge')">
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set discharge power limit','discharge')">Set</button>
         </div>
@@ -1201,8 +1201,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           oninput="$('se-soc-val').textContent=this.value+'%'">
       </div>
       <div class="se-field" id="se-pct-field">
-        <label>Power limit <span id="se-pct-val">50%</span></label>
-        <input type="range" id="se-pct" min="0" max="50" value="50" data-reg="50"
+        <label>Power limit <span id="se-pct-val">100%</span></label>
+        <input type="range" id="se-pct" min="0" max="100" value="100" data-reg="50"
           oninput="_sePctInput()">
       </div>
       <div id="se-btn-row">
@@ -1916,8 +1916,9 @@ async function ctrlApply(command, sliderId) {
 }
 
 // ── Charge/discharge power limit: % or watts ──────────────────────────────────
-// The inverter register is 0–50 where 50 = full power. In watts mode the slider
-// runs 0→max watts and we convert to/from the register (limit = W/maxW × 50).
+// The inverter register is 0-50 where 50 = full power. The UI displays 0-100%
+// (register x 2) so users see a full-range slider. In watts mode the slider
+// runs 0 -> max watts and we convert to/from the register (limit = W/maxW x 50).
 let _ctrlPower = { units:'percent', maxChg:2600, maxDis:2600 };
 
 function _limitMax(type){ return type === 'charge' ? _ctrlPower.maxChg : _ctrlPower.maxDis; }
@@ -1931,9 +1932,9 @@ function _configLimitSlider(type, registerVal) {
     sl.value = Math.round((registerVal / 50) * maxW / 100) * 100;   // register → W, snapped
     cv.textContent = sl.value + ' W';
   } else {
-    sl.min = 0; sl.max = 50; sl.step = 1;
-    sl.value = registerVal;
-    cv.textContent = registerVal + '%';
+    sl.min = 0; sl.max = 100; sl.step = 1;
+    sl.value = registerVal * 2;
+    cv.textContent = (registerVal * 2) + '%';
   }
 }
 
@@ -1949,9 +1950,9 @@ async function ctrlSetLimit(type) {
   let reg;
   if (_ctrlPower.units === 'watts') {
     const maxW = _limitMax(type);
-    reg = Math.round(parseInt(sl.value) / maxW * 50);   // W → register
+    reg = Math.round(parseInt(sl.value) / maxW * 50);   // W -> register
   } else {
-    reg = parseInt(sl.value);
+    reg = Math.round(parseInt(sl.value) / 2);           // 0-100 display -> 0-50 register
   }
   reg = Math.max(0, Math.min(50, reg));
   await ctrlCmd(cmd, { value: reg });
@@ -2305,14 +2306,14 @@ function _seRegToDisplay(reg, action) {
     const maxW = _sePowerMax(action);
     return Math.round((reg / 50) * maxW / 100) * 100;
   }
-  return reg;
+  return reg * 2;   // register 0-50 -> display 0-100%
 }
 function _seDisplayToReg(display, action) {
   if (_ctrlPower.units === 'watts') {
     const maxW = _sePowerMax(action);
     return Math.max(0, Math.min(50, Math.round(display / maxW * 50)));
   }
-  return Math.max(0, Math.min(50, display));
+  return Math.max(0, Math.min(50, Math.round(display / 2)));  // 0-100% -> register 0-50
 }
 function _seConfigPowerSlider(action) {
   const sl  = $('se-pct');
@@ -2325,9 +2326,9 @@ function _seConfigPowerSlider(action) {
     sl.value = display;
     lbl.textContent = display + ' W';
   } else {
-    sl.min = 0; sl.max = 50; sl.step = 1;
-    sl.value = reg;
-    lbl.textContent = reg + '%';
+    sl.min = 0; sl.max = 100; sl.step = 1;
+    sl.value = reg * 2;
+    lbl.textContent = (reg * 2) + '%';
   }
 }
 function _sePctInput() {
@@ -2341,7 +2342,7 @@ function _fmtPower(reg, action) {
     const maxW = _sePowerMax(action);
     return Math.round((reg / 50) * maxW / 100) * 100 + ' W';
   }
-  return reg + '%';
+  return (reg * 2) + '%';
 }
 
 function seActionChanged() {
@@ -2992,6 +2993,12 @@ $('sett-save').addEventListener('click', async () => {
   if (newPw && newPw !== confPw) {
     $('sett-msg').style.color = '#f87171';
     $('sett-msg').textContent = 'Passwords do not match';
+    return;
+  }
+  const geohashVal = $('s-wxhash').value.trim();
+  if (geohashVal && geohashVal.length !== 6) {
+    $('sett-msg').style.color = '#f87171';
+    $('sett-msg').textContent = 'Geohash must be exactly 6 characters -- use the Lookup button to find yours';
     return;
   }
   const body = {

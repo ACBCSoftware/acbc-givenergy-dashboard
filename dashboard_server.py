@@ -1823,19 +1823,35 @@ def _handle_reading(data: dict, st: dict):
         st["purge"] = time.time()
     _maybe_backup()   # one auto-backup per calendar day (cheap no-op otherwise)
 
+_weather_fetch_active = False   # guard: only one background fetch at a time
+
 def _maybe_weather():
-    """Fetch weather if configured and the interval has elapsed (cheap no-op otherwise)."""
-    global _weather_cached, _last_weather_ts
-    if MET_API_KEY and MET_GEOHASH and time.time() - _last_weather_ts > _weather_interval():
+    """Schedule a background weather fetch if the interval has elapsed.
+    Non-blocking: the HTTP call runs in a daemon thread so the listen loop
+    is never stalled waiting for a network response."""
+    global _weather_cached, _last_weather_ts, _weather_fetch_active
+    if not (MET_API_KEY and MET_GEOHASH):
+        return
+    if time.time() - _last_weather_ts <= _weather_interval():
+        return
+    if _weather_fetch_active:
+        return
+    _weather_fetch_active = True
+    _last_weather_ts = time.time()  # pre-mark so the interval doesn't re-fire immediately
+
+    def _fetch_bg():
+        global _weather_cached, _weather_fetch_active
         try:
             wx = _fetch_weather()
             with _lock:
                 _weather_cached = wx
-            _last_weather_ts = time.time()
             log.info("Weather: %s°C code=%s", wx["temp"], wx["weather_code"])
         except Exception as exc:
             log.error("Weather fetch failed: %s", exc)
-            _last_weather_ts = time.time()  # back off — don't retry every poll cycle
+        finally:
+            _weather_fetch_active = False
+
+    threading.Thread(target=_fetch_bg, daemon=True).start()
 
 # ── Update check ──────────────────────────────────────────────────────────────
 _update_info: dict = {}
@@ -2022,6 +2038,8 @@ def _run_listen(st: dict):
                 # Read whatever has arrived
                 try:
                     chunk = s.recv(8192)
+                    if not chunk:  # EOF -- dongle closed the connection
+                        raise ConnectionError("inverter connection closed")
                 except socket.timeout:
                     chunk = b""
                 if chunk:
@@ -2060,9 +2078,11 @@ def _run_listen(st: dict):
                 _maybe_weather()
                 _maybe_check_update()
                 _maybe_quick_action_tick()
-                # Offline watchdog: no decodable frame for 75s
-                if now - last_frame > 75:
-                    raise ConnectionError("no inverter data for 75s")
+                # Offline watchdog: no decodable frame for 30s.
+                # We poke every 10s so frames should arrive every ~10s.
+                # 30s = 3x poke interval -- enough margin, fast enough recovery.
+                if now - last_frame > 30:
+                    raise ConnectionError("no inverter data for 30s")
         except Exception as exc:
             msg = str(exc)
             with _lock:
@@ -2815,12 +2835,12 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
     if command == "set_charge_limit":
         val = max(0, min(50, int(params["value"])))
         wr(_HR["BATTERY_CHARGE_LIMIT"], val)
-        return f"Charge power limit set to {val}%"
+        return f"Charge power limit set to {val * 2}%"
 
     if command == "set_discharge_limit":
         val = max(0, min(50, int(params["value"])))
         wr(_HR["BATTERY_DISCHARGE_LIMIT"], val)
-        return f"Discharge power limit set to {val}%"
+        return f"Discharge power limit set to {val * 2}%"
 
     if command == "set_discharge_mode":
         val = max(0, min(1, int(params["value"])))
@@ -3957,7 +3977,10 @@ def save_settings():
         WEATHER_POSTCODE = (data["weather_postcode"] or "").strip().upper()
         cfg.set("weather", "postcode", WEATHER_POSTCODE)
     if "weather_geohash" in data:
-        MET_GEOHASH = data["weather_geohash"].strip(); cfg.set("weather", "geohash", MET_GEOHASH); _last_weather_ts = 0
+        gh = data["weather_geohash"].strip()
+        if gh and len(gh) != 6:
+            return jsonify({"ok": False, "error": f"Geohash must be exactly 6 characters (got {len(gh)})"}), 400
+        MET_GEOHASH = gh; cfg.set("weather", "geohash", MET_GEOHASH); _last_weather_ts = 0
 
     if isinstance(data.get("chart_colors"), dict):
         if not cfg.has_section("colours"): cfg.add_section("colours")
