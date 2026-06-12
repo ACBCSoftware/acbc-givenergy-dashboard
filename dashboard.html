@@ -178,7 +178,7 @@ select optgroup{background:#172035;color:#7fa8cc}
 .ctrl-btn.amber{background:rgba(245,158,11,.35);border-color:#f59e0b;color:#f59e0b}
 .ctrl-btn.active-mode{background:rgba(245,158,11,.40);border-color:#f59e0b;color:#f59e0b;font-weight:700}
 /* Slot display */
-.slot-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.slot-grid{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:center}
 .slot-box{
   background:rgba(0,0,0,.3);border:1px solid var(--border);
   border-radius:8px;padding:8px 10px;
@@ -1895,7 +1895,7 @@ async function loadControlState() {
   }
 }
 
-async function ctrlCmd(command, params) {
+async function ctrlCmd(command, params, options = {}) {
   _ctrlMsg('Sending…', true);
   try {
     const r   = await fetch('/api/control', {
@@ -1905,7 +1905,7 @@ async function ctrlCmd(command, params) {
     if (r.status === 401) { showView('live'); return; }
     const res = await r.json();
     _ctrlMsg(res.ok ? '✓ ' + res.message : '✗ ' + res.message, res.ok);
-    if (res.ok) await loadControlState();   // refresh displayed state
+    if (res.ok && !options.silent) await loadControlState();
   } catch(e) { _ctrlMsg('Error: ' + e.message, false); }
 }
 
@@ -1961,20 +1961,30 @@ async function ctrlSetLimit(type) {
 function _renderSlots(type, slots, profile) {
   const container = $(type === 'charge' ? 'charge-slots-container' : 'discharge-slots-container');
   const extended  = profile === 'single_phase_extended';
+
+  // Preserve any values the user has edited since the last render
+  const dirty = {};
+  container.querySelectorAll('.slot-time[data-dirty]').forEach(el => {
+    dirty[el.id] = el.value;
+  });
+
   let html = '<div class="slot-grid">';
   slots.forEach((slot, i) => {
     const n   = i + 1;
     const pfx = type === 'charge' ? 'cs' : 'ds';
-    html += `<div class="slot-box">
+    html += `
+    <div class="slot-box">
       <label>Slot ${n} start</label>
       <input class="slot-time" id="${pfx}${n}-start" type="time" value="${slot.start || ''}">
     </div>
     <div class="slot-box">
       <label>Slot ${n} end</label>
       <input class="slot-time" id="${pfx}${n}-end" type="time" value="${slot.end || ''}">
-    </div>`;
+    </div>
+    <button class="ctrl-btn amber ctrl-btn-sm" style="align-self:stretch"
+      onclick="ctrlSetOneSlot('${type}',${n})">Set</button>`;
     if (extended && type === 'charge' && slot.target_soc !== undefined) {
-      html += `<div class="slot-box" style="grid-column:span 2">
+      html += `<div class="slot-box" style="grid-column:span 3">
         <label>Slot ${n} target SOC</label>
         <div style="display:flex;gap:6px;align-items:center">
           <input type="range" class="ctrl-slider" id="${pfx}${n}-soc"
@@ -1990,18 +2000,48 @@ function _renderSlots(type, slots, profile) {
   });
   html += '</div>';
   container.innerHTML = html;
+
+  // Restore any dirty values the user had edited
+  Object.entries(dirty).forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (el) { el.value = val; el.dataset.dirty = '1'; }
+  });
+
+  // Track future edits so we can preserve them across the next refresh
+  container.querySelectorAll('.slot-time').forEach(el => {
+    el.addEventListener('input', () => { el.dataset.dirty = '1'; });
+  });
 }
 
+// Set a single slot's start+end time and confirm with the user first
+async function ctrlSetOneSlot(type, n) {
+  const pfx   = type === 'charge' ? 'cs' : 'ds';
+  const start = $(pfx + n + '-start').value;
+  const end   = $(pfx + n + '-end').value;
+  if (!start || !end) { _ctrlMsg('Enter both start and end times first', false); return; }
+  // Clear dirty flags now so _renderSlots restores API values after the write confirms
+  $(pfx + n + '-start').removeAttribute('data-dirty');
+  $(pfx + n + '-end').removeAttribute('data-dirty');
+  _showConfirm(`Set ${type} slot ${n}: ${start} to ${end}`,
+    () => ctrlCmd(`set_${type}_slot`, { slot: n, start, end }));
+}
+
+// Save all slots in one pass -- silent writes, single state refresh at the end
 async function ctrlSaveSlots(type) {
   const pfx   = type === 'charge' ? 'cs' : 'ds';
   const slots = document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`);
+  let anyWritten = false;
   for (const startEl of slots) {
     const n   = startEl.id.replace(`${pfx}`, '').replace('-start', '');
     const end = $(pfx + n + '-end');
     if (startEl.value && end && end.value) {
-      await ctrlCmd(`set_${type}_slot`, { slot: parseInt(n), start: startEl.value, end: end.value });
+      startEl.removeAttribute('data-dirty');
+      end.removeAttribute('data-dirty');
+      await ctrlCmd(`set_${type}_slot`, { slot: parseInt(n), start: startEl.value, end: end.value }, { silent: true });
+      anyWritten = true;
     }
   }
+  if (anyWritten) await loadControlState();
 }
 
 // ── Control confirmation modal ────────────────────────────────────────────────
