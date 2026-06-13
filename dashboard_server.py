@@ -3131,8 +3131,10 @@ def _quick_action_do(action: str):
     if profile not in _SCHED_PROFILES:
         raise RuntimeError(f"Quick actions are not supported on this inverter ({model})")
 
-    # Snapshot registers we may change, for the legacy in-memory revert fallback.
-    # Retry up to 3 times. On total failure revert falls back to safe eco baseline.
+    # Snapshot current register state so we can restore it exactly after the action.
+    # Abort if the read fails -- proceeding with fallback values would silently restore
+    # wrong defaults (e.g. ENABLE_CHARGE=0, BATTERY_SOC_RESERVE=4) instead of the
+    # user's actual pre-action settings.
     _SNAP_ATTEMPTS = 3
     snap_raw = None
     for _attempt in range(_SNAP_ATTEMPTS):
@@ -3145,30 +3147,30 @@ def _quick_action_do(action: str):
                             _attempt + 1, _SNAP_ATTEMPTS, exc)
                 time.sleep(0.5)
             else:
-                log.warning("Quick action: snapshot failed after %d attempts (%s) "
-                            "- revert will use safe baseline", _SNAP_ATTEMPTS, exc)
+                log.warning("Quick action: snapshot failed after %d attempts (%s) - aborting",
+                            _SNAP_ATTEMPTS, exc)
 
-    def _snap(n, fallback=0):
-        return snap_raw[n - 20] if snap_raw is not None else fallback
+    if snap_raw is None:
+        raise RuntimeError("Could not read inverter state -- please try again in a moment")
 
-    if snap_raw is not None:
-        _quick_action_snapshot = {
-            _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),
-            _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),
-            _DISCHARGE_SLOT_HR[0][0]:       _snap(_DISCHARGE_SLOT_HR[0][0]),
-            _DISCHARGE_SLOT_HR[0][1]:       _snap(_DISCHARGE_SLOT_HR[0][1]),
-            _HR["ENABLE_DISCHARGE"]:        _snap(_HR["ENABLE_DISCHARGE"]),
-            _CHARGE_SLOT_HR[0][0]:          _snap(_CHARGE_SLOT_HR[0][0]),
-            _CHARGE_SLOT_HR[0][1]:          _snap(_CHARGE_SLOT_HR[0][1]),
-            _HR["ENABLE_CHARGE"]:           _snap(_HR["ENABLE_CHARGE"]),
-            _HR["BATTERY_SOC_RESERVE"]:     _snap(_HR["BATTERY_SOC_RESERVE"]),
-            _HR["BATTERY_CHARGE_LIMIT"]:    _snap(_HR["BATTERY_CHARGE_LIMIT"]),
-            _HR["BATTERY_DISCHARGE_LIMIT"]: _snap(_HR["BATTERY_DISCHARGE_LIMIT"]),
-            _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),
-        }
-        log.info("Quick action: snapshot saved (%d registers)", len(_quick_action_snapshot))
-    else:
-        _quick_action_snapshot = {}
+    def _snap(n, fallback=0):   # fallback param kept for call-site compat; snap_raw guaranteed non-None
+        return snap_raw[n - 20]
+
+    _quick_action_snapshot = {
+        _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),
+        _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),
+        _DISCHARGE_SLOT_HR[0][0]:       _snap(_DISCHARGE_SLOT_HR[0][0]),
+        _DISCHARGE_SLOT_HR[0][1]:       _snap(_DISCHARGE_SLOT_HR[0][1]),
+        _HR["ENABLE_DISCHARGE"]:        _snap(_HR["ENABLE_DISCHARGE"]),
+        _CHARGE_SLOT_HR[0][0]:          _snap(_CHARGE_SLOT_HR[0][0]),
+        _CHARGE_SLOT_HR[0][1]:          _snap(_CHARGE_SLOT_HR[0][1]),
+        _HR["ENABLE_CHARGE"]:           _snap(_HR["ENABLE_CHARGE"]),
+        _HR["BATTERY_SOC_RESERVE"]:     _snap(_HR["BATTERY_SOC_RESERVE"]),
+        _HR["BATTERY_CHARGE_LIMIT"]:    _snap(_HR["BATTERY_CHARGE_LIMIT"]),
+        _HR["BATTERY_DISCHARGE_LIMIT"]: _snap(_HR["BATTERY_DISCHARGE_LIMIT"]),
+        _HR["CHARGE_TARGET_SOC"]:       _snap(_HR["CHARGE_TARGET_SOC"]),
+    }
+    log.info("Quick action: snapshot saved (%d registers)", len(_quick_action_snapshot))
 
     now_dt     = datetime.now()
     start_mins = now_dt.hour * 60 + now_dt.minute
@@ -3289,26 +3291,41 @@ def _quick_action_revert(state: dict = None, trigger: str = "auto"):
             ]
             src = "safe-baseline"
 
-        ok_count = fail_count = 0
+        ok_count = fail_count = verify_fail_count = 0
         for reg, val in restore_list:
             try:
                 _hr_write(slave, reg, val)
                 time.sleep(_SCHED_WRITE_GAP)
                 ok_count += 1
+                # Read back to confirm the value actually landed (catches silent cloud overrides)
+                try:
+                    readback = _hr_read(slave, reg, 1, timeout=3.0)
+                    if readback[0] != val:
+                        verify_fail_count += 1
+                        log.warning("Quick action revert: HR%d verify failed "
+                                    "(wrote %d, read back %d -- possible cloud sync conflict)",
+                                    reg, val, readback[0])
+                except Exception as vexc:
+                    log.warning("Quick action revert: HR%d verify read failed (%s)", reg, vexc)
             except Exception as exc:
                 fail_count += 1
                 log.warning("Quick action revert: HR%d write failed (%s)", reg, exc)
 
-        if fail_count == 0:
-            msg = (f"Quick action reverted ok "
+        if fail_count == 0 and verify_fail_count == 0:
+            msg = (f"Quick action reverted and verified "
                    f"({ok_count} regs, src={src}, trigger={trigger})")
+        elif fail_count == 0:
+            msg = (f"Quick action revert: writes ok but {verify_fail_count} register(s) did not hold "
+                   f"-- check GivEnergy app is not overriding local control "
+                   f"({ok_count} written, src={src}, trigger={trigger})")
         else:
             msg = (f"Quick action revert partial "
-                   f"({ok_count} ok, {fail_count} failed, src={src}, trigger={trigger})")
+                   f"({ok_count} ok, {fail_count} failed, {verify_fail_count} verify-fail, "
+                   f"src={src}, trigger={trigger})")
         log.warning(msg)
         _log_control("quick_action",
                      {"action": "revert", "trigger": trigger, "src": src},
-                     fail_count == 0, msg)
+                     fail_count == 0 and verify_fail_count == 0, msg)
     except Exception as exc:
         msg = f"Quick action revert failed (trigger={trigger}): {exc}"
         log.warning(msg)
