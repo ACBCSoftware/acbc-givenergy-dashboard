@@ -5,7 +5,9 @@
 ; ============================================================
 
 #define AppName    "ACBC GivEnergy Dashboard"
-#define AppVersion Trim(ReadFile(SourcePath + "\VERSION"))
+#define VerHandle FileOpen(SourcePath + "\VERSION")
+#define AppVersion Trim(FileRead(VerHandle))
+#expr FileClose(VerHandle)
 #define AppPublisher "ACBC Software"
 #define AppURL     "https://software.andrewcampbell.co.uk"
 #define AppExeName "start_dashboard.bat"
