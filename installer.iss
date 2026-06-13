@@ -5,7 +5,7 @@
 ; ============================================================
 
 #define AppName    "ACBC GivEnergy Dashboard"
-#define AppVersion "2.4"
+#define AppVersion Trim(ReadFile(SourcePath + "\VERSION"))
 #define AppPublisher "ACBC Software"
 #define AppURL     "https://software.andrewcampbell.co.uk"
 #define AppExeName "start_dashboard.bat"
@@ -181,6 +181,7 @@ Name: "autostart";   Description: "Start dashboard &automatically at Windows log
 
 [Files]
 ; Core application files
+Source: "VERSION";              DestDir: "{app}"; Flags: ignoreversion
 Source: "dashboard_server.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dashboard.html";      DestDir: "{app}"; Flags: ignoreversion
 Source: "manifest.json";       DestDir: "{app}"; Flags: ignoreversion

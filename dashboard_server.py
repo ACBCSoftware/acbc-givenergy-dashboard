@@ -50,7 +50,7 @@ except Exception:
     except Exception:
         _LIB = None   # no usable poll library — only listen mode will work
 
-APP_VERSION = "2.4"
+APP_VERSION = (Path(__file__).parent / "VERSION").read_text().strip()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
@@ -2232,12 +2232,15 @@ _WRITE_MAX_ATTEMPTS = 7    # 1 initial attempt + 6 retries (matches psylsph beha
 
 
 def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
-              attempts: int = _WRITE_MAX_ATTEMPTS) -> None:
+              attempts: int = _WRITE_MAX_ATTEMPTS,
+              timeout_retries: int = 1) -> None:
     """Write a single holding register.  Verifies the echo response.
     Retries on exception code 67 (dongle busy) up to `attempts` times (default 7,
     as the manual controls use). The scheduler passes attempts=1 to FAIL FAST: the
     sustained busy-retry hammering is what disrupted the Gen2 listen stream, so it
     aborts on busy and lets the 15s re-queue try again instead.
+    Retries on timeout up to `timeout_retries` times (default 1, 1.5 s wait) --
+    the first write in a sequence can catch the inverter in broadcast/listen mode.
     Raises on timeout, echo mismatch, or exhausted retries."""
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
@@ -2247,50 +2250,61 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
     length  = len(payload) + 2
     frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
-    for attempt in range(attempts):
-        if attempt:
-            log.warning("HR write: dongle busy, retrying in 2s (attempt %d/%d) …",
-                        attempt + 1, attempts)
-            time.sleep(2)
-        s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
-        s.settimeout(timeout)
-        try:
-            s.sendall(frame)
-            buf = bytearray()
-            deadline = time.time() + timeout
-            busy = False
-            while time.time() < deadline:
-                try:
-                    chunk = s.recv(4096)
-                except socket.timeout:
-                    break
-                if not chunk:
-                    break
-                buf.extend(chunk)
-                for f in _pop_data_frames(buf):
-                    if len(f) < 29 or f[7] != 0x02:
-                        continue
-                    # Exception response: inner_func = request func | 0x80
-                    if f[27] == 0x86 and f[28] == _DONGLE_BUSY_CODE:
-                        busy = True
+    for t_try in range(timeout_retries + 1):
+        if t_try:
+            log.warning("HR write: timeout, retrying after 1.5 s "
+                        "(slave=0x%02x reg=%d val=%d) ...", slave, reg, value)
+            time.sleep(1.5)
+        timed_out = False
+        for attempt in range(attempts):
+            if attempt:
+                log.warning("HR write: dongle busy, retrying in 2s (attempt %d/%d) …",
+                            attempt + 1, attempts)
+                time.sleep(2)
+            s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+            s.settimeout(timeout)
+            try:
+                s.sendall(frame)
+                buf = bytearray()
+                deadline = time.time() + timeout
+                busy = False
+                while time.time() < deadline:
+                    try:
+                        chunk = s.recv(4096)
+                    except socket.timeout:
                         break
-                    if len(f) < 42 or f[27] != 0x06:
-                        continue
-                    echo_reg = (f[38] << 8) | f[39]
-                    echo_val = (f[40] << 8) | f[41]
-                    if echo_reg != reg or echo_val != value:
-                        raise ValueError(
-                            f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
-                            f"(expected reg={reg} val={value})")
-                    return  # success
-                if busy:
-                    break
-        finally:
-            s.close()
-        if not busy:
-            raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
-    raise OSError(f"HR write: dongle still busy after {attempts} attempt(s) "
-                  f"(reg={reg} val={value})")
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    for f in _pop_data_frames(buf):
+                        if len(f) < 29 or f[7] != 0x02:
+                            continue
+                        # Exception response: inner_func = request func | 0x80
+                        if f[27] == 0x86 and f[28] == _DONGLE_BUSY_CODE:
+                            busy = True
+                            break
+                        if len(f) < 42 or f[27] != 0x06:
+                            continue
+                        echo_reg = (f[38] << 8) | f[39]
+                        echo_val = (f[40] << 8) | f[41]
+                        if echo_reg != reg or echo_val != value:
+                            raise ValueError(
+                                f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
+                                f"(expected reg={reg} val={value})")
+                        return  # success
+                    if busy:
+                        break
+            finally:
+                s.close()
+            if not busy:
+                timed_out = True
+                break  # exit busy-retry loop; let t_try handle the timeout
+        else:
+            raise OSError(f"HR write: dongle still busy after {attempts} attempt(s) "
+                          f"(reg={reg} val={value})")
+        if timed_out:
+            continue  # retry after brief pause
+    raise TimeoutError(f"HR write timeout: slave=0x{slave:02x} reg={reg} val={value}")
 
 
 # ── Generation / profile detection ────────────────────────────────────────────
@@ -2330,7 +2344,7 @@ _DTC_TWO_PREFIX_PROFILE = {
     "70": "gateway_aio",           # Gateway / Giv-Gateway (DTC 0x70xx) — live data at IR base=1600
     "81": "single_phase_extended", # Hybrid Inverter Gen 3 HV (single-phase, 8/10 kW)
     "82": "single_phase_extended", # All in One 2 (AIO2 + MPPT): single-phase 10-slot, as 0x80xx
-    "83": "single_phase_extended", # DTC 0x83xx — identity unconfirmed; community libs say HYBRID_GEN4 but GivEnergy sells no Gen4
+    "83": "single_phase_extended", # DTC 0x83xx -- identity unconfirmed; no GivEnergy "Gen 4" product exists
 }
 
 # ARM firmware century → generation for DTC prefix "20" (HYBRID family)
