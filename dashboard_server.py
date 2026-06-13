@@ -4226,6 +4226,10 @@ def backup_export():
     return send_file(mem, mimetype="application/gzip",
                      as_attachment=True, download_name=name)
 
+_BACKUP_IMPORT_RAW_MAX  = 10 * 1024 * 1024   # 10 MB compressed upload limit
+_BACKUP_IMPORT_GUNZ_MAX = 100 * 1024 * 1024  # 100 MB decompressed limit (gzip-bomb guard)
+
+
 @app.route("/api/backup/import", methods=["POST"])
 def backup_import():
     if not _authorised():
@@ -4233,13 +4237,17 @@ def backup_import():
     f = request.files.get("file")
     if not f:
         return jsonify({"ok": False, "error": "No file uploaded"}), 400
-    data = f.read()
+    data = f.read(_BACKUP_IMPORT_RAW_MAX + 1)
+    if len(data) > _BACKUP_IMPORT_RAW_MAX:
+        return jsonify({"ok": False, "error": "Upload too large (max 10 MB)"}), 413
     # Transparently accept .gz or a raw .db
     if data[:2] == b"\x1f\x8b":
         try:
             data = gzip.decompress(data)
         except Exception:
             return jsonify({"ok": False, "error": "Could not decompress file"}), 400
+        if len(data) > _BACKUP_IMPORT_GUNZ_MAX:
+            return jsonify({"ok": False, "error": "Decompressed backup too large (max 100 MB)"}), 413
     if data[:16] != b"SQLite format 3\x00":
         return jsonify({"ok": False, "error": "Not a valid database file"}), 400
     # Validate it has a snapshots table before accepting it

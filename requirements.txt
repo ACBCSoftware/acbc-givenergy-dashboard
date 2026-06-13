@@ -1,0 +1,8 @@
+# Runtime dependencies only.
+# Install: pip install -r requirements.txt
+#
+# Dev/build tools (pytest, pyinstaller, paramiko, pillow) are NOT listed here
+# -- install them separately if needed.
+
+flask>=3.0
+givenergy-modbus>=2.0.4   # optional: used for Gen3 polling; dashboard works without it
