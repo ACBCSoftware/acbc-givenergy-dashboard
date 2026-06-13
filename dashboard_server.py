@@ -94,6 +94,10 @@ SF_API_KEY = _cfg.get("solar_forecast", "api_key",       fallback="").strip()
 def _sf_configured() -> bool:
     return all([SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP])
 
+# When False, control/action endpoints are open (local-only convenience mode).
+# Settings always stays behind the strict password check regardless.
+REQUIRE_AUTH = _cfg.getboolean("server", "require_auth", fallback=True)
+
 BACKUP_ENABLED   = _cfg.getboolean("backup", "enabled",   fallback=True)
 BACKUP_KEEP_DAYS = _cfg.getint("backup",     "keep_days", fallback=7)
 
@@ -150,9 +154,17 @@ def _valid_hex(v: str) -> bool:
             and all(c in "0123456789abcdefABCDEF" for c in v[1:]))
 
 def _authorised():
-    """Check X-Admin-Password header against stored hash."""
+    """Check X-Admin-Password header against stored hash.
+    Used for Settings and other config endpoints, which ALWAYS require the
+    password regardless of REQUIRE_AUTH."""
     pw = request.headers.get("X-Admin-Password", "")
     return hashlib.sha256(pw.encode()).hexdigest() == ADMIN_HASH
+
+def _action_authorised():
+    """Auth gate for control/action endpoints (control, scheduler, quick
+    actions, logs).  Open when REQUIRE_AUTH is off (local-only convenience
+    mode); otherwise falls back to the strict password check."""
+    return (not REQUIRE_AUTH) or _authorised()
 
 # ── Tariff / cost estimation ──────────────────────────────────────────────────
 TARIFF_CURRENCY   = _cfg.get("tariff",    "currency_symbol",   fallback="£")
@@ -3614,11 +3626,14 @@ def api_data():
     # Running backend version — drives the footer so it can never lag the deployed code.
     data["app_version"] = APP_VERSION
     data["solar_forecast_configured"] = _sf_configured()
+    # Lets the frontend skip the password modal for control panels when the
+    # local-only convenience mode is on.
+    data["require_auth"] = REQUIRE_AUTH
     return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
 def get_control():
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     try:
         return jsonify(_read_control_state())
@@ -3627,7 +3642,7 @@ def get_control():
 
 @app.route("/api/control", methods=["POST"])
 def post_control():
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data    = request.get_json(force=True) or {}
     command = data.get("command", "")
@@ -3684,7 +3699,7 @@ def _validate_rule(data: dict) -> dict:
 
 @app.route("/api/schedules", methods=["GET"])
 def get_schedules():
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     with _db() as conn:
         rows = [_rule_row(r) for r in conn.execute(
@@ -3703,7 +3718,7 @@ def get_schedules():
 @app.route("/api/schedules", methods=["POST"])
 def save_schedule():
     """Create (no id) or update (id present) a single rule."""
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
     try:
@@ -3731,7 +3746,7 @@ def save_schedule():
 
 @app.route("/api/schedules/<int:rid>", methods=["DELETE"])
 def delete_schedule(rid):
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     with _db() as conn:
         conn.execute("DELETE FROM schedules WHERE id=?", (rid,))
@@ -3742,7 +3757,7 @@ def delete_schedule(rid):
 def save_schedule_config():
     """Set the master on/off switch, baseline mode, and baseline SOC reserve."""
     global SCHEDULER_ENABLED, SCHEDULER_BASELINE, SCHEDULER_BASELINE_SOC_RESERVE
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
@@ -3772,7 +3787,7 @@ def save_schedule_config():
 def quick_action_endpoint():
     """Start or cancel a 1-hour quick charge / discharge action."""
     global _quick_charge_until, _quick_discharge_until
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     if not QUICK_ACTIONS_ENABLED:
         return jsonify({"ok": False, "error": "Quick actions are not enabled in settings"})
@@ -3815,7 +3830,7 @@ def quick_action_endpoint():
 
 @app.route("/api/logs")
 def get_logs():
-    if not _authorised():
+    if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     limit = min(500, max(1, int(request.args.get("limit", 100))))
     out = []
@@ -4049,6 +4064,7 @@ def get_settings():
         "backup_keep_days":    BACKUP_KEEP_DAYS,
         "last_backup":         _last_backup_info()[1] or "none yet",
         "check_for_updates":        CHECK_UPDATES,
+        "require_auth":             REQUIRE_AUTH,
         "app_version":              APP_VERSION,
         "chart_colors":             CHART_COLORS,
         "quick_actions_enabled":     QUICK_ACTIONS_ENABLED,
@@ -4074,6 +4090,7 @@ def save_settings():
     global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
     global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
     global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, SF_POSTCODE, _last_sf_ts
+    global REQUIRE_AUTH
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4109,6 +4126,8 @@ def save_settings():
         BACKUP_KEEP_DAYS = max(1, min(60, int(data["backup_keep_days"]))); _set("backup", "keep_days", BACKUP_KEEP_DAYS)
     if "check_for_updates" in data:
         CHECK_UPDATES = bool(data["check_for_updates"]); _set("server", "check_for_updates", "yes" if CHECK_UPDATES else "no")
+    if "require_auth" in data:
+        REQUIRE_AUTH = bool(data["require_auth"]); _set("server", "require_auth", "yes" if REQUIRE_AUTH else "no")
 
     if not cfg.has_section("weather"): cfg.add_section("weather")
     if "weather_poll_mins" in data:

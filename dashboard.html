@@ -958,6 +958,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-hint">Leave blank to keep current password</div>
         <div class="sett-row"><label>New password</label><input id="s-newpw" type="password" placeholder="New password"></div>
         <div class="sett-row"><label>Confirm</label><input id="s-confirmpw" type="password" placeholder="Confirm password"></div>
+        <div class="sett-row">
+          <label>Require password for controls</label>
+          <select id="s-require-auth" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="yes">On (recommended)</option>
+            <option value="no">Off (local network only)</option>
+          </select>
+        </div>
+        <div class="sett-hint">When off, Quick Actions, Inverter Control and the Scheduler work without a password. Settings always stays password-protected. Only turn this off if the dashboard is on a trusted local network.</div>
       </div>
       <div class="sett-section">
         <div class="sett-heading">Bar Chart Colours</div>
@@ -1669,6 +1677,7 @@ function updateBatFill(soc) {
 // ── Apply live data ─────────────────────────────────────────────────────────
 function applyData(d) {
   liveData  = d;
+  if ('require_auth' in d) _requireAuth = d.require_auth;
   // Footer shows the running backend version (from /api/data) so it can never
   // lag the deployed code. No manual bump needed — it follows APP_VERSION.
   if (d.app_version) {
@@ -1817,6 +1826,16 @@ function quickAction(type) {
   if (_qaInFlight) return;
   const d = liveData;
   if (!d) return;
+  // Auth gate: if a password is required and we are not unlocked, get it first
+  // (in the dashboard's own modal) then resume this action.
+  if (_requireAuth && !_adminPw) {
+    _afterUnlock = () => quickAction(type);
+    _ctrlDest = null;
+    $('pw-input').value = ''; $('pw-error').textContent = '';
+    $('pw-modal').classList.add('open');
+    setTimeout(() => $('pw-input').focus(), 60);
+    return;
+  }
   const isActive = type === 'charge' ? d.quick_charge_active : d.quick_discharge_active;
   const label    = type === 'charge' ? '1hr Quick Charge' : '1hr Quick Discharge';
   // Stopping an active action needs no confirmation. Starting one uses the
@@ -2197,7 +2216,7 @@ $('ctrl-confirm').addEventListener('click', e => {
 // Reuse same password modal — ctrl-btn triggers it with 'control' destination
 let _ctrlDest = 'settings';
 $('ctrl-btn').addEventListener('click', () => {
-  if (_adminPw) { showView('control'); return; }   // already unlocked this session
+  if (_adminPw || !_requireAuth) { showView('control'); return; }   // unlocked, or auth disabled
   _ctrlDest = 'control';
   $('pw-input').value = '';
   $('pw-error').textContent = '';
@@ -2207,7 +2226,7 @@ $('ctrl-btn').addEventListener('click', () => {
 
 // Schedule icon — same password gate as the control button
 $('sched-btn').addEventListener('click', () => {
-  if (_adminPw) { showView('schedule'); return; }   // already unlocked this session
+  if (_adminPw || !_requireAuth) { showView('schedule'); return; }   // unlocked, or auth disabled
   _ctrlDest = 'schedule';
   $('pw-input').value = '';
   $('pw-error').textContent = '';
@@ -2603,6 +2622,8 @@ let _weatherConfigured = false;
 let _sfConfigured      = false;
 let _qaEnabled = false;   // tracks quick_actions_enabled so showView can pre-render the bar
 let _adminPw = '';   // held in memory for the session only
+let _requireAuth = true;  // mirrors backend; when false, control panels skip the password gate
+let _afterUnlock = null;  // optional callback to run after a successful unlock (e.g. quick action)
 
 function _settHeaders() {
   return { 'Content-Type':'application/json', 'X-Admin-Password': _adminPw };
@@ -2662,7 +2683,8 @@ async function _tryUnlock() {
     if (r.status === 401) { $('pw-error').textContent = 'Wrong password'; return; }
     _adminPw = pw;
     $('pw-modal').classList.remove('open');
-    showView(_ctrlDest || 'settings');
+    if (_afterUnlock) { const f = _afterUnlock; _afterUnlock = null; f(); }
+    else showView(_ctrlDest || 'settings');
   } catch(e) { $('pw-error').textContent = 'Error: ' + e.message; }
 }
 
@@ -2676,6 +2698,7 @@ function _closePwModal() {
   $('pw-modal').classList.remove('open');
   $('pw-input').value = '';
   $('pw-error').textContent = '';
+  _afterUnlock = null;   // drop any pending post-unlock action on cancel
 }
 $('pw-cancel').addEventListener('click', _closePwModal);
 // Tap outside the box to dismiss
@@ -3159,6 +3182,7 @@ async function loadSettings() {
     $('s-retention').value = s.data_retention_days  || 730;
     $('s-bkenabled').value     = s.backup_enabled    ? 'yes' : 'no';
     $('s-checkupdates').value  = s.check_for_updates ? 'yes' : 'no';
+    $('s-require-auth').value   = (s.require_auth === false) ? 'no' : 'yes';
     $('s-bkkeep').value        = s.backup_keep_days  || 7;
     $('s-bklast').textContent = s.last_backup || '—';
     $('s-bkmsg').textContent = '';
@@ -3229,6 +3253,7 @@ $('sett-save').addEventListener('click', async () => {
     data_retention_days: parseInt($('s-retention').value),
     backup_enabled:      $('s-bkenabled').value === 'yes',
     check_for_updates:   $('s-checkupdates').value === 'yes',
+    require_auth:        $('s-require-auth').value === 'yes',
     backup_keep_days:    parseInt($('s-bkkeep').value) || 7,
     weather_postcode:         $('s-wxpostcode').value.trim().toUpperCase(),
     weather_geohash:          $('s-wxhash').value.trim(),
