@@ -900,6 +900,49 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Poll interval (mins)</label><input id="s-wxpoll" type="number" min="5" max="1440"></div>
       </div>
       <div class="sett-section">
+        <div class="sett-heading">Solar Forecast (Forecast.Solar)</div>
+        <div class="sett-hint">A 2-day hourly solar generation forecast, independent of the weather setup above. Click the weather badge (or the Solar Forecast tile) to view it. Azimuth is degrees from South: -90=East, 0=South, +90=West.</div>
+        <div class="sett-row">
+          <label>Postcode</label>
+          <div style="display:flex;gap:6px;flex:1;min-width:0">
+            <input id="s-sf-postcode" type="text" placeholder="e.g. EX1 1AA" style="flex:1;min-width:0;text-transform:uppercase">
+            <button type="button" id="s-sf-lookup" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:0 12px;white-space:nowrap;transition:background .2s" onclick="lookupPostcodeForSf()">Lookup</button>
+          </div>
+        </div>
+        <div id="s-sf-lookup-hint" style="font-size:.72rem;color:var(--muted);padding:0 0 4px"></div>
+        <div class="sett-row">
+          <label>Latitude</label>
+          <input id="s-sf-lat" type="text" placeholder="e.g. 50.7184">
+        </div>
+        <div class="sett-row">
+          <label>Longitude</label>
+          <input id="s-sf-lon" type="text" placeholder="e.g. -3.5339">
+        </div>
+        <div class="sett-row">
+          <label>Panel tilt (0-90&deg;)</label>
+          <input id="s-sf-tilt" type="number" min="0" max="90" placeholder="e.g. 35">
+        </div>
+        <div class="sett-row">
+          <label>Azimuth from South</label>
+          <input id="s-sf-az" type="number" min="-180" max="180" placeholder="-90=E, 0=S, +90=W">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
+          <label style="font-size:.76rem;color:var(--muted);opacity:.8;flex-shrink:0">Or compass bearing</label>
+          <input id="s-sf-compass" type="number" min="0" max="360" placeholder="e.g. 168" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:6px 8px;width:70px;text-align:center">
+          <button type="button" id="s-sf-convert" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:6px 12px;white-space:nowrap;transition:background .2s" onclick="convertCompassAzimuth()">Convert</button>
+          <span id="s-sf-compass-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
+        </div>
+        <div class="sett-hint" style="opacity:.7">Compass bearing is 0=N, 90=E, 180=S, 270=W (as shown by a phone compass or solar survey). Convert fills the azimuth field above.</div>
+        <div class="sett-row">
+          <label>Panel kWp</label>
+          <input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0">
+        </div>
+        <div class="sett-row">
+          <label>API key (optional)</label>
+          <input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier">
+        </div>
+      </div>
+      <div class="sett-section">
         <div class="sett-heading">Updates</div>
         <div class="sett-hint">Checks GitHub once a day for a new release. No personal data is sent.</div>
         <div class="sett-row">
@@ -936,47 +979,6 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
         <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
         <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
-      </div>
-      <div class="sett-section">
-        <div class="sett-heading">Solar Forecast (Forecast.Solar)</div>
-        <div class="sett-hint">Provides a 2-day hourly solar generation forecast. Click the weather badge (or the Solar Forecast tile) to view it. Azimuth is degrees from South: -90=East, 0=South, +90=West.</div>
-        <div class="sett-row">
-          <label>Latitude</label>
-          <div style="display:flex;gap:6px;flex:1;min-width:0">
-            <input id="s-sf-lat" type="text" placeholder="e.g. 50.7184" style="flex:1;min-width:0">
-          </div>
-        </div>
-        <div class="sett-row">
-          <label>Longitude</label>
-          <input id="s-sf-lon" type="text" placeholder="e.g. -3.5339">
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
-          <button type="button" id="s-sf-lookup" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:6px 12px;white-space:nowrap;transition:background .2s" onclick="lookupPostcodeForSf()">Use postcode lookup</button>
-          <span id="s-sf-lookup-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
-        </div>
-        <div class="sett-row">
-          <label>Panel tilt (0-90&deg;)</label>
-          <input id="s-sf-tilt" type="number" min="0" max="90" placeholder="e.g. 35">
-        </div>
-        <div class="sett-row">
-          <label>Azimuth from South</label>
-          <input id="s-sf-az" type="number" min="-180" max="180" placeholder="-90=E, 0=S, +90=W">
-        </div>
-        <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
-          <label style="font-size:.76rem;color:var(--muted);opacity:.8;flex-shrink:0">Or compass bearing</label>
-          <input id="s-sf-compass" type="number" min="0" max="360" placeholder="e.g. 168" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:6px 8px;width:70px;text-align:center">
-          <button type="button" id="s-sf-convert" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:6px 12px;white-space:nowrap;transition:background .2s" onclick="convertCompassAzimuth()">Convert</button>
-          <span id="s-sf-compass-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
-        </div>
-        <div class="sett-hint" style="opacity:.7">Compass bearing is 0=N, 90=E, 180=S, 270=W (as shown by a phone compass or solar survey). Convert fills the azimuth field above.</div>
-        <div class="sett-row">
-          <label>Panel kWp</label>
-          <input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0">
-        </div>
-        <div class="sett-row">
-          <label>API key (optional)</label>
-          <input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier">
-        </div>
       </div>
       <div class="sett-section">
         <div class="sett-heading">Quick Actions</div>
@@ -3094,12 +3096,13 @@ async function lookupPostcode() {
 async function lookupPostcodeForSf() {
   const btn  = $('s-sf-lookup');
   const hint = $('s-sf-lookup-hint');
-  const pc   = $('s-wxpostcode').value.trim() || prompt('Enter postcode for lat/lng lookup:');
-  if (!pc) return;
+  const pc   = $('s-sf-postcode').value.trim();
+  if (!pc) { hint.style.color = '#f87171'; hint.textContent = 'Enter a postcode first'; return; }
   btn.disabled = true; btn.textContent = '…';
   hint.style.color = 'var(--muted)'; hint.textContent = 'Looking up…';
   try {
-    const r = await fetch('/api/weather/lookup_postcode', {
+    // Dedicated postcode->lat/lng lookup; needs no Met Office API key.
+    const r = await fetch('/api/solar_forecast/lookup_postcode', {
       method: 'POST',
       headers: _ctrlHeaders(),
       body: JSON.stringify({ postcode: pc })
@@ -3108,6 +3111,7 @@ async function lookupPostcodeForSf() {
     if (j.ok) {
       $('s-sf-lat').value = String(j.lat);
       $('s-sf-lon').value = String(j.lng);
+      _settDirty = true;
       hint.style.color = '#4ade80';
       hint.textContent = '✓ Filled from postcode' + (j.area ? ' (' + j.area + ')' : '');
     } else {
@@ -3118,7 +3122,7 @@ async function lookupPostcodeForSf() {
     hint.style.color = '#f87171';
     hint.textContent = '✗ Network error';
   }
-  btn.disabled = false; btn.textContent = 'Use postcode lookup';
+  btn.disabled = false; btn.textContent = 'Lookup';
 }
 
 function convertCompassAzimuth() {
@@ -3171,6 +3175,7 @@ async function loadSettings() {
     } else {
       $('s-wxhash-hint').style.display = 'none';
     }
+    $('s-sf-postcode').value = s.sf_postcode || '';
     $('s-sf-lat').value = s.sf_latitude      || '';
     $('s-sf-lon').value = s.sf_longitude     || '';
     $('s-sf-tilt').value= s.sf_panel_tilt    || '';
@@ -3233,6 +3238,7 @@ $('sett-save').addEventListener('click', async () => {
     quick_charge_power_pct:   parseInt($('s-qa-chg-pct').value)  || 100,
     quick_discharge_power_pct:parseInt($('s-qa-dis-pct').value)  || 100,
     quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
+    sf_postcode:     $('s-sf-postcode').value.trim(),
     sf_latitude:     $('s-sf-lat').value.trim(),
     sf_longitude:    $('s-sf-lon').value.trim(),
     sf_panel_tilt:   $('s-sf-tilt').value.trim(),
@@ -3323,6 +3329,14 @@ async function loadSolarForecast() {
   }
 }
 
+// Format an ISO date string "YYYY-MM-DD" as UK day-first. Parse the parts
+// directly (not via Date) so the displayed day never shifts by timezone.
+function _sfFmtDate(iso, withYear) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || '');
+  if (!m) return iso || '';
+  return withYear ? `${m[3]}/${m[2]}/${m[1]}` : `${m[3]}/${m[2]}`;
+}
+
 function renderSfPanel(container, result) {
   const dayTotals  = result.watt_hours_day   || [];
   const periods    = result.watt_hours_period || [];
@@ -3330,8 +3344,8 @@ function renderSfPanel(container, result) {
   // Daily totals
   const todayKwh    = dayTotals[0] ? (dayTotals[0].value / 1000).toFixed(2) : '—';
   const tomorrowKwh = dayTotals[1] ? (dayTotals[1].value / 1000).toFixed(2) : '—';
-  const todayDate   = dayTotals[0]?.date || '';
-  const tomDate     = dayTotals[1]?.date || '';
+  const todayDate   = _sfFmtDate(dayTotals[0]?.date, true);
+  const tomDate     = _sfFmtDate(dayTotals[1]?.date, true);
 
   // Next 2 hours
   const nowTs = Date.now();
@@ -3447,7 +3461,7 @@ function _drawSfChart(periods) {
     const slots = byDate[dateOrder[di]].length;
     const midI  = barIdx + Math.floor(slots / 2) + (di > 0 ? di : 0); // account for gap slots
     const x = PAD_L + gap + midI * (barW + gap) + barW / 2;
-    ctx.fillText(dateOrder[di].slice(5), x, canvas.height - 16);
+    ctx.fillText(_sfFmtDate(dateOrder[di], false), x, canvas.height - 16);
     barIdx += slots + (di < dateOrder.length - 1 ? 1 : 0);
   }
 }

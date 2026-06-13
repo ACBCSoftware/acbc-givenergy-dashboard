@@ -84,6 +84,7 @@ WEATHER_POLL_MINS = _cfg.getint("weather", "poll_interval_mins", fallback=30)
 
 SF_LAT     = _cfg.get("solar_forecast", "latitude",      fallback="").strip()
 SF_LON     = _cfg.get("solar_forecast", "longitude",     fallback="").strip()
+SF_POSTCODE = _cfg.get("solar_forecast", "postcode",     fallback="").strip()
 SF_TILT    = _cfg.get("solar_forecast", "panel_tilt",    fallback="").strip()
 SF_AZ      = _cfg.get("solar_forecast", "panel_azimuth", fallback="").strip()
 SF_KWP     = _cfg.get("solar_forecast", "panel_kwp",     fallback="").strip()
@@ -4054,6 +4055,7 @@ def get_settings():
         "quick_charge_power_pct":    QUICK_CHARGE_POWER_PCT,
         "quick_discharge_power_pct": QUICK_DISCHARGE_POWER_PCT,
         "quick_charge_target_soc":   QUICK_CHARGE_TARGET_SOC,
+        "sf_postcode":               SF_POSTCODE,
         "sf_latitude":               SF_LAT,
         "sf_longitude":              SF_LON,
         "sf_panel_tilt":             SF_TILT,
@@ -4071,7 +4073,7 @@ def save_settings():
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
     global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
     global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
-    global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, _last_sf_ts
+    global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, SF_POSTCODE, _last_sf_ts
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4148,6 +4150,11 @@ def save_settings():
     # ── Solar forecast settings ────────────────────────────────────────────────
     _sf_section = "solar_forecast"
     _sf_dirty = False
+    if "sf_postcode" in data:
+        SF_POSTCODE = (data["sf_postcode"] or "").strip().upper()
+        if not cfg.has_section(_sf_section):
+            cfg.add_section(_sf_section)
+        cfg.set(_sf_section, "postcode", SF_POSTCODE)
     for _sfkey, _sfattr, _sfcfg in (
             ("sf_latitude",     "SF_LAT",  "latitude"),
             ("sf_longitude",    "SF_LON",  "longitude"),
@@ -4485,6 +4492,37 @@ def weather_lookup_postcode():
     except Exception as exc:
         log.warning("Met Office /nearest failed: %s", exc)
         return jsonify({"ok": False, "error": "Could not find nearest Met Office station — enter geohash manually"}), 502
+
+@app.route("/api/solar_forecast/lookup_postcode", methods=["POST"])
+def sf_lookup_postcode():
+    """Resolve a UK postcode to lat/lng via postcodes.io (free, no API key).
+    Independent of the Met Office weather lookup so the solar forecast can be
+    configured without any weather setup.  Returns {ok, lat, lng, area}."""
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    data = request.get_json(force=True) or {}
+    raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
+    if not raw:
+        return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    try:
+        url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = json.loads(r.read())
+        res = body.get("result") or {}
+        lat = res.get("latitude")
+        lng = res.get("longitude")
+        if lat is None or lng is None:
+            return jsonify({"ok": False, "error": "Postcode lookup returned no coordinates"}), 400
+        area = res.get("admin_ward") or res.get("admin_district") or ""
+        return jsonify({"ok": True, "lat": lat, "lng": lng, "area": area})
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return jsonify({"ok": False, "error": "Postcode not found — check and try again"}), 404
+        return jsonify({"ok": False, "error": f"Postcode service error ({exc.code})"}), 502
+    except Exception as exc:
+        log.warning("SF postcode lookup failed: %s", exc)
+        return jsonify({"ok": False, "error": "Could not reach postcode service"}), 502
 
 @app.route("/api/history")
 def api_history():
