@@ -15,6 +15,7 @@ OUT  = os.path.join(REPO, "website", "downloads", "givenergy-dashboard-mac.zip")
 
 # (filename, is_executable_command)
 PLAIN = [
+    "VERSION",
     "dashboard_server.py",
     "dashboard.html",
     "manifest.json",
