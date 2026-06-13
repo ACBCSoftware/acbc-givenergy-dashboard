@@ -82,6 +82,17 @@ MET_GEOHASH       = _cfg.get("weather",    "geohash",           fallback="")
 WEATHER_POSTCODE  = _cfg.get("weather",    "postcode",          fallback="")
 WEATHER_POLL_MINS = _cfg.getint("weather", "poll_interval_mins", fallback=30)
 
+SF_LAT     = _cfg.get("solar_forecast", "latitude",      fallback="").strip()
+SF_LON     = _cfg.get("solar_forecast", "longitude",     fallback="").strip()
+SF_TILT    = _cfg.get("solar_forecast", "panel_tilt",    fallback="").strip()
+SF_AZ      = _cfg.get("solar_forecast", "panel_azimuth", fallback="").strip()
+SF_KWP     = _cfg.get("solar_forecast", "panel_kwp",     fallback="").strip()
+SF_API_KEY = _cfg.get("solar_forecast", "api_key",       fallback="").strip()
+
+
+def _sf_configured() -> bool:
+    return all([SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP])
+
 BACKUP_ENABLED   = _cfg.getboolean("backup", "enabled",   fallback=True)
 BACKUP_KEEP_DAYS = _cfg.getint("backup",     "keep_days", fallback=7)
 
@@ -1380,6 +1391,11 @@ def _smooth(data: dict) -> dict:
 _weather_cached: dict = {}
 _last_weather_ts: float = 0.0
 
+# ── Solar forecast ─────────────────────────────────────────────────────────────
+_sf_cached: dict = {}
+_last_sf_ts: float = 0.0
+_sf_fetch_active = False
+
 def _weather_interval():
     return max(5, WEATHER_POLL_MINS) * 60
 
@@ -1853,6 +1869,82 @@ def _maybe_weather():
 
     threading.Thread(target=_fetch_bg, daemon=True).start()
 
+def _fetch_solar_forecast() -> dict:
+    """Fetch 2-day forecast from Forecast.Solar and return a normalised result.
+
+    The live API returns each series as a dict keyed by date/timestamp, e.g.
+    ``"watt_hours_day": {"2026-06-13": 24989, ...}`` and
+    ``"watt_hours_period": {"2026-06-13 06:00:00": 73, ...}`` — NOT the
+    list-of-objects shape shown in the docs.  We normalise the time-keyed series
+    into sorted lists so the frontend has a stable contract:
+      watt_hours_day    -> [{"date": "...",      "value": N}, ...]
+      watt_hours_period -> [{"timestamp": "...", "value": N}, ...]
+    """
+    if SF_API_KEY:
+        url = (f"https://api.forecast.solar/{SF_API_KEY}/estimate"
+               f"/{SF_LAT}/{SF_LON}/{SF_TILT}/{SF_AZ}/{SF_KWP}")
+    else:
+        url = (f"https://api.forecast.solar/estimate"
+               f"/{SF_LAT}/{SF_LON}/{SF_TILT}/{SF_AZ}/{SF_KWP}")
+    data = _http_get_json(url, timeout=15)
+    if data.get("message", {}).get("code", -1) != 0:
+        raise ValueError(f"Forecast.Solar error: {data.get('message')}")
+    rl = data.get("ratelimit", {})
+    if rl.get("remaining", 1) == 0:
+        raise ValueError("Forecast.Solar rate limit reached")
+    raw = data.get("result", {})
+
+    def _to_list(series, key):
+        """Convert a {key_str: value} dict to a sorted [{key: ..., value: ...}]."""
+        if isinstance(series, dict):
+            return [{key: k, "value": v} for k, v in sorted(series.items())]
+        if isinstance(series, list):
+            return series   # already in list form (defensive)
+        return []
+
+    return {
+        "watt_hours_day":    _to_list(raw.get("watt_hours_day"),    "date"),
+        "watt_hours_period": _to_list(raw.get("watt_hours_period"), "timestamp"),
+        "watts":             _to_list(raw.get("watts"),             "timestamp"),
+        "watt_hours":        _to_list(raw.get("watt_hours"),        "timestamp"),
+    }
+
+
+_SF_OK_INTERVAL   = 3600   # re-fetch hourly after a success
+_SF_FAIL_INTERVAL = 300    # retry after 5 min on failure (rate limit is 12/hour)
+
+def _maybe_solar_forecast():
+    """Schedule a background solar forecast fetch if the interval has elapsed.
+    Non-blocking: HTTP call runs in a daemon thread.  Re-fetches hourly on
+    success; retries after 5 min on failure (well within the 12/hour limit)."""
+    global _sf_cached, _last_sf_ts, _sf_fetch_active
+    if not _sf_configured():
+        return
+    interval = _SF_OK_INTERVAL if _sf_cached else _SF_FAIL_INTERVAL
+    if time.time() - _last_sf_ts <= interval:
+        return
+    if _sf_fetch_active:
+        return
+    _sf_fetch_active = True
+    _last_sf_ts = time.time()   # pre-mark so the interval doesn't re-fire immediately
+
+    def _fetch_bg():
+        global _sf_cached, _sf_fetch_active
+        try:
+            result = _fetch_solar_forecast()
+            with _lock:
+                _sf_cached = result
+            days = result.get("watt_hours_day", [])
+            log.info("Solar forecast updated: %d day(s), %d period(s)",
+                     len(days), len(result.get("watt_hours_period", [])))
+        except Exception as exc:
+            log.error("Solar forecast fetch failed: %s", exc)
+        finally:
+            _sf_fetch_active = False
+
+    threading.Thread(target=_fetch_bg, daemon=True).start()
+
+
 # ── Update check ──────────────────────────────────────────────────────────────
 _update_info: dict = {}
 _last_update_check: float = 0.0
@@ -1934,6 +2026,7 @@ def _run_poll(st: dict):
                 _log_event("fault", f"Lost connection to inverter: {msg}")
                 st["offline"] = True
         _maybe_weather()
+        _maybe_solar_forecast()
         _maybe_check_update()
         time.sleep(POLL_INTERVAL)
 
@@ -2076,6 +2169,7 @@ def _run_listen(st: dict):
                     log.info("Listen: solar=%dW soc=%d%%", latest["solar_w"], latest["soc"])
                     last_proc = now
                 _maybe_weather()
+                _maybe_solar_forecast()
                 _maybe_check_update()
                 _maybe_quick_action_tick()
                 # Offline watchdog: no decodable frame for 30s.
@@ -2241,7 +2335,10 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
     aborts on busy and lets the 15s re-queue try again instead.
     Retries on timeout up to `timeout_retries` times (default 1, 1.5 s wait) --
     the first write in a sequence can catch the inverter in broadcast/listen mode.
-    Raises on timeout, echo mismatch, or exhausted retries."""
+    Stale echo frames (a previous write's confirmation re-emitted by the dongle)
+    are ignored; only the echo matching this reg/val confirms success.
+    Raises on timeout (no matching echo), dongle-busy exhaustion, or exhausted
+    retries."""
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, 0x06]) + reg.to_bytes(2, "big") + value.to_bytes(2, "big")
@@ -2287,11 +2384,17 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
                             continue
                         echo_reg = (f[38] << 8) | f[39]
                         echo_val = (f[40] << 8) | f[41]
-                        if echo_reg != reg or echo_val != value:
-                            raise ValueError(
-                                f"HR write echo mismatch: reg={echo_reg} val={echo_val} "
-                                f"(expected reg={reg} val={value})")
-                        return  # success
+                        if echo_reg == reg and echo_val == value:
+                            return  # success
+                        # Stale echo: some dongles (notably the AIO) keep
+                        # re-emitting confirmation frames for earlier writes in a
+                        # batch.  Opening a fresh socket for the next write can
+                        # therefore read a leftover echo from a previous register.
+                        # Skip it and keep reading for OUR echo within the deadline
+                        # rather than failing the (already-successful) write.
+                        log.debug("HR write: ignoring stale echo reg=%d val=%d "
+                                  "(awaiting reg=%d val=%d)", echo_reg, echo_val, reg, value)
+                        continue
                     if busy:
                         break
             finally:
@@ -3509,6 +3612,7 @@ def api_data():
     data["inverter_profile"] = _inverter_profile or ""
     # Running backend version — drives the footer so it can never lag the deployed code.
     data["app_version"] = APP_VERSION
+    data["solar_forecast_configured"] = _sf_configured()
     return jsonify(data)
 
 @app.route("/api/control", methods=["GET"])
@@ -3950,7 +4054,13 @@ def get_settings():
         "quick_charge_power_pct":    QUICK_CHARGE_POWER_PCT,
         "quick_discharge_power_pct": QUICK_DISCHARGE_POWER_PCT,
         "quick_charge_target_soc":   QUICK_CHARGE_TARGET_SOC,
-        # API key is intentionally never returned to the browser
+        "sf_latitude":               SF_LAT,
+        "sf_longitude":              SF_LON,
+        "sf_panel_tilt":             SF_TILT,
+        "sf_panel_azimuth":          SF_AZ,
+        "sf_panel_kwp":              SF_KWP,
+        "solar_forecast_configured": _sf_configured(),
+        # API keys are intentionally never returned to the browser
     })
 
 @app.route("/api/settings", methods=["POST"])
@@ -3961,6 +4071,7 @@ def save_settings():
     global POWER_UNITS, MAX_CHARGE_W, MAX_DISCHARGE_W
     global BACKUP_ENABLED, BACKUP_KEEP_DAYS, CHECK_UPDATES, CHART_COLORS
     global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
+    global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, _last_sf_ts
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4034,6 +4145,38 @@ def save_settings():
         QUICK_CHARGE_TARGET_SOC = max(4, min(100, int(data["quick_charge_target_soc"])))
         _set("quick_actions", "charge_target_soc", QUICK_CHARGE_TARGET_SOC)
 
+    # ── Solar forecast settings ────────────────────────────────────────────────
+    _sf_section = "solar_forecast"
+    _sf_dirty = False
+    for _sfkey, _sfattr, _sfcfg in (
+            ("sf_latitude",     "SF_LAT",  "latitude"),
+            ("sf_longitude",    "SF_LON",  "longitude"),
+            ("sf_panel_tilt",   "SF_TILT", "panel_tilt"),
+            ("sf_panel_azimuth","SF_AZ",   "panel_azimuth"),
+            ("sf_panel_kwp",    "SF_KWP",  "panel_kwp"),
+    ):
+        if _sfkey in data:
+            val = str(data[_sfkey]).strip()
+            if val:
+                try:
+                    float(val)
+                except ValueError:
+                    return jsonify({"ok": False, "error": f"{_sfkey} must be a number"}), 400
+            if not cfg.has_section(_sf_section):
+                cfg.add_section(_sf_section)
+            cfg.set(_sf_section, _sfcfg, val)
+            globals()[_sfattr] = val
+            _sf_dirty = True
+    new_sf_key = (data.get("sf_api_key") or "").strip()
+    if new_sf_key:
+        if not cfg.has_section(_sf_section):
+            cfg.add_section(_sf_section)
+        SF_API_KEY = new_sf_key
+        cfg.set(_sf_section, "api_key", SF_API_KEY)
+        _sf_dirty = True
+    if _sf_dirty:
+        _last_sf_ts = 0   # force a fetch on next poll cycle
+
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:
         if not cfg.has_section("admin"): cfg.add_section("admin")
@@ -4042,7 +4185,9 @@ def save_settings():
 
     with open(Path(__file__).parent / "config.ini", "w") as f:
         cfg.write(f)
-    return jsonify({"ok": True, "weather_configured": bool(MET_API_KEY and MET_GEOHASH)})
+    return jsonify({"ok": True,
+                    "weather_configured": bool(MET_API_KEY and MET_GEOHASH),
+                    "solar_forecast_configured": _sf_configured()})
 
 
 @app.route("/api/tariff", methods=["GET"])
@@ -4283,6 +4428,18 @@ def api_weather():
         if not _weather_cached:
             return jsonify({"ok": False, "error": "Not yet fetched"}), 503
         return jsonify(_weather_cached)
+
+@app.route("/api/solar_forecast")
+def api_solar_forecast():
+    if not _sf_configured():
+        return jsonify({"ok": False, "error": "not configured"})
+    with _lock:
+        cached = dict(_sf_cached)
+    if not cached:
+        return jsonify({"ok": False, "error": "not yet fetched"}), 503
+    return jsonify({"ok": True, "result": cached,
+                    "solar_forecast_configured": True})
+
 
 @app.route("/api/weather/lookup_postcode", methods=["POST"])
 def weather_lookup_postcode():

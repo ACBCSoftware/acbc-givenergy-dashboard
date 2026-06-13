@@ -598,6 +598,42 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 #se-cancel{background:var(--bg-card);border-color:var(--border);color:var(--muted)}
 #se-save{background:rgba(245,158,11,.2);border-color:#f59e0b;color:#f59e0b}
 #se-delete{background:rgba(248,113,113,.15);border-color:#f87171;color:#f87171;flex:0 0 auto;padding:11px 14px}
+
+/* ── Solar forecast panel ───────────────────────────── */
+#sf-modal{display:none;position:fixed;inset:0;z-index:200;
+  background:rgba(6,13,28,.88);align-items:center;justify-content:center}
+#sf-modal.open{display:flex}
+#sf-box{background:var(--bg-top);border:1px solid var(--border);border-radius:18px;
+  width:min(480px,96vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+#sf-header{display:flex;align-items:center;padding:14px 16px 10px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+#sf-header-title{flex:1;font-size:.9rem;font-weight:700;color:var(--text)}
+#sf-close{background:none;border:none;color:var(--muted);font-size:1.2rem;
+  cursor:pointer;padding:0 2px;line-height:1}
+#sf-body{overflow-y:auto;padding:14px 16px 16px;flex:1;display:flex;flex-direction:column;gap:12px}
+.sf-summary-row{display:flex;gap:10px}
+.sf-card{flex:1;background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:12px 14px;text-align:center}
+.sf-card-lbl{font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.sf-card-val{font-size:1.3rem;font-weight:700;color:#f59e0b;margin-top:4px}
+.sf-card-sub{font-size:.68rem;color:var(--muted);margin-top:2px}
+#sf-next2h{background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.3);
+  border-radius:10px;padding:9px 14px;font-size:.82rem;color:var(--muted);text-align:center}
+#sf-next2h b{color:#f59e0b}
+#sf-chart-wrap{flex-shrink:0;position:relative}
+#sf-canvas{display:block;width:100%;border-radius:8px}
+#sf-footer{font-size:.65rem;color:var(--muted);text-align:center;opacity:.6;padding-top:2px}
+#sf-footer a{color:var(--muted)}
+#sf-spinner{text-align:center;color:var(--muted);padding:30px;font-size:.85rem}
+/* Solar forecast tile -- shown when weather not configured but SF is */
+#sf-tile{
+  display:none;flex-direction:column;align-items:center;gap:3px;
+  background:rgba(0,0,0,0.30);border:1px solid var(--border);
+  border-radius:14px;padding:7px 13px;min-width:110px;cursor:pointer;
+}
+#sf-tile:hover{border-color:rgba(245,158,11,.4)}
+.sf-tile-icon{font-size:1.4rem;line-height:1}
+.sf-tile-lbl{font-size:.75rem;color:var(--muted);white-space:nowrap}
 </style>
 </head>
 <body>
@@ -628,10 +664,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
     <div id="hdr-right">
       <div id="status-pill"><div id="dot"></div><span id="status-txt">Connecting…</span></div>
-      <div id="weather-badge" style="display:none">
+      <div id="weather-badge" style="display:none" onclick="openSolarForecast()">
         <div id="wx-row1"><span id="wx-icon">—</span><span id="wx-temp">—</span></div>
         <div id="wx-row2">—</div>
         <div id="wx-row3">—</div>
+      </div>
+      <div id="sf-tile" onclick="openSolarForecast()">
+        <div class="sf-tile-icon">&#9728;&#65039;</div>
+        <div class="sf-tile-lbl">Solar Forecast</div>
       </div>
     </div>
   </div>
@@ -896,6 +936,47 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
         <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
         <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Solar Forecast (Forecast.Solar)</div>
+        <div class="sett-hint">Provides a 2-day hourly solar generation forecast. Click the weather badge (or the Solar Forecast tile) to view it. Azimuth is degrees from South: -90=East, 0=South, +90=West.</div>
+        <div class="sett-row">
+          <label>Latitude</label>
+          <div style="display:flex;gap:6px;flex:1;min-width:0">
+            <input id="s-sf-lat" type="text" placeholder="e.g. 50.7184" style="flex:1;min-width:0">
+          </div>
+        </div>
+        <div class="sett-row">
+          <label>Longitude</label>
+          <input id="s-sf-lon" type="text" placeholder="e.g. -3.5339">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
+          <button type="button" id="s-sf-lookup" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:6px 12px;white-space:nowrap;transition:background .2s" onclick="lookupPostcodeForSf()">Use postcode lookup</button>
+          <span id="s-sf-lookup-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
+        </div>
+        <div class="sett-row">
+          <label>Panel tilt (0-90&deg;)</label>
+          <input id="s-sf-tilt" type="number" min="0" max="90" placeholder="e.g. 35">
+        </div>
+        <div class="sett-row">
+          <label>Azimuth from South</label>
+          <input id="s-sf-az" type="number" min="-180" max="180" placeholder="-90=E, 0=S, +90=W">
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
+          <label style="font-size:.76rem;color:var(--muted);opacity:.8;flex-shrink:0">Or compass bearing</label>
+          <input id="s-sf-compass" type="number" min="0" max="360" placeholder="e.g. 168" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:6px 8px;width:70px;text-align:center">
+          <button type="button" id="s-sf-convert" style="background:rgba(245,158,11,.18);border:1px solid rgba(245,158,11,.4);border-radius:8px;color:var(--amber);cursor:pointer;font-size:.78rem;padding:6px 12px;white-space:nowrap;transition:background .2s" onclick="convertCompassAzimuth()">Convert</button>
+          <span id="s-sf-compass-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
+        </div>
+        <div class="sett-hint" style="opacity:.7">Compass bearing is 0=N, 90=E, 180=S, 270=W (as shown by a phone compass or solar survey). Convert fills the azimuth field above.</div>
+        <div class="sett-row">
+          <label>Panel kWp</label>
+          <input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0">
+        </div>
+        <div class="sett-row">
+          <label>API key (optional)</label>
+          <input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier">
+        </div>
       </div>
       <div class="sett-section">
         <div class="sett-heading">Quick Actions</div>
@@ -1209,6 +1290,19 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
         <button class="se-btn" id="se-cancel" onclick="closeEditor()">Cancel</button>
         <button class="se-btn" id="se-save" onclick="saveRule()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Solar forecast modal -->
+  <div id="sf-modal">
+    <div id="sf-box">
+      <div id="sf-header">
+        <span id="sf-header-title">&#9728;&#65039; Solar Forecast</span>
+        <button id="sf-close" onclick="closeSolarForecast()">&#10005;</button>
+      </div>
+      <div id="sf-body">
+        <div id="sf-spinner">Loading forecast…</div>
       </div>
     </div>
   </div>
@@ -1583,6 +1677,10 @@ function applyData(d) {
   liveFlows = getFlows(d);
   setSchedIcon(d.scheduler_active);
   updateQuickActions(d);
+  if (d.solar_forecast_configured !== undefined) {
+    _sfConfigured = !!d.solar_forecast_configured;
+    _updateSfVisibility();
+  }
 
   const solarOn = d.solar_w   > 20;
   const batOn   = d.battery_w > 20;
@@ -1713,15 +1811,30 @@ function updateQuickActions(d) {
   }
 }
 
-async function quickAction(type) {
+function quickAction(type) {
   if (_qaInFlight) return;
   const d = liveData;
   if (!d) return;
   const isActive = type === 'charge' ? d.quick_charge_active : d.quick_discharge_active;
   const label    = type === 'charge' ? '1hr Quick Charge' : '1hr Quick Discharge';
-  if (!isActive && !confirm('Start ' + label + ' for up to 1 hour?\n\nThis will force grid ' + (type === 'charge' ? 'charging' : 'export') + ' and requires exclusive inverter control.')) return;
+  // Stopping an active action needs no confirmation. Starting one uses the
+  // in-page confirm modal -- NOT a native confirm(), which the browser can
+  // permanently suppress via "don't allow this site to prompt again",
+  // silently blocking the action (issue #22).
+  if (!isActive) {
+    const verb = type === 'charge' ? 'charging' : 'export';
+    _showConfirm('Start ' + label + ' for up to 1 hour? This will force grid '
+                 + verb + ' and requires exclusive inverter control.',
+                 () => _runQuickAction(type, isActive));
+    return;
+  }
+  _runQuickAction(type, isActive);
+}
+
+async function _runQuickAction(type, isActive) {
+  if (_qaInFlight) return;
   _qaInFlight = true;
-  updateQuickActions(d);   // grey buttons immediately while in-flight
+  updateQuickActions(liveData);   // grey buttons immediately while in-flight
   try {
     const r = await fetch('/api/quick_action', {
       method: 'POST',
@@ -2485,6 +2598,7 @@ $('sched-editor').addEventListener('click', e => { if (e.target.id === 'sched-ed
 
 // ── Settings + password ───────────────────────────────────────────────────────
 let _weatherConfigured = false;
+let _sfConfigured      = false;
 let _qaEnabled = false;   // tracks quick_actions_enabled so showView can pre-render the bar
 let _adminPw = '';   // held in memory for the session only
 
@@ -2977,6 +3091,55 @@ async function lookupPostcode() {
   btn.disabled = false; btn.textContent = 'Lookup';
 }
 
+async function lookupPostcodeForSf() {
+  const btn  = $('s-sf-lookup');
+  const hint = $('s-sf-lookup-hint');
+  const pc   = $('s-wxpostcode').value.trim() || prompt('Enter postcode for lat/lng lookup:');
+  if (!pc) return;
+  btn.disabled = true; btn.textContent = '…';
+  hint.style.color = 'var(--muted)'; hint.textContent = 'Looking up…';
+  try {
+    const r = await fetch('/api/weather/lookup_postcode', {
+      method: 'POST',
+      headers: _ctrlHeaders(),
+      body: JSON.stringify({ postcode: pc })
+    });
+    const j = await r.json();
+    if (j.ok) {
+      $('s-sf-lat').value = String(j.lat);
+      $('s-sf-lon').value = String(j.lng);
+      hint.style.color = '#4ade80';
+      hint.textContent = '✓ Filled from postcode' + (j.area ? ' (' + j.area + ')' : '');
+    } else {
+      hint.style.color = '#f87171';
+      hint.textContent = '✗ ' + (j.error || 'Lookup failed');
+    }
+  } catch(e) {
+    hint.style.color = '#f87171';
+    hint.textContent = '✗ Network error';
+  }
+  btn.disabled = false; btn.textContent = 'Use postcode lookup';
+}
+
+function convertCompassAzimuth() {
+  const hint = $('s-sf-compass-hint');
+  const raw  = $('s-sf-compass').value.trim();
+  if (raw === '') { hint.style.color = '#f87171'; hint.textContent = 'Enter a bearing first'; return; }
+  let bearing = parseFloat(raw);
+  if (isNaN(bearing)) { hint.style.color = '#f87171'; hint.textContent = 'Not a number'; return; }
+  // Normalise 0–360, then convert to degrees-from-South (S=0, E=-90, W=+90).
+  bearing = ((bearing % 360) + 360) % 360;
+  let az = bearing - 180;             // 180 compass (S) -> 0
+  if (az > 180)  az -= 360;           // keep within -180..+180
+  if (az < -180) az += 360;
+  az = Math.round(az);
+  $('s-sf-az').value = String(az);
+  _settDirty = true;
+  const bearingTxt = Math.round(bearing * 100) / 100;   // strip float noise
+  hint.style.color = '#4ade80';
+  hint.textContent = `✓ ${bearingTxt}° compass → ${az}° from South`;
+}
+
 async function loadSettings() {
   try {
     const r = await fetch('/api/settings', { cache:'no-store', headers:{'X-Admin-Password':_adminPw} });
@@ -3008,6 +3171,15 @@ async function loadSettings() {
     } else {
       $('s-wxhash-hint').style.display = 'none';
     }
+    $('s-sf-lat').value = s.sf_latitude      || '';
+    $('s-sf-lon').value = s.sf_longitude     || '';
+    $('s-sf-tilt').value= s.sf_panel_tilt    || '';
+    $('s-sf-az').value  = s.sf_panel_azimuth || '';
+    $('s-sf-kwp').value = s.sf_panel_kwp     || '';
+    $('s-sf-apikey').value = '';
+    $('s-sf-lookup-hint').textContent = '';
+    $('s-sf-compass').value = '';
+    $('s-sf-compass-hint').textContent = '';
     $('s-qa-enabled').value  = s.quick_actions_enabled     ? 'yes' : 'no';
     $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
     $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
@@ -3061,7 +3233,13 @@ $('sett-save').addEventListener('click', async () => {
     quick_charge_power_pct:   parseInt($('s-qa-chg-pct').value)  || 100,
     quick_discharge_power_pct:parseInt($('s-qa-dis-pct').value)  || 100,
     quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
-    new_password:             newPw,
+    sf_latitude:     $('s-sf-lat').value.trim(),
+    sf_longitude:    $('s-sf-lon').value.trim(),
+    sf_panel_tilt:   $('s-sf-tilt').value.trim(),
+    sf_panel_azimuth:$('s-sf-az').value.trim(),
+    sf_panel_kwp:    $('s-sf-kwp').value.trim(),
+    sf_api_key:      $('s-sf-apikey').value.trim(),
+    new_password:    newPw,
     chart_colors: {
       solar:   $('s-col-solar').value,
       home:    $('s-col-home').value,
@@ -3085,13 +3263,16 @@ $('sett-save').addEventListener('click', async () => {
     if (res.ok) {
       if (newPw) _adminPw = newPw;   // keep session in sync with new password
       _weatherConfigured = res.weather_configured;
+      _sfConfigured      = !!res.solar_forecast_configured;
       applyChartColors(body.chart_colors);
       _settDirty = false;
       $('sett-msg').style.color = '#4ade80';
       $('sett-msg').textContent = '✓ Saved';
       $('s-wxkey').value = ''; $('s-newpw').value = ''; $('s-confirmpw').value = '';
+      $('s-sf-apikey').value = '';
       $('s-wxkey').placeholder = _weatherConfigured ? 'Key is set — paste new key to change' : 'Paste API key';
       if (_weatherConfigured) pollWeather();
+      _updateSfVisibility();
     } else {
       $('sett-msg').style.color = '#f87171';
       $('sett-msg').textContent = 'Error: ' + (res.error || 'unknown');
@@ -3101,6 +3282,175 @@ $('sett-save').addEventListener('click', async () => {
     $('sett-msg').textContent = 'Save failed';
   }
 });
+
+// ── Solar forecast ────────────────────────────────────────────────────────────
+
+function _updateSfVisibility() {
+  const live = currentView === 'live';
+  // Weather badge: show on live view when weather is configured
+  $('weather-badge').style.display = (live && _weatherConfigured) ? '' : 'none';
+  // SF tile: show on live view when SF is configured but weather is NOT
+  $('sf-tile').style.display = (live && _sfConfigured && !_weatherConfigured) ? 'flex' : 'none';
+  // Weather badge gets a pointer cursor when SF is configured (click opens SF panel)
+  $('weather-badge').style.cursor = (live && _weatherConfigured && _sfConfigured) ? 'pointer' : 'default';
+}
+
+function openSolarForecast() {
+  if (!_sfConfigured) return;
+  $('sf-modal').classList.add('open');
+  loadSolarForecast();
+}
+
+function closeSolarForecast() {
+  $('sf-modal').classList.remove('open');
+}
+
+$('sf-modal').addEventListener('click', e => { if (e.target.id === 'sf-modal') closeSolarForecast(); });
+
+async function loadSolarForecast() {
+  const body = $('sf-body');
+  body.innerHTML = '<div id="sf-spinner">Loading forecast…</div>';
+  try {
+    const r = await fetch('/api/solar_forecast', { cache:'no-store' });
+    const d = await r.json();
+    if (!d.ok) {
+      body.innerHTML = `<div id="sf-spinner" style="color:#f87171">${d.error || 'Forecast not available'}</div>`;
+      return;
+    }
+    renderSfPanel(body, d.result);
+  } catch(e) {
+    body.innerHTML = `<div id="sf-spinner" style="color:#f87171">Failed to load forecast</div>`;
+  }
+}
+
+function renderSfPanel(container, result) {
+  const dayTotals  = result.watt_hours_day   || [];
+  const periods    = result.watt_hours_period || [];
+
+  // Daily totals
+  const todayKwh    = dayTotals[0] ? (dayTotals[0].value / 1000).toFixed(2) : '—';
+  const tomorrowKwh = dayTotals[1] ? (dayTotals[1].value / 1000).toFixed(2) : '—';
+  const todayDate   = dayTotals[0]?.date || '';
+  const tomDate     = dayTotals[1]?.date || '';
+
+  // Next 2 hours
+  const nowTs = Date.now();
+  const upcoming = periods.filter(p => {
+    const ts = new Date(p.timestamp.replace(' ', 'T')).getTime();
+    return ts >= nowTs;
+  });
+  const next2hWh = upcoming.slice(0, 2).reduce((s, p) => s + (p.value || 0), 0);
+  const next2hTxt = next2hWh >= 1000
+    ? (next2hWh / 1000).toFixed(2) + ' kWh'
+    : next2hWh + ' Wh';
+
+  container.innerHTML = `
+    <div class="sf-summary-row">
+      <div class="sf-card">
+        <div class="sf-card-lbl">Today</div>
+        <div class="sf-card-val">${todayKwh} kWh</div>
+        <div class="sf-card-sub">${todayDate}</div>
+      </div>
+      <div class="sf-card">
+        <div class="sf-card-lbl">Tomorrow</div>
+        <div class="sf-card-val">${tomorrowKwh} kWh</div>
+        <div class="sf-card-sub">${tomDate}</div>
+      </div>
+    </div>
+    <div id="sf-next2h">Next 2 hours: <b>${next2hTxt}</b></div>
+    <div id="sf-chart-wrap"><canvas id="sf-canvas" height="160"></canvas></div>
+    <div id="sf-footer"><a href="https://forecast.solar" target="_blank" rel="noopener">Powered by Forecast.Solar</a></div>
+  `;
+
+  _drawSfChart(periods);
+}
+
+function _drawSfChart(periods) {
+  const canvas = $('sf-canvas');
+  if (!canvas) return;
+  const W = canvas.parentElement.clientWidth;
+  canvas.width  = W;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d');
+
+  // Group by calendar date
+  const byDate = {};
+  const dateOrder = [];
+  for (const p of periods) {
+    const d = p.timestamp.slice(0, 10);
+    if (!byDate[d]) { byDate[d] = []; dateOrder.push(d); }
+    byDate[d].push({ hour: parseInt(p.timestamp.slice(11, 13)), wh: p.value || 0 });
+  }
+
+  // Flatten to an ordered bar list, with a gap slot between days
+  const bars = [];
+  for (let di = 0; di < dateOrder.length; di++) {
+    if (di > 0) bars.push({ gap: true });
+    for (const slot of byDate[dateOrder[di]]) bars.push({ ...slot, date: dateOrder[di] });
+  }
+
+  const maxWh = Math.max(...bars.filter(b => !b.gap).map(b => b.wh), 1);
+  const PAD_T = 16, PAD_B = 28, PAD_L = 6, PAD_R = 6;
+  const chartH = canvas.height - PAD_T - PAD_B;
+  const barW   = Math.max(4, (W - PAD_L - PAD_R) / bars.length * 0.78);
+  const gap    = (W - PAD_L - PAD_R - barW * bars.length) / (bars.length + 1);
+
+  ctx.clearRect(0, 0, W, canvas.height);
+
+  // Y-axis label
+  const yUnit = maxWh >= 1000 ? 'kWh' : 'Wh';
+  ctx.fillStyle = 'rgba(90,122,158,0.7)';
+  ctx.font      = '9px system-ui,sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(yUnit, 2, PAD_T - 4);
+
+  const nowTs = Date.now();
+
+  for (let i = 0; i < bars.length; i++) {
+    const b = bars[i];
+    const x = PAD_L + gap + i * (barW + gap);
+
+    if (b.gap) {
+      // Day separator line
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x + barW / 2, PAD_T); ctx.lineTo(x + barW / 2, PAD_T + chartH); ctx.stroke();
+      continue;
+    }
+
+    const barH = (b.wh / maxWh) * chartH;
+    const y    = PAD_T + chartH - barH;
+
+    // Past hours slightly dimmed
+    const slotTs = new Date(b.date + 'T' + String(b.hour).padStart(2, '0') + ':00:00').getTime();
+    const past   = slotTs + 3600000 < nowTs;
+    ctx.fillStyle = past ? 'rgba(245,158,11,0.35)' : '#f59e0b';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x, y, barW, barH, 2) : ctx.rect(x, y, barW, barH);
+    ctx.fill();
+
+    // Hour label every 3 hours
+    if (b.hour % 3 === 0) {
+      ctx.fillStyle = 'rgba(90,122,158,0.8)';
+      ctx.font      = '9px system-ui,sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(String(b.hour).padStart(2, '0'), x + barW / 2, canvas.height - 6);
+    }
+  }
+
+  // Date labels at bottom
+  ctx.fillStyle = 'rgba(90,122,158,0.9)';
+  ctx.font      = 'bold 9px system-ui,sans-serif';
+  ctx.textAlign = 'center';
+  let barIdx = 0;
+  for (let di = 0; di < dateOrder.length; di++) {
+    const slots = byDate[dateOrder[di]].length;
+    const midI  = barIdx + Math.floor(slots / 2) + (di > 0 ? di : 0); // account for gap slots
+    const x = PAD_L + gap + midI * (barW + gap) + barW / 2;
+    ctx.fillText(dateOrder[di].slice(5), x, canvas.height - 16);
+    barIdx += slots + (di < dateOrder.length - 1 ? 1 : 0);
+  }
+}
 
 async function initApp() {
   // Fetch chart colours before any chart draws (no auth needed)
@@ -3113,8 +3463,8 @@ async function initApp() {
     const r = await fetch('/api/weather', { cache:'no-store' });
     _weatherConfigured = r.ok;
   } catch(e) { _weatherConfigured = false; }
-  $('weather-badge').style.display = _weatherConfigured ? '' : 'none';
   if (_weatherConfigured) pollWeather();
+  _updateSfVisibility();
 }
 
 // ── Init ────────────────────────────────────────────────────────────────────
@@ -3223,7 +3573,7 @@ function showView(v) {
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
   $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
-  $('weather-badge').style.display   = (live && _weatherConfigured) ? '' : 'none';
+  _updateSfVisibility();
   if (live) {
     if (liveData) {
       updateQuickActions(liveData);          // data already cached — set correct state immediately
