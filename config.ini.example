@@ -71,6 +71,13 @@ standing_charge_p = 0
 ; tou_1_rate_p         = 7.50    ; import rate during this window
 ; tou_1_export_rate_p  = 15.00   ; export rate during this window (0 = use flat export_rate_p)
 
+[logging]
+; Log level: warning (default) | info | debug
+; Debug captures detailed inverter communication -- use only for fault diagnosis.
+log_level          = warning
+; How many days of log files to keep (daily rotation, 1-30)
+log_retention_days = 7
+
 [admin]
 ; SHA-256 hash of the settings-page password.
 ; Default password is:  password

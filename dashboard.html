@@ -1002,6 +1002,23 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
         <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
       </div>
+
+      <div class="sett-section">
+        <div class="sett-heading">Diagnostics</div>
+        <div class="sett-hint">Log files are saved alongside the app and rotated daily. Use Debug level to capture detailed inverter communication for fault diagnosis -- switch back to Warning for normal use.</div>
+        <div class="sett-row">
+          <label>Log level</label>
+          <select id="s-log-level" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="warning">Warning (default)</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug</option>
+          </select>
+        </div>
+        <div class="sett-row"><label>Keep logs (days)</label><input id="s-log-retention" type="number" min="1" max="30"></div>
+        <button class="ctrl-btn ctrl-btn-sm" onclick="downloadLog()" style="margin-top:6px">&#11015; Download log</button>
+        <div id="s-log-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
+      </div>
+
       <button id="sett-save" class="sett-save-btn">Save Settings</button>
       <div id="sett-msg" class="sett-msg"></div>
     </div>
@@ -2697,6 +2714,22 @@ function _settHeaders() {
 }
 
 // ── Backup & restore ──────────────────────────────────────────────────────────
+async function downloadLog() {
+  const msg = $('s-log-msg');
+  msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing log...';
+  try {
+    const r = await fetch('/api/log', { headers: {'X-Admin-Password': _adminPw} });
+    if (r.status === 401) { msg.style.color='var(--red)'; msg.textContent='Not authorised'; return; }
+    if (!r.ok) { const e = await r.json(); msg.style.color='var(--red)'; msg.textContent=e.error||'Failed'; return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'dashboard.log'; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    msg.style.color = 'var(--green)'; msg.textContent = 'Download started';
+  } catch(e) { msg.style.color='var(--red)'; msg.textContent='Error: ' + e.message; }
+}
+
 async function downloadBackup() {
   const msg = $('s-bkmsg');
   msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing backup…';
@@ -3285,6 +3318,8 @@ async function loadSettings() {
     $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
     $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
     $('s-qa-chg-soc').value  = s.quick_charge_target_soc   ?? 100;
+    $('s-log-level').value     = s.log_level          || 'warning';
+    $('s-log-retention').value = s.log_retention_days || 7;
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
     _settDirty = false;
@@ -3335,6 +3370,8 @@ $('sett-save').addEventListener('click', async () => {
     quick_charge_power_pct:   parseInt($('s-qa-chg-pct').value)  || 100,
     quick_discharge_power_pct:parseInt($('s-qa-dis-pct').value)  || 100,
     quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
+    log_level:          $('s-log-level').value,
+    log_retention_days: parseInt($('s-log-retention').value) || 7,
     sf_postcode:     $('s-sf-postcode').value.trim(),
     sf_latitude:     $('s-sf-lat').value.trim(),
     sf_longitude:    $('s-sf-lon').value.trim(),

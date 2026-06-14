@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import logging
+import logging.handlers
 import re
 import secrets
 import shutil
@@ -129,6 +130,9 @@ QUICK_CHARGE_TARGET_SOC    = max(4, min(100, _cfg.getint("quick_actions", "charg
 
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
+
+LOG_LEVEL          = _cfg.get("logging", "log_level",           fallback="warning").strip().lower()
+LOG_RETENTION_DAYS = _cfg.getint("logging", "log_retention_days", fallback=7)
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
@@ -996,8 +1000,27 @@ def _apply_pending_import():
     except Exception as exc:
         log.error("Failed to apply pending import: %s", exc)
 
-logging.basicConfig(level=logging.WARNING)
+_LOG_LEVELS    = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
+_log_level_int = _LOG_LEVELS.get(LOG_LEVEL, logging.WARNING)
+logging.basicConfig(
+    level=_log_level_int,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 log = logging.getLogger("dashboard")
+
+_log_file_handler = None
+_LOG_PATH = Path(__file__).parent / "dashboard.log"
+try:
+    _log_file_handler = logging.handlers.TimedRotatingFileHandler(
+        _LOG_PATH, when="midnight", backupCount=LOG_RETENTION_DAYS, encoding="utf-8"
+    )
+    _log_file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logging.getLogger().addHandler(_log_file_handler)
+except Exception as _log_err:
+    print(f"[WARNING] Could not open log file {_LOG_PATH}: {_log_err}")
 
 # The givenergy-modbus library logs a multi-line traceback on every transient
 # read failure (very common on Modbus TCP). These are harmless blips that we
@@ -1005,6 +1028,14 @@ log = logging.getLogger("dashboard")
 logging.getLogger("givenergy_modbus").setLevel(logging.CRITICAL)
 # pymodbus (the transport underneath) can be chatty too.
 logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
+
+
+def _set_log_level(level_name: str) -> None:
+    """Change log verbosity at runtime without restarting."""
+    global LOG_LEVEL
+    lvl = _LOG_LEVELS.get(level_name.lower(), logging.WARNING)
+    logging.getLogger().setLevel(lvl)
+    LOG_LEVEL = level_name.lower()
 
 # ── Database ───────────────────────────────────────────────────────────────────
 def _db():
@@ -4262,6 +4293,8 @@ def get_settings():
         "sf_panel_azimuth":          SF_AZ,
         "sf_panel_kwp":              SF_KWP,
         "solar_forecast_configured": _sf_configured(),
+        "log_level":          LOG_LEVEL,
+        "log_retention_days": LOG_RETENTION_DAYS,
         # API keys are intentionally never returned to the browser
     })
 
@@ -4275,6 +4308,7 @@ def save_settings():
     global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
     global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, SF_POSTCODE, _last_sf_ts
     global REQUIRE_AUTH
+    global LOG_LEVEL, LOG_RETENTION_DAYS
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4409,6 +4443,17 @@ def save_settings():
         if not cfg.has_section("admin"): cfg.add_section("admin")
         ADMIN_HASH = _hash_password(new_pw)
         cfg.set("admin", "password_hash", ADMIN_HASH)
+
+    if "log_level" in data:
+        lvl = str(data["log_level"]).lower()
+        if lvl in ("debug", "info", "warning"):
+            _set_log_level(lvl)
+            _set("logging", "log_level", lvl)
+    if "log_retention_days" in data:
+        LOG_RETENTION_DAYS = max(1, min(30, int(data["log_retention_days"])))
+        if _log_file_handler:
+            _log_file_handler.backupCount = LOG_RETENTION_DAYS
+        _set("logging", "log_retention_days", LOG_RETENTION_DAYS)
 
     with open(Path(__file__).parent / "config.ini", "w") as f:
         cfg.write(f)
@@ -4590,6 +4635,17 @@ def tariff_lookup_region():
         return jsonify({"ok": False, "error": "Region not found for that postcode"})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})
+
+
+@app.route("/api/log")
+def get_log():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    log_path = Path(__file__).parent / "dashboard.log"
+    if not log_path.exists():
+        return jsonify({"ok": False, "error": "No log file yet"}), 404
+    return send_file(str(log_path), as_attachment=True,
+                     download_name="dashboard.log", mimetype="text/plain")
 
 
 @app.route("/api/backup/export")
