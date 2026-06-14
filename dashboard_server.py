@@ -2396,10 +2396,27 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
 
 
+_HR_ON_SOCKET_CHUNK = 60   # Gen1 firmware caps HR reads at ~60 registers (same as IR limit).
+                           # Larger requests return a Modbus exception that we'd silently
+                           # discard, causing a timeout.  Split automatically above this size.
+
 def _hr_read_on_socket(s, slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     """Like _hr_read but uses an already-open socket rather than creating a new
     connection.  Called by the listen loop to service snapshot requests from the
-    QA thread -- Gen2 dongles are single-client and ignore reads on a 2nd conn."""
+    QA thread -- Gen2 dongles are single-client and ignore reads on a 2nd conn.
+    Automatically splits large reads into _HR_ON_SOCKET_CHUNK-register chunks so
+    Gen1 firmware limits do not cause silent timeouts."""
+    if count > _HR_ON_SOCKET_CHUNK:
+        n_chunks = (count + _HR_ON_SOCKET_CHUNK - 1) // _HR_ON_SOCKET_CHUNK
+        chunk_timeout = timeout / n_chunks
+        result = []
+        off = 0
+        while off < count:
+            n = min(_HR_ON_SOCKET_CHUNK, count - off)
+            result.extend(_hr_read_on_socket(s, slave, base + off, n, chunk_timeout))
+            off += n
+        return result
+
     serial  = b"AB1234G567"
     padding = b"\x00" * 7 + b"\x08"
     inner   = bytes([slave, 0x03]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
