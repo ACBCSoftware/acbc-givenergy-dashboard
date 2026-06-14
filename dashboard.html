@@ -4271,6 +4271,19 @@ async function loadPowerData() {
   drawPowerChart();
 }
 
+// Split a powerData array into contiguous segments, breaking wherever two consecutive
+// timestamps are more than GAP_SECS apart (indicates an inverter disconnect).
+const _POWER_GAP_SECS = 120;
+function _splitByGaps(data) {
+  if (!data.length) return [];
+  const segs = [[data[0]]];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i].t - data[i-1].t > _POWER_GAP_SECS) segs.push([]);
+    segs[segs.length - 1].push(data[i]);
+  }
+  return segs;
+}
+
 // Catmull-Rom spline path helper — smooth curve that passes through every point.
 // Call after c.moveTo(pts[0].x, pts[0].y); closes nothing, caller handles start/end.
 function _catmullPath(c, pts) {
@@ -4394,38 +4407,42 @@ function drawPowerChart() {
     }
   }
 
-  // Series fills
+  // Series fills -- split at data gaps to avoid triangle artifacts across disconnects
   POWER_SERIES.forEach(s => {
     if (!powerActive.has(s.key)) return;
-    const pts = powerData.map(d => ({ x: xPx(d.t), y: yPx(d[s.key]||0) }));
-    if (pts.length < 2) return;
+    const segs = _splitByGaps(powerData);
 
-    const fillArea = (clipY, clipH, color) => {
-      if (clipH <= 0) return;
-      c.save();
-      c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
+    segs.forEach(seg => {
+      const pts = seg.map(d => ({ x: xPx(d.t), y: yPx(d[s.key]||0) }));
+      if (pts.length < 2) return;
+
+      const fillArea = (clipY, clipH, color) => {
+        if (clipH <= 0) return;
+        c.save();
+        c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
+        c.beginPath();
+        c.moveTo(pts[0].x, yZero);
+        c.lineTo(pts[0].x, pts[0].y);
+        _catmullPath(c, pts);
+        c.lineTo(pts[pts.length-1].x, yZero);
+        c.closePath();
+        c.fillStyle = color;
+        c.fill();
+        c.restore();
+      };
+
+      // Positive area (above zero -- y < yZero)
+      fillArea(PT, yZero - PT, s.colorPos + 'aa');
+      // Negative area (below zero -- y > yZero), only if series can go negative
+      if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
+
+      // Smooth series outline
       c.beginPath();
-      c.moveTo(pts[0].x, yZero);
-      c.lineTo(pts[0].x, pts[0].y);
+      c.moveTo(pts[0].x, pts[0].y);
       _catmullPath(c, pts);
-      c.lineTo(pts[pts.length-1].x, yZero);
-      c.closePath();
-      c.fillStyle = color;
-      c.fill();
-      c.restore();
-    };
-
-    // Positive area (above zero — y < yZero)
-    fillArea(PT, yZero - PT, s.colorPos + 'aa');
-    // Negative area (below zero — y > yZero), only if series can go negative
-    if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
-
-    // Smooth series outline
-    c.beginPath();
-    c.moveTo(pts[0].x, pts[0].y);
-    _catmullPath(c, pts);
-    c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
-    c.stroke();
+      c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
+      c.stroke();
+    });
   });
 
   // Right axis: % labels always shown; SOC line when enabled
@@ -4437,15 +4454,16 @@ function drawPowerChart() {
     c.fillText(pct+'%', PL+plotW+4, y);
   }
   if (powerShowSoc) {
-    const socPts = powerData.filter(d => d.soc != null);
-    if (socPts.length > 1) {
-      const sPts = socPts.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
-      c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+    const socSegs = _splitByGaps(powerData.filter(d => d.soc != null));
+    c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+    socSegs.forEach(seg => {
+      if (seg.length < 2) return;
+      const sPts = seg.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
       c.beginPath();
       c.moveTo(sPts[0].x, sPts[0].y);
       _catmullPath(c, sPts);
       c.stroke();
-    }
+    });
   }
 
   // Adaptive X axis time labels
