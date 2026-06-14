@@ -3478,6 +3478,7 @@ function _drawSfChart(periods) {
   }
 
   // Date labels at bottom
+  const _SF_DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   ctx.fillStyle = 'rgba(90,122,158,0.9)';
   ctx.font      = 'bold 9px system-ui,sans-serif';
   ctx.textAlign = 'center';
@@ -3486,7 +3487,8 @@ function _drawSfChart(periods) {
     const slots = byDate[dateOrder[di]].length;
     const midI  = barIdx + Math.floor(slots / 2) + (di > 0 ? di : 0); // account for gap slots
     const x = PAD_L + gap + midI * (barW + gap) + barW / 2;
-    ctx.fillText(_sfFmtDate(dateOrder[di], false), x, canvas.height - 16);
+    const [_cy, _cm, _cd] = dateOrder[di].split('-').map(Number);
+    ctx.fillText(_SF_DOW[new Date(_cy, _cm-1, _cd).getDay()], x, canvas.height - 16);
     barIdx += slots + (di < dateOrder.length - 1 ? 1 : 0);
   }
 }
@@ -3704,6 +3706,7 @@ function pKey(d) { return d.period || d.day || d.mon || d.yr || ''; }
 
 function fmtPLabel(p) {
   const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const DOW = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
   const thisYear = new Date().getFullYear();
   if (!p) return '';
   if (histPeriod === 'year') {
@@ -3731,7 +3734,8 @@ function fmtPLabel(p) {
   }
   // Day view
   const [y,mm,dd] = p.split('-');
-  return +y === thisYear ? dd+' '+MON[+mm-1] : dd+' '+MON[+mm-1]+' '+y;
+  const dayName = DOW[new Date(+y, +mm-1, +dd).getDay()];
+  return +y === thisYear ? dayName+' '+dd+' '+MON[+mm-1] : dayName+' '+dd+' '+MON[+mm-1]+' '+y;
 }
 
 function drawHistChart() {
