@@ -2270,14 +2270,29 @@ def _run_listen(st: dict):
                 # Service any pending snapshot request from the QA thread.
                 # Must run on this thread (socket owner) to avoid concurrent access.
                 if _snap_req.is_set() and _inverter_slave:
-                    global _snap_hr_data
+                    global _snap_hr_data, _snap_poll_reconnect
                     _snap_req.clear()
                     try:
                         _snap_hr_data = _hr_read_on_socket(s, _inverter_slave, 20, 97, timeout=7.5)
+                        _snap_done.set()
                     except Exception as exc:
-                        log.warning("Listen-socket snapshot failed: %s", exc)
+                        log.warning("Listen-socket snapshot failed: %s -- trying poll fallback", exc)
+                        # Gen1 firmware only exposes HR 0-43 on the listen socket.
+                        # Close it, read via a fresh connection, then let the loop reconnect.
                         _snap_hr_data = None
-                    _snap_done.set()
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                        try:
+                            time.sleep(0.5)
+                            _snap_hr_data = _hr_read(_inverter_slave, 20, 97, timeout=5.0)
+                            log.info("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
+                        except Exception as exc2:
+                            log.warning("Snapshot poll fallback failed: %s", exc2)
+                        _snap_done.set()
+                        _snap_poll_reconnect = True
+                        raise ConnectionError("reconnect after snapshot poll")
                 # Offline watchdog: no decodable frame for 30s.
                 # We poke every 10s so frames should arrive every ~10s.
                 # 30s = 3x poke interval -- enough margin, fast enough recovery.
@@ -2289,11 +2304,18 @@ def _run_listen(st: dict):
                 _error = msg
                 if _cached:
                     _cached["ok"] = False
-            if not st.get("offline"):
+            if _snap_poll_reconnect:
+                # Intentional disconnect for snapshot poll read -- reconnect quickly,
+                # no fault event (the listen loop will be back within a couple of seconds).
+                _snap_poll_reconnect = False
+                time.sleep(1)
+            elif not st.get("offline"):
                 log.warning("Lost inverter data stream: %s", msg)
                 _log_event("fault", f"Lost connection to inverter: {msg}")
                 st["offline"] = True
-            time.sleep(5)
+                time.sleep(5)
+            else:
+                time.sleep(5)
 
 def _probe_listen() -> bool:
     """Send a poke and see if the inverter emits a decodable input-register
@@ -3329,9 +3351,10 @@ _quick_action_snapshot: dict = {}   # {HR_number: value, ...}
 # Inter-thread snapshot request: QA flask thread posts the request;
 # _run_listen() services it on the existing socket (avoids opening a 2nd
 # connection which Gen2 dongles -- single-client -- ignore).
-_snap_req       = threading.Event()       # QA thread sets to request a read
-_snap_done      = threading.Event()       # listen loop sets when complete
-_snap_hr_data = None                     # list of raw HR values, written by listen loop
+_snap_req            = threading.Event()   # QA thread sets to request a read
+_snap_done           = threading.Event()   # listen loop sets when complete
+_snap_hr_data        = None               # list of raw HR values, written by listen loop
+_snap_poll_reconnect = False              # True when listen socket was closed for a poll snapshot
 
 
 def _sched_task_active() -> bool:
