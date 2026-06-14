@@ -3220,7 +3220,7 @@ _quick_action_snapshot: dict = {}   # {HR_number: value, ...}
 # connection which Gen2 dongles -- single-client -- ignore).
 _snap_req       = threading.Event()       # QA thread sets to request a read
 _snap_done      = threading.Event()       # listen loop sets when complete
-_snap_hr_data: list | None = None        # result written by listen loop
+_snap_hr_data = None                     # list of raw HR values, written by listen loop
 
 
 def _sched_task_active() -> bool:
@@ -4905,14 +4905,6 @@ def add_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    if "text/html" in response.content_type:
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "connect-src 'self'"
-        )
     return response
 
 
