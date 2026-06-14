@@ -2825,10 +2825,12 @@ def _read_control_state() -> dict:
 
     if profile == "single_phase_extended":
         regs_240 = _hr_read(slave, 240, 60)   # HR 240-299
+        regs_313 = _hr_read(slave, 313, 2)    # HR 313-314: AIO charge/discharge power limits (0-100%)
         def hr_ext(n):
             if 240 <= n < 300: return regs_240[n - 240]
             return hr(n)
     else:
+        regs_313 = None
         def hr_ext(n):
             return hr(n)
 
@@ -2912,8 +2914,8 @@ def _read_control_state() -> dict:
         "battery_power_mode":   hr(_HR["BATTERY_POWER_MODE"]),
         "charge_target_soc":    charge_target,
         "soc_reserve":          hr(_HR["BATTERY_SOC_RESERVE"]),
-        "charge_limit":         hr(_HR["BATTERY_CHARGE_LIMIT"]),
-        "discharge_limit":      hr(_HR["BATTERY_DISCHARGE_LIMIT"]),
+        "charge_limit":    regs_313[0] if regs_313 else hr(_HR["BATTERY_CHARGE_LIMIT"]) * 2,
+        "discharge_limit": regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]) * 2,
         "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
         "charge_slots":         charge_slots,
         "discharge_slots":      discharge_slots,
@@ -3082,14 +3084,20 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
         return f"SOC reserve set to {val}%"
 
     if command == "set_charge_limit":
-        val = max(0, min(50, int(params["value"])))
-        wr(_HR["BATTERY_CHARGE_LIMIT"], val)
-        return f"Charge power limit set to {val * 2}%"
+        val = max(0, min(100, int(params["value"])))
+        if profile == "single_phase_extended":
+            wr(313, val)
+        else:
+            wr(_HR["BATTERY_CHARGE_LIMIT"], val // 2)
+        return f"Charge power limit set to {val}%"
 
     if command == "set_discharge_limit":
-        val = max(0, min(50, int(params["value"])))
-        wr(_HR["BATTERY_DISCHARGE_LIMIT"], val)
-        return f"Discharge power limit set to {val * 2}%"
+        val = max(0, min(100, int(params["value"])))
+        if profile == "single_phase_extended":
+            wr(314, val)
+        else:
+            wr(_HR["BATTERY_DISCHARGE_LIMIT"], val // 2)
+        return f"Discharge power limit set to {val}%"
 
     if command == "set_discharge_mode":
         val = max(0, min(1, int(params["value"])))
@@ -3189,6 +3197,15 @@ def _sched_compute_writes(desired: dict):
 
     mode = desired["mode"]
     pct  = max(0, min(50, int(desired.get("power_pct", 50))))
+    # Power-limit register/value differ by profile:
+    # Gen 1/2: HR 111/112 take 0-50 (half-percent); pct is already in this range from the DB.
+    # AIO (single_phase_extended): HR 313/314 take 0-100 (full-percent); multiply by 2.
+    if profile == "single_phase_extended":
+        _chrg_limit_reg, _chrg_limit_val = 313, pct * 2
+        _dchg_limit_reg, _dchg_limit_val = 314, pct * 2
+    else:
+        _chrg_limit_reg, _chrg_limit_val = _HR["BATTERY_CHARGE_LIMIT"],    pct
+        _dchg_limit_reg, _dchg_limit_val = _HR["BATTERY_DISCHARGE_LIMIT"], pct
 
     if mode == "charge":
         target = max(4, min(100, int(desired.get("target_soc", 100))))
@@ -3205,7 +3222,7 @@ def _sched_compute_writes(desired: dict):
               (_HR["BATTERY_POWER_MODE"],                        1),   # demand / eco
               (_HR["ENABLE_CHARGE_TARGET"], 0 if target == 100 else 1),
               (_HR["CHARGE_TARGET_SOC"],                    target),
-              (_HR["BATTERY_CHARGE_LIMIT"],                    pct),
+              (_chrg_limit_reg,                       _chrg_limit_val),
               (_HR["ENABLE_CHARGE"],                             1)]
         summary = f"Charge to {target}% at {pct}% power"
 
@@ -3220,7 +3237,7 @@ def _sched_compute_writes(desired: dict):
               (_HR["ENABLE_CHARGE"],               0),
               (_HR["BATTERY_POWER_MODE"],           0),   # 0 = export / max-power
               (_HR["BATTERY_SOC_RESERVE"],       stop),
-              (_HR["BATTERY_DISCHARGE_LIMIT"],    pct),
+              (_dchg_limit_reg,           _dchg_limit_val),
               (_HR["ENABLE_DISCHARGE"],             1)]
         summary = f"Export at {pct}% power, stop at {stop}% SOC"
 
@@ -3425,6 +3442,15 @@ def _quick_action_do(action: str):
     def _snap(n, fallback=0):   # fallback param kept for call-site compat; snap_raw guaranteed non-None
         return snap_raw[n - 20]
 
+    # AIO power-limit registers (HR 313-314) are outside the HR 20-116 snap range.
+    aio_limits = None
+    if profile == "single_phase_extended":
+        try:
+            aio_limits = _hr_read(slave, 313, 2)
+        except Exception as exc:
+            log.warning("Quick action: HR 313-314 read failed (%s) -- will restore to 100%%", exc)
+            aio_limits = [100, 100]
+
     _quick_action_snapshot = {
         _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),
         _HR["BATTERY_POWER_MODE"]:      _snap(_HR["BATTERY_POWER_MODE"]),
@@ -3449,7 +3475,14 @@ def _quick_action_do(action: str):
 
     if action == "charge":
         s_hr, e_hr, free_slot = _qa_find_free_charge_slot(slave, profile)
-        pct    = max(0, min(50, QUICK_CHARGE_POWER_PCT  * 50 // 100))
+        if profile == "single_phase_extended":
+            chrg_limit_reg     = 313
+            pct                = max(0, min(100, QUICK_CHARGE_POWER_PCT))
+            chrg_limit_restore = aio_limits[0] if aio_limits else 100
+        else:
+            chrg_limit_reg     = _HR["BATTERY_CHARGE_LIMIT"]   # HR 111, 0-50
+            pct                = max(0, min(50, QUICK_CHARGE_POWER_PCT * 50 // 100))
+            chrg_limit_restore = _snap(_HR["BATTERY_CHARGE_LIMIT"], 50)
         target = QUICK_CHARGE_TARGET_SOC
         writes = [
             (s_hr,                                                   cs),
@@ -3458,7 +3491,7 @@ def _quick_action_do(action: str):
             (_HR["BATTERY_POWER_MODE"],                               1),
             (_HR["ENABLE_CHARGE_TARGET"],   0 if target == 100 else 1),
             (_HR["CHARGE_TARGET_SOC"],                           target),
-            (_HR["BATTERY_CHARGE_LIMIT"],                           pct),
+            (chrg_limit_reg,                                        pct),
             (_HR["ENABLE_CHARGE"],                                    1),
         ]
         restore_regs = [
@@ -3468,13 +3501,21 @@ def _quick_action_do(action: str):
             [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],        1)],
             [_HR["ENABLE_CHARGE_TARGET"],       _snap(_HR["ENABLE_CHARGE_TARGET"],      0)],
             [_HR["CHARGE_TARGET_SOC"],          _snap(_HR["CHARGE_TARGET_SOC"],       100)],
-            [_HR["BATTERY_CHARGE_LIMIT"],       _snap(_HR["BATTERY_CHARGE_LIMIT"],     50)],
+            [chrg_limit_reg,                    chrg_limit_restore],
             [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],             0)],
         ]
-        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {pct*2}%"
+        display_pct = pct if profile == "single_phase_extended" else pct * 2
+        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {display_pct}%"
     else:
         s_hr, e_hr, free_slot = _qa_find_free_discharge_slot(slave, profile, snap_raw)
-        pct   = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
+        if profile == "single_phase_extended":
+            dchg_limit_reg     = 314
+            pct                = max(0, min(100, QUICK_DISCHARGE_POWER_PCT))
+            dchg_limit_restore = aio_limits[1] if aio_limits else 100
+        else:
+            dchg_limit_reg     = _HR["BATTERY_DISCHARGE_LIMIT"]   # HR 112, 0-50
+            pct                = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
+            dchg_limit_restore = _snap(_HR["BATTERY_DISCHARGE_LIMIT"], 50)
         stop  = max(4, SCHEDULER_BASELINE_SOC_RESERVE)
         writes = [
             (s_hr,                                                   cs),
@@ -3482,7 +3523,7 @@ def _quick_action_do(action: str):
             (_HR["ENABLE_CHARGE"],                                    0),
             (_HR["BATTERY_POWER_MODE"],                               0),
             (_HR["BATTERY_SOC_RESERVE"],                           stop),
-            (_HR["BATTERY_DISCHARGE_LIMIT"],                        pct),
+            (dchg_limit_reg,                                        pct),
             (_HR["ENABLE_DISCHARGE"],                                 1),
         ]
         restore_regs = [
@@ -3491,10 +3532,11 @@ def _quick_action_do(action: str):
             [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],              0)],
             [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],         1)],
             [_HR["BATTERY_SOC_RESERVE"],        _snap(_HR["BATTERY_SOC_RESERVE"],        4)],
-            [_HR["BATTERY_DISCHARGE_LIMIT"],    _snap(_HR["BATTERY_DISCHARGE_LIMIT"],   50)],
+            [dchg_limit_reg,                    dchg_limit_restore],
             [_HR["ENABLE_DISCHARGE"],           _snap(_HR["ENABLE_DISCHARGE"],           1)],
         ]
-        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {pct*2}%"
+        display_pct = pct if profile == "single_phase_extended" else pct * 2
+        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {display_pct}%"
 
     for reg, val in writes:
         _hr_write(slave, reg, val)
