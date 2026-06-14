@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -129,6 +130,30 @@ QUICK_CHARGE_TARGET_SOC    = max(4, min(100, _cfg.getint("quick_actions", "charg
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
+
+def _hash_password(pw: str) -> str:
+    """Hash a plaintext password with scrypt + random salt.
+    Returns a self-describing string: scrypt:N:r:p:<salt_hex>:<hash_hex>
+    """
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pw.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+    return f"scrypt:{_SCRYPT_N}:{_SCRYPT_R}:{_SCRYPT_P}:{salt.hex()}:{h.hex()}"
+
+def _verify_password(pw: str, stored: str) -> bool:
+    """Verify a plaintext password against a stored hash.
+    Supports both legacy SHA-256 (no prefix) and scrypt (scrypt: prefix).
+    """
+    if stored.startswith("scrypt:"):
+        try:
+            _, n, r, p, salt_hex, hash_hex = stored.split(":")
+            h = hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt_hex),
+                               n=int(n), r=int(r), p=int(p), dklen=32)
+            return h.hex() == hash_hex
+        except Exception:
+            return False
+    return hashlib.sha256(pw.encode()).hexdigest() == stored
+
 _COLOUR_DEFAULTS: dict[str, str] = {
     "solar":    "#f59e0b",
     "home":     "#38bdf8",
@@ -157,9 +182,29 @@ def _valid_hex(v: str) -> bool:
 def _authorised():
     """Check X-Admin-Password header against stored hash.
     Used for Settings and other config endpoints, which ALWAYS require the
-    password regardless of REQUIRE_AUTH."""
+    password regardless of REQUIRE_AUTH.
+    On successful login against a legacy SHA-256 hash, silently upgrades
+    to scrypt in config.ini.
+    """
+    global ADMIN_HASH
     pw = request.headers.get("X-Admin-Password", "")
-    return hashlib.sha256(pw.encode()).hexdigest() == ADMIN_HASH
+    if not _verify_password(pw, ADMIN_HASH):
+        return False
+    if not ADMIN_HASH.startswith("scrypt:"):
+        try:
+            ADMIN_HASH = _hash_password(pw)
+            cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+            _config_path = Path(__file__).parent / "config.ini"
+            cfg.read(_config_path)
+            if not cfg.has_section("admin"):
+                cfg.add_section("admin")
+            cfg.set("admin", "password_hash", ADMIN_HASH)
+            with open(_config_path, "w") as f:
+                cfg.write(f)
+            log.info("Password hash upgraded from SHA-256 to scrypt")
+        except Exception as exc:
+            log.warning("Could not upgrade password hash: %s", exc)
+    return True
 
 def _action_authorised():
     """Auth gate for control/action endpoints (control, scheduler, quick
@@ -4302,7 +4347,7 @@ def save_settings():
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:
         if not cfg.has_section("admin"): cfg.add_section("admin")
-        ADMIN_HASH = hashlib.sha256(new_pw.encode()).hexdigest()
+        ADMIN_HASH = _hash_password(new_pw)
         cfg.set("admin", "password_hash", ADMIN_HASH)
 
     with open(Path(__file__).parent / "config.ini", "w") as f:
