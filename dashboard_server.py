@@ -2242,7 +2242,7 @@ def _run_listen(st: dict):
                     global _snap_hr_data
                     _snap_req.clear()
                     try:
-                        _snap_hr_data = _hr_read_on_socket(s, _inverter_slave, 20, 97)
+                        _snap_hr_data = _hr_read_on_socket(s, _inverter_slave, 20, 97, timeout=7.5)
                     except Exception as exc:
                         log.warning("Listen-socket snapshot failed: %s", exc)
                         _snap_hr_data = None
@@ -2396,9 +2396,10 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
 
 
-_HR_ON_SOCKET_CHUNK = 60   # Gen1 firmware caps HR reads at ~60 registers (same as IR limit).
-                           # Larger requests return a Modbus exception that we'd silently
-                           # discard, causing a timeout.  Split automatically above this size.
+_HR_ON_SOCKET_CHUNK = 24   # Gen1 firmware rejects HR reads larger than ~22 registers on the
+                           # listen socket (the in-socket detect reads exactly 22 and works;
+                           # 60 times out).  24 is just above the proven-safe value, giving
+                           # a useful error message if the limit turns out to be exactly 22.
 
 def _hr_read_on_socket(s, slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     """Like _hr_read but uses an already-open socket rather than creating a new
