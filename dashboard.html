@@ -2147,12 +2147,57 @@ function _renderSlots(type, slots, profile) {
   });
 }
 
+// ── Slot overlap detection ────────────────────────────────────────────────────
+function _slotMins(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function _slotsOverlap(as, ae, bs, be) {
+  // Empty slot (start == end) never overlaps
+  if (as === ae || bs === be) return false;
+  // Treat 00:00 end as midnight (1440) so 22:00-00:00 works correctly
+  const ae2 = ae === 0 ? 1440 : ae;
+  const be2 = be === 0 ? 1440 : be;
+  return as < be2 && ae2 > bs;
+}
+
+function _collectSlots(pfx) {
+  const result = [];
+  document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`).forEach(el => {
+    const n   = parseInt(el.id.replace(pfx, '').replace('-start', ''));
+    const end = document.getElementById(`${pfx}${n}-end`);
+    if (el.value && end && end.value) result.push({ n, start: el.value, end: end.value });
+  });
+  return result;
+}
+
+function _overlapWarning(slots) {
+  const msgs = [];
+  for (let i = 0; i < slots.length; i++) {
+    for (let j = i + 1; j < slots.length; j++) {
+      const a = slots[i], b = slots[j];
+      if (_slotsOverlap(_slotMins(a.start), _slotMins(a.end),
+                        _slotMins(b.start), _slotMins(b.end))) {
+        msgs.push(`slot ${a.n} (${a.start}-${a.end}) overlaps slot ${b.n} (${b.start}-${b.end})`);
+      }
+    }
+  }
+  return msgs;
+}
+
 // Set a single slot's start+end time and confirm with the user first
 async function ctrlSetOneSlot(type, n) {
   const pfx   = type === 'charge' ? 'cs' : 'ds';
   const start = $(pfx + n + '-start').value;
   const end   = $(pfx + n + '-end').value;
   if (!start || !end) { _ctrlMsg('Enter both start and end times first', false); return; }
+  const allSlots = _collectSlots(pfx);
+  const overlaps = _overlapWarning(allSlots);
+  if (overlaps.length) {
+    _ctrlMsg('Overlapping slots -- ' + overlaps.join('; ') + '. Adjust the times before saving.', false);
+    return;
+  }
   // Clear dirty flags now so _renderSlots restores API values after the write confirms
   $(pfx + n + '-start').removeAttribute('data-dirty');
   $(pfx + n + '-end').removeAttribute('data-dirty');
@@ -2163,17 +2208,18 @@ async function ctrlSetOneSlot(type, n) {
 // Save all slots in one pass -- silent writes, single state refresh at the end
 async function ctrlSaveSlots(type) {
   const pfx   = type === 'charge' ? 'cs' : 'ds';
-  const slots = document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`);
+  const allSlots = _collectSlots(pfx);
+  const overlaps = _overlapWarning(allSlots);
+  if (overlaps.length) {
+    _ctrlMsg('Overlapping slots -- ' + overlaps.join('; ') + '. Adjust the times before saving.', false);
+    return;
+  }
   let anyWritten = false;
-  for (const startEl of slots) {
-    const n   = startEl.id.replace(`${pfx}`, '').replace('-start', '');
-    const end = $(pfx + n + '-end');
-    if (startEl.value && end && end.value) {
-      startEl.removeAttribute('data-dirty');
-      end.removeAttribute('data-dirty');
-      await ctrlCmd(`set_${type}_slot`, { slot: parseInt(n), start: startEl.value, end: end.value }, { silent: true });
-      anyWritten = true;
-    }
+  for (const s of allSlots) {
+    $(pfx + s.n + '-start').removeAttribute('data-dirty');
+    $(pfx + s.n + '-end').removeAttribute('data-dirty');
+    await ctrlCmd(`set_${type}_slot`, { slot: s.n, start: s.start, end: s.end }, { silent: true });
+    anyWritten = true;
   }
   if (anyWritten) await loadControlState();
 }
