@@ -1296,6 +1296,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <input type="range" id="se-pct" min="0" max="100" value="100" data-reg="50"
           oninput="_sePctInput()">
       </div>
+      <div id="se-msg" style="font-size:.8rem;min-height:1.2em;text-align:center"></div>
       <div id="se-btn-row">
         <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
         <button class="se-btn" id="se-cancel" onclick="closeEditor()">Cancel</button>
@@ -1863,9 +1864,9 @@ async function _runQuickAction(type, isActive) {
       body: JSON.stringify({ action: type, start: !isActive })
     });
     const res = await r.json();
-    if (!res.ok) alert(res.error || 'Request failed');
+    if (!res.ok) _showAlert(res.error || 'Request failed');
     else poll();
-  } catch(e) { alert('Network error'); }
+  } catch(e) { _showAlert('Network error'); }
   finally { _qaInFlight = false; }
 }
 
@@ -2227,10 +2228,26 @@ async function ctrlSaveSlots(type) {
 // ── Control confirmation modal ────────────────────────────────────────────────
 let _confirmFn = null;
 
+function _modalReset() {
+  $('cc-title').textContent   = 'Confirm';
+  $('cc-cancel').style.display = '';
+  $('cc-confirm').textContent  = 'Confirm';
+}
 function _showConfirm(label, fn) {
   _confirmFn = fn;
   $('cc-desc').textContent = label;
   $('ctrl-confirm').classList.add('open');
+}
+function _showAlert(msg) {
+  $('cc-title').textContent    = '';
+  $('cc-cancel').style.display = 'none';
+  $('cc-confirm').textContent  = 'OK';
+  _showConfirm(msg, () => {});
+}
+function _seMsg(txt, ok) {
+  const el = $('se-msg');
+  el.style.color   = ok ? '#4ade80' : '#f87171';
+  el.textContent   = txt;
 }
 function ctrlConfirmCmd(label, cmd, params) {
   _showConfirm(label, () => ctrlCmd(cmd, params || {}));
@@ -2246,15 +2263,18 @@ function ctrlConfirmSlots(label, type) {
 }
 $('cc-confirm').addEventListener('click', () => {
   $('ctrl-confirm').classList.remove('open');
+  _modalReset();
   if (_confirmFn) { const f = _confirmFn; _confirmFn = null; f(); }
 });
 $('cc-cancel').addEventListener('click', () => {
   $('ctrl-confirm').classList.remove('open');
+  _modalReset();
   _confirmFn = null;
 });
 $('ctrl-confirm').addEventListener('click', e => {
   if (e.target === $('ctrl-confirm')) {
     $('ctrl-confirm').classList.remove('open');
+    _modalReset();
     _confirmFn = null;
   }
 });
@@ -2602,13 +2622,14 @@ function openEditor(id) {
   $('se-pct').dataset.reg = pct;   // store register value; seActionChanged converts to display
   _buildDayChips(rl ? rl.days_mask : 127);
   seActionChanged();               // configures slider range + display from data-reg
+  $('se-msg').textContent = '';
   $('sched-editor').classList.add('open');
 }
 function closeEditor() { $('sched-editor').classList.remove('open'); }
 
 async function saveRule() {
   const mask = _collectDaysMask();
-  if (!mask) { alert('Pick at least one day.'); return; }
+  if (!mask) { _seMsg('Pick at least one day.', false); return; }
   const body = {
     action:     $('se-action').value,
     start:      $('se-start').value,
@@ -2625,17 +2646,18 @@ async function saveRule() {
   }
   const r = await fetch('/api/schedules', { method:'POST', headers:_schedHeaders(), body:JSON.stringify(body) });
   const d = await r.json();
-  if (!d.ok) { alert(d.error || 'Could not save rule.'); return; }
+  if (!d.ok) { _seMsg(d.error || 'Could not save rule.', false); return; }
   closeEditor();
   loadSchedules();
 }
 
 async function deleteRule() {
   if (_editingId == null) return;
-  if (!confirm('Delete this rule?')) return;
-  await fetch('/api/schedules/' + _editingId, { method:'DELETE', headers:{'X-Admin-Password':_adminPw} });
-  closeEditor();
-  loadSchedules();
+  _showConfirm('Delete this rule?', async () => {
+    await fetch('/api/schedules/' + _editingId, { method:'DELETE', headers:{'X-Admin-Password':_adminPw} });
+    closeEditor();
+    loadSchedules();
+  });
 }
 
 async function toggleRule(id, enabled) {
@@ -2699,15 +2721,16 @@ async function restoreBackup() {
   const msg = $('s-bkmsg');
   const file = $('s-bkfile').files[0];
   if (!file) { msg.style.color='#f87171'; msg.textContent='Choose a backup file first'; return; }
-  if (!confirm('Restore will REPLACE all current history with the chosen file, and the dashboard must be restarted. Continue?')) return;
-  msg.style.color='var(--muted)'; msg.textContent='Uploading…';
-  try {
-    const fd = new FormData(); fd.append('file', file);
-    const r = await fetch('/api/backup/import', { method:'POST', headers:{'X-Admin-Password':_adminPw}, body:fd });
-    const res = await r.json();
-    if (res.ok) { msg.style.color='#4ade80'; msg.textContent='✓ '+res.message; }
-    else { msg.style.color='#f87171'; msg.textContent='✗ '+(res.error||'failed'); }
-  } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+  _showConfirm('Restore will replace all current history with the chosen file. The dashboard must be restarted to complete the restore. Continue?', async () => {
+    msg.style.color='var(--muted)'; msg.textContent='Uploading…';
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch('/api/backup/import', { method:'POST', headers:{'X-Admin-Password':_adminPw}, body:fd });
+      const res = await r.json();
+      if (res.ok) { msg.style.color='#4ade80'; msg.textContent='✓ '+res.message; }
+      else { msg.style.color='#f87171'; msg.textContent='✗ '+(res.error||'failed'); }
+    } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+  });
 }
 
 // Password modal
@@ -2759,7 +2782,7 @@ function _markTariffDirty() { _tariffDirty = true; }
 
 function _confirmLeave(dirty, action) {
   if (!dirty) { action(); return; }
-  if (confirm('You have unsaved changes. Leave without saving?')) action();
+  _showConfirm('You have unsaved changes. Leave without saving?', action);
 }
 
 $('sett-back').addEventListener('click', () => {
@@ -3073,29 +3096,32 @@ async function saveTariff() {
   if (!_AUTO_EXPORT_SOURCES.has(src) && body.export_rate_p === 0)
     missing.push('Export rate (p/kWh) — not auto-fetched for this tariff');
 
-  if (missing.length > 0) {
-    const msg = 'The following rates are set to 0 and will not be populated automatically:\n\n'
-      + missing.map(m => '  • ' + m).join('\n')
-      + '\n\nExport earnings and/or cost calculations will be inaccurate until these are set.'
-      + '\n\nSave anyway?';
-    if (!confirm(msg)) return;
-  }
-
-  try {
-    const r   = await fetch('/api/tariff', { method:'POST', headers:_settHeaders(), body:JSON.stringify(body) });
-    if (r.status === 401) { $('tariff-msg').style.color='#f87171'; $('tariff-msg').textContent='Session expired — re-enter password'; return; }
-    const res = await r.json();
-    if (res.ok) {
-      $('tariff-msg').style.color = '#4ade80';
-      $('tariff-msg').textContent = '✓ Saved';
-      _tariffDirty = false;
-    } else {
+  const _doSaveTariff = async () => {
+    try {
+      const r   = await fetch('/api/tariff', { method:'POST', headers:_settHeaders(), body:JSON.stringify(body) });
+      if (r.status === 401) { $('tariff-msg').style.color='#f87171'; $('tariff-msg').textContent='Session expired -- re-enter password'; return; }
+      const res = await r.json();
+      if (res.ok) {
+        $('tariff-msg').style.color = '#4ade80';
+        $('tariff-msg').textContent = '✓ Saved';
+        _tariffDirty = false;
+      } else {
+        $('tariff-msg').style.color = '#f87171';
+        $('tariff-msg').textContent = '✗ ' + (res.error || 'Save failed');
+      }
+    } catch(e) {
       $('tariff-msg').style.color = '#f87171';
-      $('tariff-msg').textContent = '✗ ' + (res.error || 'Save failed');
+      $('tariff-msg').textContent = 'Save failed';
     }
-  } catch(e) {
-    $('tariff-msg').style.color = '#f87171';
-    $('tariff-msg').textContent = 'Save failed';
+  };
+
+  if (missing.length > 0) {
+    _showConfirm('These rates are set to 0 and will not auto-fetch: '
+      + missing.join('; ')
+      + '. Earnings and cost calculations will be inaccurate. Save anyway?',
+      _doSaveTariff);
+  } else {
+    _doSaveTariff();
   }
 }
 
@@ -3114,22 +3140,23 @@ document.querySelectorAll('#tariff-body > .sett-section input').forEach(el => {
 async function syncInverterClock() {
   const now = new Date();
   const ts = now.toLocaleTimeString('en-GB') + ' ' + now.toLocaleDateString('en-GB');
-  if (!confirm('Set inverter clock to ' + ts + '?')) return;
-  $('sync-clock-msg').style.color = 'var(--muted)';
-  $('sync-clock-msg').textContent = 'Syncing…';
-  try {
-    const r = await fetch('/api/control', {
-      method: 'POST',
-      headers: _ctrlHeaders(),
-      body: JSON.stringify({ command: 'sync_time', params: {} })
-    });
-    const res = await r.json();
-    $('sync-clock-msg').style.color = res.ok ? '#4ade80' : '#f87171';
-    $('sync-clock-msg').textContent = res.ok ? '✓ ' + res.message : '✗ ' + res.message;
-  } catch(e) {
-    $('sync-clock-msg').style.color = '#f87171';
-    $('sync-clock-msg').textContent = '✗ ' + e.message;
-  }
+  _showConfirm('Set inverter clock to ' + ts + '?', async () => {
+    $('sync-clock-msg').style.color = 'var(--muted)';
+    $('sync-clock-msg').textContent = 'Syncing…';
+    try {
+      const r = await fetch('/api/control', {
+        method: 'POST',
+        headers: _ctrlHeaders(),
+        body: JSON.stringify({ command: 'sync_time', params: {} })
+      });
+      const res = await r.json();
+      $('sync-clock-msg').style.color = res.ok ? '#4ade80' : '#f87171';
+      $('sync-clock-msg').textContent = res.ok ? '✓ ' + res.message : '✗ ' + res.message;
+    } catch(e) {
+      $('sync-clock-msg').style.color = '#f87171';
+      $('sync-clock-msg').textContent = '✗ ' + e.message;
+    }
+  });
 }
 
 async function lookupPostcode() {
