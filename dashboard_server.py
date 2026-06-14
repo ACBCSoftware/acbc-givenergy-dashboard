@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import logging
+import re
 import shutil
 import socket
 import sqlite3
@@ -218,6 +219,11 @@ _MIRROR_EXPORT_SOURCES = frozenset({"octopus_intelligent_flux"})
 _OCTOPUS_BASE          = "https://api.octopus.energy/v1"
 _EDF_BASE              = "https://api.edfgb-kraken.energy/v1"
 _VARIABLE_RATE_SOURCES = frozenset({"octopus_agile", "edf_freephase"})
+_TARIFF_SOURCES = frozenset({
+    "manual", "octopus_agile", "octopus_tracker", "octopus_cosy",
+    "octopus_go", "octopus_flux", "octopus_intelligent_flux",
+    "octopus_flexible", "edf_freephase",
+})
 _fetch_lock            = threading.Lock()
 _fetch_status: dict    = {"ok": None, "msg": "Never fetched", "fetched_at": "",
                            "slots_today": 0, "slots_tomorrow": 0}
@@ -2185,6 +2191,17 @@ def _run_listen(st: dict):
                 _maybe_solar_forecast()
                 _maybe_check_update()
                 _maybe_quick_action_tick()
+                # Service any pending snapshot request from the QA thread.
+                # Must run on this thread (socket owner) to avoid concurrent access.
+                if _snap_req.is_set() and _inverter_slave:
+                    global _snap_hr_data
+                    _snap_req.clear()
+                    try:
+                        _snap_hr_data = _hr_read_on_socket(s, _inverter_slave, 20, 97)
+                    except Exception as exc:
+                        log.warning("Listen-socket snapshot failed: %s", exc)
+                        _snap_hr_data = None
+                    _snap_done.set()
                 # Offline watchdog: no decodable frame for 30s.
                 # We poke every 10s so frames should arrive every ~10s.
                 # 30s = 3x poke interval -- enough margin, fast enough recovery.
@@ -2332,6 +2349,46 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     finally:
         s.close()
     raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
+
+
+def _hr_read_on_socket(s, slave: int, base: int, count: int, timeout: float = 5.0) -> list:
+    """Like _hr_read but uses an already-open socket rather than creating a new
+    connection.  Called by the listen loop to service snapshot requests from the
+    QA thread -- Gen2 dongles are single-client and ignore reads on a 2nd conn."""
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, 0x03]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
+    crc     = _crc16(inner)
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+    orig_timeout = s.gettimeout()
+    s.settimeout(1.0)
+    try:
+        s.sendall(frame)
+        buf = bytearray()
+        t0  = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for f in _pop_data_frames(buf):
+                if len(f) < 44 or f[7] != 0x02 or f[27] != 0x03:
+                    continue
+                rx_base  = (f[38] << 8) | f[39]
+                rx_count = (f[40] << 8) | f[41]
+                if rx_base != base or rx_count != count:
+                    continue
+                if len(f) < 42 + count * 2:
+                    continue
+                return [(f[42 + i*2] << 8) | f[43 + i*2] for i in range(count)]
+    finally:
+        s.settimeout(orig_timeout)
+    raise TimeoutError(f"HR read timeout (on-socket): slave=0x{slave:02x} base={base} count={count}")
 
 
 _DONGLE_BUSY_CODE  = 0x43  # GivEnergy Modbus exception: dongle handling another request
@@ -3158,6 +3215,13 @@ _quick_discharge_until = 0.0
 # Used by _quick_action_revert() to restore the user's pre-action state.
 _quick_action_snapshot: dict = {}   # {HR_number: value, ...}
 
+# Inter-thread snapshot request: QA flask thread posts the request;
+# _run_listen() services it on the existing socket (avoids opening a 2nd
+# connection which Gen2 dongles -- single-client -- ignore).
+_snap_req       = threading.Event()       # QA thread sets to request a read
+_snap_done      = threading.Event()       # listen loop sets when complete
+_snap_hr_data: list | None = None        # result written by listen loop
+
 
 def _sched_task_active() -> bool:
     """True when the scheduler has a live charge or export task applied."""
@@ -3265,20 +3329,33 @@ def _quick_action_do(action: str):
     # Abort if the read fails -- proceeding with fallback values would silently restore
     # wrong defaults (e.g. ENABLE_CHARGE=0, BATTERY_SOC_RESERVE=4) instead of the
     # user's actual pre-action settings.
-    _SNAP_ATTEMPTS = 3
+    #
+    # Gen2 dongles are single-client: opening a second TCP connection to read the
+    # snapshot causes timeouts. In listen mode we post the request to the listen
+    # loop thread which services it on the existing socket (_snap_req / _snap_done).
     snap_raw = None
-    for _attempt in range(_SNAP_ATTEMPTS):
-        try:
-            snap_raw = _hr_read(slave, 20, 97, timeout=3.0)   # HR 20-116
-            break
-        except Exception as exc:
-            if _attempt < _SNAP_ATTEMPTS - 1:
-                log.warning("Quick action: snapshot attempt %d/%d failed (%s) - retrying",
-                            _attempt + 1, _SNAP_ATTEMPTS, exc)
-                time.sleep(0.5)
-            else:
-                log.warning("Quick action: snapshot failed after %d attempts (%s) - aborting",
-                            _SNAP_ATTEMPTS, exc)
+    if _active_mode == "listen":
+        _snap_done.clear()
+        _snap_hr_data_local = None
+        _snap_req.set()
+        if _snap_done.wait(timeout=8.0):
+            snap_raw = _snap_hr_data   # written by listen loop before setting _snap_done
+        if snap_raw is None:
+            log.warning("Quick action: listen-socket snapshot failed - aborting")
+    else:
+        _SNAP_ATTEMPTS = 3
+        for _attempt in range(_SNAP_ATTEMPTS):
+            try:
+                snap_raw = _hr_read(slave, 20, 97, timeout=3.0)   # HR 20-116
+                break
+            except Exception as exc:
+                if _attempt < _SNAP_ATTEMPTS - 1:
+                    log.warning("Quick action: snapshot attempt %d/%d failed (%s) - retrying",
+                                _attempt + 1, _SNAP_ATTEMPTS, exc)
+                    time.sleep(0.5)
+                else:
+                    log.warning("Quick action: snapshot failed after %d attempts (%s) - aborting",
+                                _SNAP_ATTEMPTS, exc)
 
     if snap_raw is None:
         raise RuntimeError("Could not read inverter state -- please try again in a moment")
@@ -3647,6 +3724,8 @@ def post_control():
     data    = request.get_json(force=True) or {}
     command = data.get("command", "")
     params  = data.get("params", {})
+    if not isinstance(params, dict):
+        return jsonify({"ok": False, "error": "params must be an object"}), 400
     return jsonify(_execute_control(command, params))
 
 # ── Scheduler API (app-held 48-block engine — see BACKLOG.md) ─────────────────
@@ -4096,6 +4175,23 @@ def save_settings():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
 
     data = request.get_json(force=True) or {}
+
+    # -- input validation --
+    if "inverter_ip" in data:
+        ip = str(data["inverter_ip"]).strip()
+        if not ip or len(ip) > 253 or not re.match(r'^[a-zA-Z0-9._:\[\]-]+$', ip):
+            return jsonify({"ok": False, "error": "Invalid inverter IP/hostname"}), 400
+    if "new_password" in data and len(str(data["new_password"])) > 128:
+        return jsonify({"ok": False, "error": "Password too long (max 128 characters)"}), 400
+    if "weather_api_key" in data and len(str(data["weather_api_key"])) > 256:
+        return jsonify({"ok": False, "error": "API key too long"}), 400
+    if "weather_postcode" in data and len(str(data["weather_postcode"])) > 10:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if "sf_postcode" in data and len(str(data["sf_postcode"])) > 10:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if "sf_api_key" in data and len(str(data["sf_api_key"])) > 256:
+        return jsonify({"ok": False, "error": "API key too long"}), 400
+
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
 
@@ -4244,6 +4340,21 @@ def save_tariff():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
+
+    # -- input validation --
+    if "tariff_source" in data and str(data["tariff_source"]) not in _TARIFF_SOURCES:
+        return jsonify({"ok": False, "error": "Unknown tariff source"}), 400
+    if "octopus_region" in data:
+        rgn = str(data["octopus_region"]).upper().strip()
+        if rgn and not re.match(r'^[A-P]$', rgn):
+            return jsonify({"ok": False, "error": "Region must be a single letter A-P"}), 400
+    if "octopus_postcode" in data and len(str(data["octopus_postcode"])) > 8:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if isinstance(data.get("tou_windows"), list):
+        for w in data["tou_windows"][:3]:
+            if len(str(w.get("name", "")).strip()) > 40:
+                return jsonify({"ok": False, "error": "TOU window name too long (max 40 characters)"}), 400
+
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("tariff"):
@@ -4365,6 +4476,8 @@ def tariff_lookup_region():
     postcode = data.get("postcode", "").strip()
     if not postcode:
         return jsonify({"ok": False, "error": "Postcode required"}), 400
+    if len(postcode) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     try:
         region = _lookup_region(postcode)
         if region:
@@ -4483,6 +4596,8 @@ def weather_lookup_postcode():
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    if len(raw) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     # Step 1: postcode → lat/lng via postcodes.io (free, no auth)
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
@@ -4523,6 +4638,8 @@ def sf_lookup_postcode():
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    if len(raw) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -4783,8 +4900,19 @@ def icons(filename):
     return send_from_directory(str(Path(__file__).parent / "icons"), filename)
 
 @app.after_request
-def cors(response):
+def add_security_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    if "text/html" in response.content_type:
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "connect-src 'self'"
+        )
     return response
 
 

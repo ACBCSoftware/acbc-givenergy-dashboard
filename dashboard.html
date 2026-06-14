@@ -2250,7 +2250,7 @@ function openBattModal() {
     .then(data => {
       if (!data.ok) {
         $('bdd-body').innerHTML =
-          `<div class="bdd-spinner" style="color:var(--muted)">${data.error || 'Read failed'}</div>`;
+          `<div class="bdd-spinner" style="color:var(--muted)">${_esc(data.error || 'Read failed')}</div>`;
         return;
       }
       _battModules = data.modules || [];
@@ -2911,7 +2911,7 @@ function touAddWindow(w) {
   div.innerHTML = `
     <button class="tou-remove" title="Remove" onclick="touRemoveWindow(this)">&#10005;</button>
     <div class="sett-heading" style="font-size:.68rem">Window ${idx}</div>
-    <div class="sett-row"><label>Name</label><input class="tou-name" type="text" placeholder="e.g. Off-peak" value="${(w&&w.name)||''}"></div>
+    <div class="sett-row"><label>Name</label><input class="tou-name" type="text" placeholder="e.g. Off-peak" value="${_esc((w&&w.name)||'')}"></div>
     <div class="sett-row"><label>Start</label><input class="tou-start" type="time" value="${(w&&w.start)||''}"></div>
     <div class="sett-row"><label>End</label><input class="tou-end"   type="time" value="${(w&&w.end)||''}"></div>
     <div class="sett-row"><label>Import rate (p/kWh)</label><input class="tou-rate"        type="number" min="0" step="0.01" placeholder="e.g. 7.50" value="${(w&&w.rate_p!=null)?w.rate_p:''}"></div>
