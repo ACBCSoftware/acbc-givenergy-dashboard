@@ -190,6 +190,10 @@ select optgroup{background:#172035;color:#7fa8cc}
   font-family:inherit;cursor:pointer;padding:0;
 }
 .slot-box .slot-time:focus{color:var(--amber)}
+.slot-entry{display:contents}
+.slot-hidden{display:none!important}
+.slot-vis-ctrl{display:flex;align-items:center;gap:6px;margin:4px 0 2px;font-size:.78rem;color:var(--muted)}
+.slot-vis-ctrl button{background:none;border:1px solid var(--border);color:var(--text);border-radius:4px;width:22px;height:22px;cursor:pointer;font-size:.9rem;line-height:1;padding:0}
 /* Status message */
 #ctrl-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px;padding:0 4px}
 
@@ -2071,6 +2075,7 @@ async function ctrlApply(command, sliderId) {
 // The API always returns charge_limit/discharge_limit as 0-100 (all profiles).
 // In watts mode the slider runs 0 -> max watts and we convert to/from percent.
 let _ctrlPower = { units:'percent', maxChg:2600, maxDis:2600 };
+let _slotVisible = parseInt(localStorage.getItem('slotVisible') || '1');
 
 function _limitMax(type){ return type === 'charge' ? _ctrlPower.maxChg : _ctrlPower.maxDis; }
 
@@ -2119,10 +2124,20 @@ function _renderSlots(type, slots, profile) {
     dirty[el.id] = el.value;
   });
 
-  let html = '<div class="slot-grid">';
+  let html = '';
+  if (extended && slots.length > 1) {
+    const cid = type + '-vis-count';
+    html += `<div class="slot-vis-ctrl">
+      <button onclick="_setSlotVisible(_slotVisible-1)" title="Show fewer slots">&#8722;</button>
+      <span>Showing <span id="${cid}">${_slotVisible}</span> of ${slots.length} slots</span>
+      <button onclick="_setSlotVisible(_slotVisible+1)" title="Show more slots">+</button>
+    </div>`;
+  }
+  html += '<div class="slot-grid">';
   slots.forEach((slot, i) => {
     const n   = i + 1;
     const pfx = type === 'charge' ? 'cs' : 'ds';
+    html += `<div class="slot-entry" data-slot="${n}" data-type="${type}">`;
     html += `
     <div class="slot-box">
       <label>Slot ${n} start</label>
@@ -2148,6 +2163,7 @@ function _renderSlots(type, slots, profile) {
         </div>
       </div>`;
     }
+    html += '</div>'; // end slot-entry
   });
   html += '</div>';
   container.innerHTML = html;
@@ -2161,6 +2177,31 @@ function _renderSlots(type, slots, profile) {
   // Track future edits so we can preserve them across the next refresh
   container.querySelectorAll('.slot-time').forEach(el => {
     el.addEventListener('input', () => { el.dataset.dirty = '1'; });
+  });
+
+  if (extended) _applySlotVisibility(type);
+}
+
+function _setSlotVisible(n) {
+  _slotVisible = Math.max(1, Math.min(10, n));
+  localStorage.setItem('slotVisible', _slotVisible);
+  ['charge', 'discharge'].forEach(_applySlotVisibility);
+  ['charge-vis-count', 'discharge-vis-count'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = _slotVisible;
+  });
+}
+
+function _applySlotVisibility(type) {
+  const pfx = type === 'charge' ? 'cs' : 'ds';
+  const container = $(type === 'charge' ? 'charge-slots-container' : 'discharge-slots-container');
+  if (!container) return;
+  container.querySelectorAll('.slot-entry').forEach(entry => {
+    const n        = parseInt(entry.dataset.slot);
+    const start    = document.getElementById(`${pfx}${n}-start`);
+    const end      = document.getElementById(`${pfx}${n}-end`);
+    const hasValue = start && end && (start.value || end.value);
+    entry.classList.toggle('slot-hidden', n > _slotVisible && !hasValue);
   });
 }
 

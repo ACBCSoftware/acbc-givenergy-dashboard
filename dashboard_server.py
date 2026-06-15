@@ -2286,7 +2286,11 @@ def _run_listen(st: dict):
                             pass
                         try:
                             time.sleep(0.5)
-                            _snap_hr_data = _hr_read(_inverter_slave, 20, 97, timeout=5.0)
+                            # Gen1 rejects count>60 via fresh TCP (same limit as control page).
+                            # Two reads of ≤60 each cover HR 20-116.
+                            _p1 = _hr_read(_inverter_slave, 20, 60, timeout=5.0)
+                            _p2 = _hr_read(_inverter_slave, 80, 37, timeout=5.0)
+                            _snap_hr_data = _p1 + _p2
                             log.info("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
                         except Exception as exc2:
                             log.warning("Snapshot poll fallback failed: %s", exc2)
@@ -3472,7 +3476,7 @@ def _quick_action_do(action: str):
         _snap_done.clear()
         _snap_hr_data_local = None
         _snap_req.set()
-        if _snap_done.wait(timeout=8.0):
+        if _snap_done.wait(timeout=25.0):
             snap_raw = _snap_hr_data   # written by listen loop before setting _snap_done
         if snap_raw is None:
             log.warning("Quick action: listen-socket snapshot failed - aborting")
