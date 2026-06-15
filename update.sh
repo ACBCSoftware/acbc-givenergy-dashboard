@@ -53,7 +53,7 @@ info "Backed up config.ini + history.db to $BACKUP"
 # ── 3. Copy ONLY the application files ─────────────────────────────────────────
 #  config.ini and history.db are deliberately NOT in this list — they are
 #  never overwritten, so your settings and history are kept intact.
-APP_FILES="dashboard_server.py dashboard.html manifest.json sw.js \
+APP_FILES="VERSION dashboard_server.py dashboard.html manifest.json sw.js \
            generate_icons.py start_dashboard.bat stop_dashboard.bat \
            README.md setup.sh update.sh installer.iss config.ini.example"
 

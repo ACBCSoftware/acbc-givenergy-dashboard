@@ -250,6 +250,8 @@ Filename: "{cmd}"; \
 Type: filesandordirs; Name: "{app}\venv"
 Type: filesandordirs; Name: "{app}\icons"
 Type: filesandordirs; Name: "{app}\__pycache__"
+Type: files; Name: "{app}\dashboard.log"
+Type: files; Name: "{app}\dashboard.log.*"
 
 [Icons]
 ; Start Menu

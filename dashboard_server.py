@@ -11,6 +11,9 @@ import hashlib
 import io
 import json
 import logging
+import logging.handlers
+import re
+import secrets
 import shutil
 import socket
 import sqlite3
@@ -128,6 +131,33 @@ QUICK_CHARGE_TARGET_SOC    = max(4, min(100, _cfg.getint("quick_actions", "charg
 _DEFAULT_HASH = hashlib.sha256(b"password").hexdigest()
 ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
+LOG_LEVEL          = _cfg.get("logging", "log_level",           fallback="warning").strip().lower()
+LOG_RETENTION_DAYS = _cfg.getint("logging", "log_retention_days", fallback=7)
+
+_SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
+
+def _hash_password(pw: str) -> str:
+    """Hash a plaintext password with scrypt + random salt.
+    Returns a self-describing string: scrypt:N:r:p:<salt_hex>:<hash_hex>
+    """
+    salt = secrets.token_bytes(16)
+    h = hashlib.scrypt(pw.encode(), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=32)
+    return f"scrypt:{_SCRYPT_N}:{_SCRYPT_R}:{_SCRYPT_P}:{salt.hex()}:{h.hex()}"
+
+def _verify_password(pw: str, stored: str) -> bool:
+    """Verify a plaintext password against a stored hash.
+    Supports both legacy SHA-256 (no prefix) and scrypt (scrypt: prefix).
+    """
+    if stored.startswith("scrypt:"):
+        try:
+            _, n, r, p, salt_hex, hash_hex = stored.split(":")
+            h = hashlib.scrypt(pw.encode(), salt=bytes.fromhex(salt_hex),
+                               n=int(n), r=int(r), p=int(p), dklen=32)
+            return h.hex() == hash_hex
+        except Exception:
+            return False
+    return hashlib.sha256(pw.encode()).hexdigest() == stored
+
 _COLOUR_DEFAULTS: dict[str, str] = {
     "solar":    "#f59e0b",
     "home":     "#38bdf8",
@@ -156,9 +186,29 @@ def _valid_hex(v: str) -> bool:
 def _authorised():
     """Check X-Admin-Password header against stored hash.
     Used for Settings and other config endpoints, which ALWAYS require the
-    password regardless of REQUIRE_AUTH."""
+    password regardless of REQUIRE_AUTH.
+    On successful login against a legacy SHA-256 hash, silently upgrades
+    to scrypt in config.ini.
+    """
+    global ADMIN_HASH
     pw = request.headers.get("X-Admin-Password", "")
-    return hashlib.sha256(pw.encode()).hexdigest() == ADMIN_HASH
+    if not _verify_password(pw, ADMIN_HASH):
+        return False
+    if not ADMIN_HASH.startswith("scrypt:"):
+        try:
+            ADMIN_HASH = _hash_password(pw)
+            cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+            _config_path = Path(__file__).parent / "config.ini"
+            cfg.read(_config_path)
+            if not cfg.has_section("admin"):
+                cfg.add_section("admin")
+            cfg.set("admin", "password_hash", ADMIN_HASH)
+            with open(_config_path, "w") as f:
+                cfg.write(f)
+            log.info("Password hash upgraded from SHA-256 to scrypt")
+        except Exception as exc:
+            log.warning("Could not upgrade password hash: %s", exc)
+    return True
 
 def _action_authorised():
     """Auth gate for control/action endpoints (control, scheduler, quick
@@ -218,6 +268,11 @@ _MIRROR_EXPORT_SOURCES = frozenset({"octopus_intelligent_flux"})
 _OCTOPUS_BASE          = "https://api.octopus.energy/v1"
 _EDF_BASE              = "https://api.edfgb-kraken.energy/v1"
 _VARIABLE_RATE_SOURCES = frozenset({"octopus_agile", "edf_freephase"})
+_TARIFF_SOURCES = frozenset({
+    "manual", "octopus_agile", "octopus_tracker", "octopus_cosy",
+    "octopus_go", "octopus_flux", "octopus_intelligent_flux",
+    "octopus_flexible", "edf_freephase",
+})
 _fetch_lock            = threading.Lock()
 _fetch_status: dict    = {"ok": None, "msg": "Never fetched", "fetched_at": "",
                            "slots_today": 0, "slots_tomorrow": 0}
@@ -945,8 +1000,27 @@ def _apply_pending_import():
     except Exception as exc:
         log.error("Failed to apply pending import: %s", exc)
 
-logging.basicConfig(level=logging.WARNING)
+_LOG_LEVELS    = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
+_log_level_int = _LOG_LEVELS.get(LOG_LEVEL, logging.WARNING)
+logging.basicConfig(
+    level=_log_level_int,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 log = logging.getLogger("dashboard")
+
+_log_file_handler = None
+_LOG_PATH = Path(__file__).parent / "dashboard.log"
+try:
+    _log_file_handler = logging.handlers.TimedRotatingFileHandler(
+        _LOG_PATH, when="midnight", backupCount=LOG_RETENTION_DAYS, encoding="utf-8"
+    )
+    _log_file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logging.getLogger().addHandler(_log_file_handler)
+except Exception as _log_err:
+    print(f"[WARNING] Could not open log file {_LOG_PATH}: {_log_err}")
 
 # The givenergy-modbus library logs a multi-line traceback on every transient
 # read failure (very common on Modbus TCP). These are harmless blips that we
@@ -954,6 +1028,14 @@ log = logging.getLogger("dashboard")
 logging.getLogger("givenergy_modbus").setLevel(logging.CRITICAL)
 # pymodbus (the transport underneath) can be chatty too.
 logging.getLogger("pymodbus").setLevel(logging.CRITICAL)
+
+
+def _set_log_level(level_name: str) -> None:
+    """Change log verbosity at runtime without restarting."""
+    global LOG_LEVEL
+    lvl = _LOG_LEVELS.get(level_name.lower(), logging.WARNING)
+    logging.getLogger().setLevel(lvl)
+    LOG_LEVEL = level_name.lower()
 
 # ── Database ───────────────────────────────────────────────────────────────────
 def _db():
@@ -2185,6 +2267,37 @@ def _run_listen(st: dict):
                 _maybe_solar_forecast()
                 _maybe_check_update()
                 _maybe_quick_action_tick()
+                # Service any pending snapshot request from the QA thread.
+                # Must run on this thread (socket owner) to avoid concurrent access.
+                if _snap_req.is_set() and _inverter_slave:
+                    global _snap_hr_data, _snap_poll_reconnect
+                    _snap_req.clear()
+                    try:
+                        _snap_hr_data = _hr_read_on_socket(s, _inverter_slave, 20, 97, timeout=7.5)
+                        _snap_done.set()
+                    except Exception as exc:
+                        log.warning("Listen-socket snapshot failed: %s -- trying poll fallback", exc)
+                        # Gen1 firmware only exposes HR 0-43 on the listen socket.
+                        # Close it, read via a fresh connection, then let the loop reconnect.
+                        _snap_hr_data = None
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                        try:
+                            time.sleep(0.5)
+                            # Gen1 only responds to standard Modbus reads at base=0 and
+                            # base=60 (page-aligned).  Read both pages -- same calls the
+                            # control page makes -- then slice out HR 20-116.
+                            _r0  = _hr_read(_inverter_slave,  0, 60, timeout=5.0)
+                            _r60 = _hr_read(_inverter_slave, 60, 60, timeout=5.0)
+                            _snap_hr_data = (_r0 + _r60)[20:117]
+                            log.info("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
+                        except Exception as exc2:
+                            log.warning("Snapshot poll fallback failed: %s", exc2)
+                        _snap_done.set()
+                        _snap_poll_reconnect = True
+                        raise ConnectionError("reconnect after snapshot poll")
                 # Offline watchdog: no decodable frame for 30s.
                 # We poke every 10s so frames should arrive every ~10s.
                 # 30s = 3x poke interval -- enough margin, fast enough recovery.
@@ -2196,11 +2309,18 @@ def _run_listen(st: dict):
                 _error = msg
                 if _cached:
                     _cached["ok"] = False
-            if not st.get("offline"):
+            if _snap_poll_reconnect:
+                # Intentional disconnect for snapshot poll read -- reconnect quickly,
+                # no fault event (the listen loop will be back within a couple of seconds).
+                _snap_poll_reconnect = False
+                time.sleep(1)
+            elif not st.get("offline"):
                 log.warning("Lost inverter data stream: %s", msg)
                 _log_event("fault", f"Lost connection to inverter: {msg}")
                 st["offline"] = True
-            time.sleep(5)
+                time.sleep(5)
+            else:
+                time.sleep(5)
 
 def _probe_listen() -> bool:
     """Send a poke and see if the inverter emits a decodable input-register
@@ -2332,6 +2452,64 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     finally:
         s.close()
     raise TimeoutError(f"HR read timeout: slave=0x{slave:02x} base={base} count={count}")
+
+
+_HR_ON_SOCKET_CHUNK = 24   # Gen1 firmware rejects HR reads larger than ~22 registers on the
+                           # listen socket (the in-socket detect reads exactly 22 and works;
+                           # 60 times out).  24 is just above the proven-safe value, giving
+                           # a useful error message if the limit turns out to be exactly 22.
+
+def _hr_read_on_socket(s, slave: int, base: int, count: int, timeout: float = 5.0) -> list:
+    """Like _hr_read but uses an already-open socket rather than creating a new
+    connection.  Called by the listen loop to service snapshot requests from the
+    QA thread -- Gen2 dongles are single-client and ignore reads on a 2nd conn.
+    Automatically splits large reads into _HR_ON_SOCKET_CHUNK-register chunks so
+    Gen1 firmware limits do not cause silent timeouts."""
+    if count > _HR_ON_SOCKET_CHUNK:
+        n_chunks = (count + _HR_ON_SOCKET_CHUNK - 1) // _HR_ON_SOCKET_CHUNK
+        chunk_timeout = timeout / n_chunks
+        result = []
+        off = 0
+        while off < count:
+            n = min(_HR_ON_SOCKET_CHUNK, count - off)
+            result.extend(_hr_read_on_socket(s, slave, base + off, n, chunk_timeout))
+            off += n
+        return result
+
+    serial  = b"AB1234G567"
+    padding = b"\x00" * 7 + b"\x08"
+    inner   = bytes([slave, 0x03]) + base.to_bytes(2, "big") + count.to_bytes(2, "big")
+    crc     = _crc16(inner)
+    payload = serial + padding + inner + crc
+    length  = len(payload) + 2
+    frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
+    orig_timeout = s.gettimeout()
+    s.settimeout(1.0)
+    try:
+        s.sendall(frame)
+        buf = bytearray()
+        t0  = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                chunk = s.recv(4096)
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            buf.extend(chunk)
+            for f in _pop_data_frames(buf):
+                if len(f) < 44 or f[7] != 0x02 or f[27] != 0x03:
+                    continue
+                rx_base  = (f[38] << 8) | f[39]
+                rx_count = (f[40] << 8) | f[41]
+                if rx_base != base or rx_count != count:
+                    continue
+                if len(f) < 42 + count * 2:
+                    continue
+                return [(f[42 + i*2] << 8) | f[43 + i*2] for i in range(count)]
+    finally:
+        s.settimeout(orig_timeout)
+    raise TimeoutError(f"HR read timeout (on-socket): slave=0x{slave:02x} base={base} count={count}")
 
 
 _DONGLE_BUSY_CODE  = 0x43  # GivEnergy Modbus exception: dongle handling another request
@@ -2706,10 +2884,12 @@ def _read_control_state() -> dict:
 
     if profile == "single_phase_extended":
         regs_240 = _hr_read(slave, 240, 60)   # HR 240-299
+        regs_313 = _hr_read(slave, 313, 2)    # HR 313-314: AIO charge/discharge power limits (0-100%)
         def hr_ext(n):
             if 240 <= n < 300: return regs_240[n - 240]
             return hr(n)
     else:
+        regs_313 = None
         def hr_ext(n):
             return hr(n)
 
@@ -2793,8 +2973,8 @@ def _read_control_state() -> dict:
         "battery_power_mode":   hr(_HR["BATTERY_POWER_MODE"]),
         "charge_target_soc":    charge_target,
         "soc_reserve":          hr(_HR["BATTERY_SOC_RESERVE"]),
-        "charge_limit":         hr(_HR["BATTERY_CHARGE_LIMIT"]),
-        "discharge_limit":      hr(_HR["BATTERY_DISCHARGE_LIMIT"]),
+        "charge_limit":    regs_313[0] if regs_313 else hr(_HR["BATTERY_CHARGE_LIMIT"]) * 2,
+        "discharge_limit": regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]) * 2,
         "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
         "charge_slots":         charge_slots,
         "discharge_slots":      discharge_slots,
@@ -2963,14 +3143,20 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
         return f"SOC reserve set to {val}%"
 
     if command == "set_charge_limit":
-        val = max(0, min(50, int(params["value"])))
-        wr(_HR["BATTERY_CHARGE_LIMIT"], val)
-        return f"Charge power limit set to {val * 2}%"
+        val = max(0, min(100, int(params["value"])))
+        if profile == "single_phase_extended":
+            wr(313, val)
+        else:
+            wr(_HR["BATTERY_CHARGE_LIMIT"], val // 2)
+        return f"Charge power limit set to {val}%"
 
     if command == "set_discharge_limit":
-        val = max(0, min(50, int(params["value"])))
-        wr(_HR["BATTERY_DISCHARGE_LIMIT"], val)
-        return f"Discharge power limit set to {val * 2}%"
+        val = max(0, min(100, int(params["value"])))
+        if profile == "single_phase_extended":
+            wr(314, val)
+        else:
+            wr(_HR["BATTERY_DISCHARGE_LIMIT"], val // 2)
+        return f"Discharge power limit set to {val}%"
 
     if command == "set_discharge_mode":
         val = max(0, min(1, int(params["value"])))
@@ -3070,6 +3256,15 @@ def _sched_compute_writes(desired: dict):
 
     mode = desired["mode"]
     pct  = max(0, min(50, int(desired.get("power_pct", 50))))
+    # Power-limit register/value differ by profile:
+    # Gen 1/2: HR 111/112 take 0-50 (half-percent); pct is already in this range from the DB.
+    # AIO (single_phase_extended): HR 313/314 take 0-100 (full-percent); multiply by 2.
+    if profile == "single_phase_extended":
+        _chrg_limit_reg, _chrg_limit_val = 313, pct * 2
+        _dchg_limit_reg, _dchg_limit_val = 314, pct * 2
+    else:
+        _chrg_limit_reg, _chrg_limit_val = _HR["BATTERY_CHARGE_LIMIT"],    pct
+        _dchg_limit_reg, _dchg_limit_val = _HR["BATTERY_DISCHARGE_LIMIT"], pct
 
     if mode == "charge":
         target = max(4, min(100, int(desired.get("target_soc", 100))))
@@ -3086,7 +3281,7 @@ def _sched_compute_writes(desired: dict):
               (_HR["BATTERY_POWER_MODE"],                        1),   # demand / eco
               (_HR["ENABLE_CHARGE_TARGET"], 0 if target == 100 else 1),
               (_HR["CHARGE_TARGET_SOC"],                    target),
-              (_HR["BATTERY_CHARGE_LIMIT"],                    pct),
+              (_chrg_limit_reg,                       _chrg_limit_val),
               (_HR["ENABLE_CHARGE"],                             1)]
         summary = f"Charge to {target}% at {pct}% power"
 
@@ -3101,7 +3296,7 @@ def _sched_compute_writes(desired: dict):
               (_HR["ENABLE_CHARGE"],               0),
               (_HR["BATTERY_POWER_MODE"],           0),   # 0 = export / max-power
               (_HR["BATTERY_SOC_RESERVE"],       stop),
-              (_HR["BATTERY_DISCHARGE_LIMIT"],    pct),
+              (_dchg_limit_reg,           _dchg_limit_val),
               (_HR["ENABLE_DISCHARGE"],             1)]
         summary = f"Export at {pct}% power, stop at {stop}% SOC"
 
@@ -3157,6 +3352,14 @@ _quick_discharge_until = 0.0
 # Snapshot of register values captured just before a quick action starts.
 # Used by _quick_action_revert() to restore the user's pre-action state.
 _quick_action_snapshot: dict = {}   # {HR_number: value, ...}
+
+# Inter-thread snapshot request: QA flask thread posts the request;
+# _run_listen() services it on the existing socket (avoids opening a 2nd
+# connection which Gen2 dongles -- single-client -- ignore).
+_snap_req            = threading.Event()   # QA thread sets to request a read
+_snap_done           = threading.Event()   # listen loop sets when complete
+_snap_hr_data        = None               # list of raw HR values, written by listen loop
+_snap_poll_reconnect = False              # True when listen socket was closed for a poll snapshot
 
 
 def _sched_task_active() -> bool:
@@ -3265,26 +3468,48 @@ def _quick_action_do(action: str):
     # Abort if the read fails -- proceeding with fallback values would silently restore
     # wrong defaults (e.g. ENABLE_CHARGE=0, BATTERY_SOC_RESERVE=4) instead of the
     # user's actual pre-action settings.
-    _SNAP_ATTEMPTS = 3
+    #
+    # Gen2 dongles are single-client: opening a second TCP connection to read the
+    # snapshot causes timeouts. In listen mode we post the request to the listen
+    # loop thread which services it on the existing socket (_snap_req / _snap_done).
     snap_raw = None
-    for _attempt in range(_SNAP_ATTEMPTS):
-        try:
-            snap_raw = _hr_read(slave, 20, 97, timeout=3.0)   # HR 20-116
-            break
-        except Exception as exc:
-            if _attempt < _SNAP_ATTEMPTS - 1:
-                log.warning("Quick action: snapshot attempt %d/%d failed (%s) - retrying",
-                            _attempt + 1, _SNAP_ATTEMPTS, exc)
-                time.sleep(0.5)
-            else:
-                log.warning("Quick action: snapshot failed after %d attempts (%s) - aborting",
-                            _SNAP_ATTEMPTS, exc)
+    if _active_mode == "listen":
+        _snap_done.clear()
+        _snap_hr_data_local = None
+        _snap_req.set()
+        if _snap_done.wait(timeout=25.0):
+            snap_raw = _snap_hr_data   # written by listen loop before setting _snap_done
+        if snap_raw is None:
+            log.warning("Quick action: listen-socket snapshot failed - aborting")
+    else:
+        _SNAP_ATTEMPTS = 3
+        for _attempt in range(_SNAP_ATTEMPTS):
+            try:
+                snap_raw = _hr_read(slave, 20, 97, timeout=3.0)   # HR 20-116
+                break
+            except Exception as exc:
+                if _attempt < _SNAP_ATTEMPTS - 1:
+                    log.warning("Quick action: snapshot attempt %d/%d failed (%s) - retrying",
+                                _attempt + 1, _SNAP_ATTEMPTS, exc)
+                    time.sleep(0.5)
+                else:
+                    log.warning("Quick action: snapshot failed after %d attempts (%s) - aborting",
+                                _SNAP_ATTEMPTS, exc)
 
     if snap_raw is None:
         raise RuntimeError("Could not read inverter state -- please try again in a moment")
 
     def _snap(n, fallback=0):   # fallback param kept for call-site compat; snap_raw guaranteed non-None
         return snap_raw[n - 20]
+
+    # AIO power-limit registers (HR 313-314) are outside the HR 20-116 snap range.
+    aio_limits = None
+    if profile == "single_phase_extended":
+        try:
+            aio_limits = _hr_read(slave, 313, 2)
+        except Exception as exc:
+            log.warning("Quick action: HR 313-314 read failed (%s) -- will restore to 100%%", exc)
+            aio_limits = [100, 100]
 
     _quick_action_snapshot = {
         _HR["ENABLE_CHARGE_TARGET"]:    _snap(_HR["ENABLE_CHARGE_TARGET"]),
@@ -3310,7 +3535,14 @@ def _quick_action_do(action: str):
 
     if action == "charge":
         s_hr, e_hr, free_slot = _qa_find_free_charge_slot(slave, profile)
-        pct    = max(0, min(50, QUICK_CHARGE_POWER_PCT  * 50 // 100))
+        if profile == "single_phase_extended":
+            chrg_limit_reg     = 313
+            pct                = max(0, min(100, QUICK_CHARGE_POWER_PCT))
+            chrg_limit_restore = aio_limits[0] if aio_limits else 100
+        else:
+            chrg_limit_reg     = _HR["BATTERY_CHARGE_LIMIT"]   # HR 111, 0-50
+            pct                = max(0, min(50, QUICK_CHARGE_POWER_PCT * 50 // 100))
+            chrg_limit_restore = _snap(_HR["BATTERY_CHARGE_LIMIT"], 50)
         target = QUICK_CHARGE_TARGET_SOC
         writes = [
             (s_hr,                                                   cs),
@@ -3319,7 +3551,7 @@ def _quick_action_do(action: str):
             (_HR["BATTERY_POWER_MODE"],                               1),
             (_HR["ENABLE_CHARGE_TARGET"],   0 if target == 100 else 1),
             (_HR["CHARGE_TARGET_SOC"],                           target),
-            (_HR["BATTERY_CHARGE_LIMIT"],                           pct),
+            (chrg_limit_reg,                                        pct),
             (_HR["ENABLE_CHARGE"],                                    1),
         ]
         restore_regs = [
@@ -3329,13 +3561,21 @@ def _quick_action_do(action: str):
             [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],        1)],
             [_HR["ENABLE_CHARGE_TARGET"],       _snap(_HR["ENABLE_CHARGE_TARGET"],      0)],
             [_HR["CHARGE_TARGET_SOC"],          _snap(_HR["CHARGE_TARGET_SOC"],       100)],
-            [_HR["BATTERY_CHARGE_LIMIT"],       _snap(_HR["BATTERY_CHARGE_LIMIT"],     50)],
+            [chrg_limit_reg,                    chrg_limit_restore],
             [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],             0)],
         ]
-        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {pct*2}%"
+        display_pct = pct if profile == "single_phase_extended" else pct * 2
+        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {display_pct}%"
     else:
         s_hr, e_hr, free_slot = _qa_find_free_discharge_slot(slave, profile, snap_raw)
-        pct   = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
+        if profile == "single_phase_extended":
+            dchg_limit_reg     = 314
+            pct                = max(0, min(100, QUICK_DISCHARGE_POWER_PCT))
+            dchg_limit_restore = aio_limits[1] if aio_limits else 100
+        else:
+            dchg_limit_reg     = _HR["BATTERY_DISCHARGE_LIMIT"]   # HR 112, 0-50
+            pct                = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
+            dchg_limit_restore = _snap(_HR["BATTERY_DISCHARGE_LIMIT"], 50)
         stop  = max(4, SCHEDULER_BASELINE_SOC_RESERVE)
         writes = [
             (s_hr,                                                   cs),
@@ -3343,7 +3583,7 @@ def _quick_action_do(action: str):
             (_HR["ENABLE_CHARGE"],                                    0),
             (_HR["BATTERY_POWER_MODE"],                               0),
             (_HR["BATTERY_SOC_RESERVE"],                           stop),
-            (_HR["BATTERY_DISCHARGE_LIMIT"],                        pct),
+            (dchg_limit_reg,                                        pct),
             (_HR["ENABLE_DISCHARGE"],                                 1),
         ]
         restore_regs = [
@@ -3352,10 +3592,11 @@ def _quick_action_do(action: str):
             [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],              0)],
             [_HR["BATTERY_POWER_MODE"],         _snap(_HR["BATTERY_POWER_MODE"],         1)],
             [_HR["BATTERY_SOC_RESERVE"],        _snap(_HR["BATTERY_SOC_RESERVE"],        4)],
-            [_HR["BATTERY_DISCHARGE_LIMIT"],    _snap(_HR["BATTERY_DISCHARGE_LIMIT"],   50)],
+            [dchg_limit_reg,                    dchg_limit_restore],
             [_HR["ENABLE_DISCHARGE"],           _snap(_HR["ENABLE_DISCHARGE"],           1)],
         ]
-        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {pct*2}%"
+        display_pct = pct if profile == "single_phase_extended" else pct * 2
+        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {display_pct}%"
 
     for reg, val in writes:
         _hr_write(slave, reg, val)
@@ -3647,6 +3888,8 @@ def post_control():
     data    = request.get_json(force=True) or {}
     command = data.get("command", "")
     params  = data.get("params", {})
+    if not isinstance(params, dict):
+        return jsonify({"ok": False, "error": "params must be an object"}), 400
     return jsonify(_execute_control(command, params))
 
 # ── Scheduler API (app-held 48-block engine — see BACKLOG.md) ─────────────────
@@ -4078,6 +4321,8 @@ def get_settings():
         "sf_panel_azimuth":          SF_AZ,
         "sf_panel_kwp":              SF_KWP,
         "solar_forecast_configured": _sf_configured(),
+        "log_level":          LOG_LEVEL,
+        "log_retention_days": LOG_RETENTION_DAYS,
         # API keys are intentionally never returned to the browser
     })
 
@@ -4091,11 +4336,29 @@ def save_settings():
     global QUICK_ACTIONS_ENABLED, QUICK_CHARGE_POWER_PCT, QUICK_DISCHARGE_POWER_PCT, QUICK_CHARGE_TARGET_SOC
     global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, SF_POSTCODE, _last_sf_ts
     global REQUIRE_AUTH
+    global LOG_LEVEL, LOG_RETENTION_DAYS
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
 
     data = request.get_json(force=True) or {}
+
+    # -- input validation --
+    if "inverter_ip" in data:
+        ip = str(data["inverter_ip"]).strip()
+        if not ip or len(ip) > 253 or not re.match(r'^[a-zA-Z0-9._:\[\]-]+$', ip):
+            return jsonify({"ok": False, "error": "Invalid inverter IP/hostname"}), 400
+    if "new_password" in data and len(str(data["new_password"])) > 128:
+        return jsonify({"ok": False, "error": "Password too long (max 128 characters)"}), 400
+    if "weather_api_key" in data and len(str(data["weather_api_key"])) > 256:
+        return jsonify({"ok": False, "error": "API key too long"}), 400
+    if "weather_postcode" in data and len(str(data["weather_postcode"])) > 10:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if "sf_postcode" in data and len(str(data["sf_postcode"])) > 10:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if "sf_api_key" in data and len(str(data["sf_api_key"])) > 256:
+        return jsonify({"ok": False, "error": "API key too long"}), 400
+
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
 
@@ -4206,8 +4469,19 @@ def save_settings():
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:
         if not cfg.has_section("admin"): cfg.add_section("admin")
-        ADMIN_HASH = hashlib.sha256(new_pw.encode()).hexdigest()
+        ADMIN_HASH = _hash_password(new_pw)
         cfg.set("admin", "password_hash", ADMIN_HASH)
+
+    if "log_level" in data:
+        lvl = str(data["log_level"]).lower()
+        if lvl in ("debug", "info", "warning"):
+            _set_log_level(lvl)
+            _set("logging", "log_level", lvl)
+    if "log_retention_days" in data:
+        LOG_RETENTION_DAYS = max(1, min(30, int(data["log_retention_days"])))
+        if _log_file_handler:
+            _log_file_handler.backupCount = LOG_RETENTION_DAYS
+        _set("logging", "log_retention_days", LOG_RETENTION_DAYS)
 
     with open(Path(__file__).parent / "config.ini", "w") as f:
         cfg.write(f)
@@ -4244,6 +4518,21 @@ def save_tariff():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = request.get_json(force=True) or {}
+
+    # -- input validation --
+    if "tariff_source" in data and str(data["tariff_source"]) not in _TARIFF_SOURCES:
+        return jsonify({"ok": False, "error": "Unknown tariff source"}), 400
+    if "octopus_region" in data:
+        rgn = str(data["octopus_region"]).upper().strip()
+        if rgn and not re.match(r'^[A-P]$', rgn):
+            return jsonify({"ok": False, "error": "Region must be a single letter A-P"}), 400
+    if "octopus_postcode" in data and len(str(data["octopus_postcode"])) > 8:
+        return jsonify({"ok": False, "error": "Postcode too long"}), 400
+    if isinstance(data.get("tou_windows"), list):
+        for w in data["tou_windows"][:3]:
+            if len(str(w.get("name", "")).strip()) > 40:
+                return jsonify({"ok": False, "error": "TOU window name too long (max 40 characters)"}), 400
+
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("tariff"):
@@ -4365,6 +4654,8 @@ def tariff_lookup_region():
     postcode = data.get("postcode", "").strip()
     if not postcode:
         return jsonify({"ok": False, "error": "Postcode required"}), 400
+    if len(postcode) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     try:
         region = _lookup_region(postcode)
         if region:
@@ -4372,6 +4663,17 @@ def tariff_lookup_region():
         return jsonify({"ok": False, "error": "Region not found for that postcode"})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})
+
+
+@app.route("/api/log")
+def get_log():
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    log_path = Path(__file__).parent / "dashboard.log"
+    if not log_path.exists():
+        return jsonify({"ok": False, "error": "No log file yet"}), 404
+    return send_file(str(log_path), as_attachment=True,
+                     download_name="dashboard.log", mimetype="text/plain")
 
 
 @app.route("/api/backup/export")
@@ -4483,6 +4785,8 @@ def weather_lookup_postcode():
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    if len(raw) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     # Step 1: postcode → lat/lng via postcodes.io (free, no auth)
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
@@ -4523,6 +4827,8 @@ def sf_lookup_postcode():
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
+    if len(raw) > 8:
+        return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -4783,8 +5089,11 @@ def icons(filename):
     return send_from_directory(str(Path(__file__).parent / "icons"), filename)
 
 @app.after_request
-def cors(response):
+def add_security_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 

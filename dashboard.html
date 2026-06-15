@@ -190,6 +190,10 @@ select optgroup{background:#172035;color:#7fa8cc}
   font-family:inherit;cursor:pointer;padding:0;
 }
 .slot-box .slot-time:focus{color:var(--amber)}
+.slot-entry{display:contents}
+.slot-hidden{display:none!important}
+.slot-vis-ctrl{display:flex;align-items:center;gap:6px;margin:4px 0 2px;font-size:.78rem;color:var(--muted)}
+.slot-vis-ctrl button{background:none;border:1px solid var(--border);color:var(--text);border-radius:4px;width:22px;height:22px;cursor:pointer;font-size:.9rem;line-height:1;padding:0}
 /* Status message */
 #ctrl-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px;padding:0 4px}
 
@@ -1002,6 +1006,23 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
         <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
       </div>
+
+      <div class="sett-section">
+        <div class="sett-heading">Diagnostics</div>
+        <div class="sett-hint">Log files are saved alongside the app and rotated daily. Use Debug level to capture detailed inverter communication for fault diagnosis -- switch back to Warning for normal use.</div>
+        <div class="sett-row">
+          <label>Log level</label>
+          <select id="s-log-level" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="warning">Warning (default)</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug</option>
+          </select>
+        </div>
+        <div class="sett-row"><label>Keep logs (days)</label><input id="s-log-retention" type="number" min="1" max="30"></div>
+        <button class="ctrl-btn ctrl-btn-sm" onclick="downloadLog()" style="margin-top:6px">&#11015; Download log</button>
+        <div id="s-log-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
+      </div>
+
       <button id="sett-save" class="sett-save-btn">Save Settings</button>
       <div id="sett-msg" class="sett-msg"></div>
     </div>
@@ -1296,6 +1317,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <input type="range" id="se-pct" min="0" max="100" value="100" data-reg="50"
           oninput="_sePctInput()">
       </div>
+      <div id="se-msg" style="font-size:.8rem;min-height:1.2em;text-align:center"></div>
       <div id="se-btn-row">
         <button class="se-btn" id="se-delete" onclick="deleteRule()" style="display:none">Delete</button>
         <button class="se-btn" id="se-cancel" onclick="closeEditor()">Cancel</button>
@@ -1863,9 +1885,9 @@ async function _runQuickAction(type, isActive) {
       body: JSON.stringify({ action: type, start: !isActive })
     });
     const res = await r.json();
-    if (!res.ok) alert(res.error || 'Request failed');
+    if (!res.ok) _showAlert(res.error || 'Request failed');
     else poll();
-  } catch(e) { alert('Network error'); }
+  } catch(e) { _showAlert('Network error'); }
   finally { _qaInFlight = false; }
 }
 
@@ -2050,25 +2072,25 @@ async function ctrlApply(command, sliderId) {
 }
 
 // ── Charge/discharge power limit: % or watts ──────────────────────────────────
-// The inverter register is 0-50 where 50 = full power. The UI displays 0-100%
-// (register x 2) so users see a full-range slider. In watts mode the slider
-// runs 0 -> max watts and we convert to/from the register (limit = W/maxW x 50).
+// The API always returns charge_limit/discharge_limit as 0-100 (all profiles).
+// In watts mode the slider runs 0 -> max watts and we convert to/from percent.
 let _ctrlPower = { units:'percent', maxChg:2600, maxDis:2600 };
+let _slotVisible = parseInt(localStorage.getItem('slotVisible') || '1');
 
 function _limitMax(type){ return type === 'charge' ? _ctrlPower.maxChg : _ctrlPower.maxDis; }
 
-function _configLimitSlider(type, registerVal) {
+function _configLimitSlider(type, pctVal) {
   const sl = $('sl-' + type + '-limit');
   const cv = $('cv-' + type + '-limit');
   if (_ctrlPower.units === 'watts') {
     const maxW = _limitMax(type);
     sl.min = 0; sl.max = maxW; sl.step = 100;
-    sl.value = Math.round((registerVal / 50) * maxW / 100) * 100;   // register → W, snapped
+    sl.value = Math.round((pctVal / 100) * maxW / 100) * 100;   // % -> W, snapped
     cv.textContent = sl.value + ' W';
   } else {
     sl.min = 0; sl.max = 100; sl.step = 1;
-    sl.value = registerVal * 2;
-    cv.textContent = (registerVal * 2) + '%';
+    sl.value = pctVal;
+    cv.textContent = pctVal + '%';
   }
 }
 
@@ -2081,15 +2103,15 @@ function ctrlLimitLabel(type) {
 async function ctrlSetLimit(type) {
   const sl  = $('sl-' + type + '-limit');
   const cmd = type === 'charge' ? 'set_charge_limit' : 'set_discharge_limit';
-  let reg;
+  let pct;
   if (_ctrlPower.units === 'watts') {
     const maxW = _limitMax(type);
-    reg = Math.round(parseInt(sl.value) / maxW * 50);   // W -> register
+    pct = Math.round(parseInt(sl.value) / maxW * 100);   // W -> 0-100 %
   } else {
-    reg = Math.round(parseInt(sl.value) / 2);           // 0-100 display -> 0-50 register
+    pct = parseInt(sl.value);   // already 0-100
   }
-  reg = Math.max(0, Math.min(50, reg));
-  await ctrlCmd(cmd, { value: reg });
+  pct = Math.max(0, Math.min(100, pct));
+  await ctrlCmd(cmd, { value: pct });
 }
 
 function _renderSlots(type, slots, profile) {
@@ -2102,10 +2124,20 @@ function _renderSlots(type, slots, profile) {
     dirty[el.id] = el.value;
   });
 
-  let html = '<div class="slot-grid">';
+  let html = '';
+  if (extended && slots.length > 1) {
+    const cid = type + '-vis-count';
+    html += `<div class="slot-vis-ctrl">
+      <button onclick="_setSlotVisible(_slotVisible-1)" title="Show fewer slots">&#8722;</button>
+      <span>Showing <span id="${cid}">${_slotVisible}</span> of ${slots.length} slots</span>
+      <button onclick="_setSlotVisible(_slotVisible+1)" title="Show more slots">+</button>
+    </div>`;
+  }
+  html += '<div class="slot-grid">';
   slots.forEach((slot, i) => {
     const n   = i + 1;
     const pfx = type === 'charge' ? 'cs' : 'ds';
+    html += `<div class="slot-entry" data-slot="${n}" data-type="${type}">`;
     html += `
     <div class="slot-box">
       <label>Slot ${n} start</label>
@@ -2131,6 +2163,7 @@ function _renderSlots(type, slots, profile) {
         </div>
       </div>`;
     }
+    html += '</div>'; // end slot-entry
   });
   html += '</div>';
   container.innerHTML = html;
@@ -2145,6 +2178,70 @@ function _renderSlots(type, slots, profile) {
   container.querySelectorAll('.slot-time').forEach(el => {
     el.addEventListener('input', () => { el.dataset.dirty = '1'; });
   });
+
+  if (extended) _applySlotVisibility(type);
+}
+
+function _setSlotVisible(n) {
+  _slotVisible = Math.max(1, Math.min(10, n));
+  localStorage.setItem('slotVisible', _slotVisible);
+  ['charge', 'discharge'].forEach(_applySlotVisibility);
+  ['charge-vis-count', 'discharge-vis-count'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = _slotVisible;
+  });
+}
+
+function _applySlotVisibility(type) {
+  const pfx = type === 'charge' ? 'cs' : 'ds';
+  const container = $(type === 'charge' ? 'charge-slots-container' : 'discharge-slots-container');
+  if (!container) return;
+  container.querySelectorAll('.slot-entry').forEach(entry => {
+    const n        = parseInt(entry.dataset.slot);
+    const start    = document.getElementById(`${pfx}${n}-start`);
+    const end      = document.getElementById(`${pfx}${n}-end`);
+    const hasValue = start && end && (start.value || end.value);
+    entry.classList.toggle('slot-hidden', n > _slotVisible && !hasValue);
+  });
+}
+
+// ── Slot overlap detection ────────────────────────────────────────────────────
+function _slotMins(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function _slotsOverlap(as, ae, bs, be) {
+  // Empty slot (start == end) never overlaps
+  if (as === ae || bs === be) return false;
+  // Treat 00:00 end as midnight (1440) so 22:00-00:00 works correctly
+  const ae2 = ae === 0 ? 1440 : ae;
+  const be2 = be === 0 ? 1440 : be;
+  return as < be2 && ae2 > bs;
+}
+
+function _collectSlots(pfx) {
+  const result = [];
+  document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`).forEach(el => {
+    const n   = parseInt(el.id.replace(pfx, '').replace('-start', ''));
+    const end = document.getElementById(`${pfx}${n}-end`);
+    if (el.value && end && end.value) result.push({ n, start: el.value, end: end.value });
+  });
+  return result;
+}
+
+function _overlapWarning(slots) {
+  const msgs = [];
+  for (let i = 0; i < slots.length; i++) {
+    for (let j = i + 1; j < slots.length; j++) {
+      const a = slots[i], b = slots[j];
+      if (_slotsOverlap(_slotMins(a.start), _slotMins(a.end),
+                        _slotMins(b.start), _slotMins(b.end))) {
+        msgs.push(`slot ${a.n} (${a.start}-${a.end}) overlaps slot ${b.n} (${b.start}-${b.end})`);
+      }
+    }
+  }
+  return msgs;
 }
 
 // Set a single slot's start+end time and confirm with the user first
@@ -2153,6 +2250,12 @@ async function ctrlSetOneSlot(type, n) {
   const start = $(pfx + n + '-start').value;
   const end   = $(pfx + n + '-end').value;
   if (!start || !end) { _ctrlMsg('Enter both start and end times first', false); return; }
+  const allSlots = _collectSlots(pfx);
+  const overlaps = _overlapWarning(allSlots);
+  if (overlaps.length) {
+    _ctrlMsg('Overlapping slots -- ' + overlaps.join('; ') + '. Adjust the times before saving.', false);
+    return;
+  }
   // Clear dirty flags now so _renderSlots restores API values after the write confirms
   $(pfx + n + '-start').removeAttribute('data-dirty');
   $(pfx + n + '-end').removeAttribute('data-dirty');
@@ -2163,17 +2266,18 @@ async function ctrlSetOneSlot(type, n) {
 // Save all slots in one pass -- silent writes, single state refresh at the end
 async function ctrlSaveSlots(type) {
   const pfx   = type === 'charge' ? 'cs' : 'ds';
-  const slots = document.querySelectorAll(`[id^="${pfx}"][id$="-start"]`);
+  const allSlots = _collectSlots(pfx);
+  const overlaps = _overlapWarning(allSlots);
+  if (overlaps.length) {
+    _ctrlMsg('Overlapping slots -- ' + overlaps.join('; ') + '. Adjust the times before saving.', false);
+    return;
+  }
   let anyWritten = false;
-  for (const startEl of slots) {
-    const n   = startEl.id.replace(`${pfx}`, '').replace('-start', '');
-    const end = $(pfx + n + '-end');
-    if (startEl.value && end && end.value) {
-      startEl.removeAttribute('data-dirty');
-      end.removeAttribute('data-dirty');
-      await ctrlCmd(`set_${type}_slot`, { slot: parseInt(n), start: startEl.value, end: end.value }, { silent: true });
-      anyWritten = true;
-    }
+  for (const s of allSlots) {
+    $(pfx + s.n + '-start').removeAttribute('data-dirty');
+    $(pfx + s.n + '-end').removeAttribute('data-dirty');
+    await ctrlCmd(`set_${type}_slot`, { slot: s.n, start: s.start, end: s.end }, { silent: true });
+    anyWritten = true;
   }
   if (anyWritten) await loadControlState();
 }
@@ -2181,10 +2285,26 @@ async function ctrlSaveSlots(type) {
 // ── Control confirmation modal ────────────────────────────────────────────────
 let _confirmFn = null;
 
+function _modalReset() {
+  $('cc-title').textContent   = 'Confirm';
+  $('cc-cancel').style.display = '';
+  $('cc-confirm').textContent  = 'Confirm';
+}
 function _showConfirm(label, fn) {
   _confirmFn = fn;
   $('cc-desc').textContent = label;
   $('ctrl-confirm').classList.add('open');
+}
+function _showAlert(msg) {
+  $('cc-title').textContent    = '';
+  $('cc-cancel').style.display = 'none';
+  $('cc-confirm').textContent  = 'OK';
+  _showConfirm(msg, () => {});
+}
+function _seMsg(txt, ok) {
+  const el = $('se-msg');
+  el.style.color   = ok ? '#4ade80' : '#f87171';
+  el.textContent   = txt;
 }
 function ctrlConfirmCmd(label, cmd, params) {
   _showConfirm(label, () => ctrlCmd(cmd, params || {}));
@@ -2200,15 +2320,18 @@ function ctrlConfirmSlots(label, type) {
 }
 $('cc-confirm').addEventListener('click', () => {
   $('ctrl-confirm').classList.remove('open');
+  _modalReset();
   if (_confirmFn) { const f = _confirmFn; _confirmFn = null; f(); }
 });
 $('cc-cancel').addEventListener('click', () => {
   $('ctrl-confirm').classList.remove('open');
+  _modalReset();
   _confirmFn = null;
 });
 $('ctrl-confirm').addEventListener('click', e => {
   if (e.target === $('ctrl-confirm')) {
     $('ctrl-confirm').classList.remove('open');
+    _modalReset();
     _confirmFn = null;
   }
 });
@@ -2250,7 +2373,7 @@ function openBattModal() {
     .then(data => {
       if (!data.ok) {
         $('bdd-body').innerHTML =
-          `<div class="bdd-spinner" style="color:var(--muted)">${data.error || 'Read failed'}</div>`;
+          `<div class="bdd-spinner" style="color:var(--muted)">${_esc(data.error || 'Read failed')}</div>`;
         return;
       }
       _battModules = data.modules || [];
@@ -2556,13 +2679,14 @@ function openEditor(id) {
   $('se-pct').dataset.reg = pct;   // store register value; seActionChanged converts to display
   _buildDayChips(rl ? rl.days_mask : 127);
   seActionChanged();               // configures slider range + display from data-reg
+  $('se-msg').textContent = '';
   $('sched-editor').classList.add('open');
 }
 function closeEditor() { $('sched-editor').classList.remove('open'); }
 
 async function saveRule() {
   const mask = _collectDaysMask();
-  if (!mask) { alert('Pick at least one day.'); return; }
+  if (!mask) { _seMsg('Pick at least one day.', false); return; }
   const body = {
     action:     $('se-action').value,
     start:      $('se-start').value,
@@ -2579,17 +2703,18 @@ async function saveRule() {
   }
   const r = await fetch('/api/schedules', { method:'POST', headers:_schedHeaders(), body:JSON.stringify(body) });
   const d = await r.json();
-  if (!d.ok) { alert(d.error || 'Could not save rule.'); return; }
+  if (!d.ok) { _seMsg(d.error || 'Could not save rule.', false); return; }
   closeEditor();
   loadSchedules();
 }
 
 async function deleteRule() {
   if (_editingId == null) return;
-  if (!confirm('Delete this rule?')) return;
-  await fetch('/api/schedules/' + _editingId, { method:'DELETE', headers:{'X-Admin-Password':_adminPw} });
-  closeEditor();
-  loadSchedules();
+  _showConfirm('Delete this rule?', async () => {
+    await fetch('/api/schedules/' + _editingId, { method:'DELETE', headers:{'X-Admin-Password':_adminPw} });
+    closeEditor();
+    loadSchedules();
+  });
 }
 
 async function toggleRule(id, enabled) {
@@ -2630,6 +2755,22 @@ function _settHeaders() {
 }
 
 // ── Backup & restore ──────────────────────────────────────────────────────────
+async function downloadLog() {
+  const msg = $('s-log-msg');
+  msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing log...';
+  try {
+    const r = await fetch('/api/log', { headers: {'X-Admin-Password': _adminPw} });
+    if (r.status === 401) { msg.style.color='var(--red)'; msg.textContent='Not authorised'; return; }
+    if (!r.ok) { const e = await r.json(); msg.style.color='var(--red)'; msg.textContent=e.error||'Failed'; return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'dashboard.log'; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 2000);
+    msg.style.color = 'var(--green)'; msg.textContent = 'Download started';
+  } catch(e) { msg.style.color='var(--red)'; msg.textContent='Error: ' + e.message; }
+}
+
 async function downloadBackup() {
   const msg = $('s-bkmsg');
   msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing backup…';
@@ -2653,15 +2794,16 @@ async function restoreBackup() {
   const msg = $('s-bkmsg');
   const file = $('s-bkfile').files[0];
   if (!file) { msg.style.color='#f87171'; msg.textContent='Choose a backup file first'; return; }
-  if (!confirm('Restore will REPLACE all current history with the chosen file, and the dashboard must be restarted. Continue?')) return;
-  msg.style.color='var(--muted)'; msg.textContent='Uploading…';
-  try {
-    const fd = new FormData(); fd.append('file', file);
-    const r = await fetch('/api/backup/import', { method:'POST', headers:{'X-Admin-Password':_adminPw}, body:fd });
-    const res = await r.json();
-    if (res.ok) { msg.style.color='#4ade80'; msg.textContent='✓ '+res.message; }
-    else { msg.style.color='#f87171'; msg.textContent='✗ '+(res.error||'failed'); }
-  } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+  _showConfirm('Restore will replace all current history with the chosen file. The dashboard must be restarted to complete the restore. Continue?', async () => {
+    msg.style.color='var(--muted)'; msg.textContent='Uploading…';
+    try {
+      const fd = new FormData(); fd.append('file', file);
+      const r = await fetch('/api/backup/import', { method:'POST', headers:{'X-Admin-Password':_adminPw}, body:fd });
+      const res = await r.json();
+      if (res.ok) { msg.style.color='#4ade80'; msg.textContent='✓ '+res.message; }
+      else { msg.style.color='#f87171'; msg.textContent='✗ '+(res.error||'failed'); }
+    } catch(e) { msg.style.color='#f87171'; msg.textContent='Failed: '+e.message; }
+  });
 }
 
 // Password modal
@@ -2713,7 +2855,7 @@ function _markTariffDirty() { _tariffDirty = true; }
 
 function _confirmLeave(dirty, action) {
   if (!dirty) { action(); return; }
-  if (confirm('You have unsaved changes. Leave without saving?')) action();
+  _showConfirm('You have unsaved changes. Leave without saving?', action);
 }
 
 $('sett-back').addEventListener('click', () => {
@@ -2911,7 +3053,7 @@ function touAddWindow(w) {
   div.innerHTML = `
     <button class="tou-remove" title="Remove" onclick="touRemoveWindow(this)">&#10005;</button>
     <div class="sett-heading" style="font-size:.68rem">Window ${idx}</div>
-    <div class="sett-row"><label>Name</label><input class="tou-name" type="text" placeholder="e.g. Off-peak" value="${(w&&w.name)||''}"></div>
+    <div class="sett-row"><label>Name</label><input class="tou-name" type="text" placeholder="e.g. Off-peak" value="${_esc((w&&w.name)||'')}"></div>
     <div class="sett-row"><label>Start</label><input class="tou-start" type="time" value="${(w&&w.start)||''}"></div>
     <div class="sett-row"><label>End</label><input class="tou-end"   type="time" value="${(w&&w.end)||''}"></div>
     <div class="sett-row"><label>Import rate (p/kWh)</label><input class="tou-rate"        type="number" min="0" step="0.01" placeholder="e.g. 7.50" value="${(w&&w.rate_p!=null)?w.rate_p:''}"></div>
@@ -3027,29 +3169,32 @@ async function saveTariff() {
   if (!_AUTO_EXPORT_SOURCES.has(src) && body.export_rate_p === 0)
     missing.push('Export rate (p/kWh) — not auto-fetched for this tariff');
 
-  if (missing.length > 0) {
-    const msg = 'The following rates are set to 0 and will not be populated automatically:\n\n'
-      + missing.map(m => '  • ' + m).join('\n')
-      + '\n\nExport earnings and/or cost calculations will be inaccurate until these are set.'
-      + '\n\nSave anyway?';
-    if (!confirm(msg)) return;
-  }
-
-  try {
-    const r   = await fetch('/api/tariff', { method:'POST', headers:_settHeaders(), body:JSON.stringify(body) });
-    if (r.status === 401) { $('tariff-msg').style.color='#f87171'; $('tariff-msg').textContent='Session expired — re-enter password'; return; }
-    const res = await r.json();
-    if (res.ok) {
-      $('tariff-msg').style.color = '#4ade80';
-      $('tariff-msg').textContent = '✓ Saved';
-      _tariffDirty = false;
-    } else {
+  const _doSaveTariff = async () => {
+    try {
+      const r   = await fetch('/api/tariff', { method:'POST', headers:_settHeaders(), body:JSON.stringify(body) });
+      if (r.status === 401) { $('tariff-msg').style.color='#f87171'; $('tariff-msg').textContent='Session expired -- re-enter password'; return; }
+      const res = await r.json();
+      if (res.ok) {
+        $('tariff-msg').style.color = '#4ade80';
+        $('tariff-msg').textContent = '✓ Saved';
+        _tariffDirty = false;
+      } else {
+        $('tariff-msg').style.color = '#f87171';
+        $('tariff-msg').textContent = '✗ ' + (res.error || 'Save failed');
+      }
+    } catch(e) {
       $('tariff-msg').style.color = '#f87171';
-      $('tariff-msg').textContent = '✗ ' + (res.error || 'Save failed');
+      $('tariff-msg').textContent = 'Save failed';
     }
-  } catch(e) {
-    $('tariff-msg').style.color = '#f87171';
-    $('tariff-msg').textContent = 'Save failed';
+  };
+
+  if (missing.length > 0) {
+    _showConfirm('These rates are set to 0 and will not auto-fetch: '
+      + missing.join('; ')
+      + '. Earnings and cost calculations will be inaccurate. Save anyway?',
+      _doSaveTariff);
+  } else {
+    _doSaveTariff();
   }
 }
 
@@ -3068,22 +3213,23 @@ document.querySelectorAll('#tariff-body > .sett-section input').forEach(el => {
 async function syncInverterClock() {
   const now = new Date();
   const ts = now.toLocaleTimeString('en-GB') + ' ' + now.toLocaleDateString('en-GB');
-  if (!confirm('Set inverter clock to ' + ts + '?')) return;
-  $('sync-clock-msg').style.color = 'var(--muted)';
-  $('sync-clock-msg').textContent = 'Syncing…';
-  try {
-    const r = await fetch('/api/control', {
-      method: 'POST',
-      headers: _ctrlHeaders(),
-      body: JSON.stringify({ command: 'sync_time', params: {} })
-    });
-    const res = await r.json();
-    $('sync-clock-msg').style.color = res.ok ? '#4ade80' : '#f87171';
-    $('sync-clock-msg').textContent = res.ok ? '✓ ' + res.message : '✗ ' + res.message;
-  } catch(e) {
-    $('sync-clock-msg').style.color = '#f87171';
-    $('sync-clock-msg').textContent = '✗ ' + e.message;
-  }
+  _showConfirm('Set inverter clock to ' + ts + '?', async () => {
+    $('sync-clock-msg').style.color = 'var(--muted)';
+    $('sync-clock-msg').textContent = 'Syncing…';
+    try {
+      const r = await fetch('/api/control', {
+        method: 'POST',
+        headers: _ctrlHeaders(),
+        body: JSON.stringify({ command: 'sync_time', params: {} })
+      });
+      const res = await r.json();
+      $('sync-clock-msg').style.color = res.ok ? '#4ade80' : '#f87171';
+      $('sync-clock-msg').textContent = res.ok ? '✓ ' + res.message : '✗ ' + res.message;
+    } catch(e) {
+      $('sync-clock-msg').style.color = '#f87171';
+      $('sync-clock-msg').textContent = '✗ ' + e.message;
+    }
+  });
 }
 
 async function lookupPostcode() {
@@ -3213,6 +3359,8 @@ async function loadSettings() {
     $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
     $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
     $('s-qa-chg-soc').value  = s.quick_charge_target_soc   ?? 100;
+    $('s-log-level').value     = s.log_level          || 'warning';
+    $('s-log-retention').value = s.log_retention_days || 7;
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     $('sett-msg').textContent = '';
     _settDirty = false;
@@ -3263,6 +3411,8 @@ $('sett-save').addEventListener('click', async () => {
     quick_charge_power_pct:   parseInt($('s-qa-chg-pct').value)  || 100,
     quick_discharge_power_pct:parseInt($('s-qa-dis-pct').value)  || 100,
     quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
+    log_level:          $('s-log-level').value,
+    log_retention_days: parseInt($('s-log-retention').value) || 7,
     sf_postcode:     $('s-sf-postcode').value.trim(),
     sf_latitude:     $('s-sf-lat').value.trim(),
     sf_longitude:    $('s-sf-lon').value.trim(),
@@ -4198,6 +4348,19 @@ async function loadPowerData() {
   drawPowerChart();
 }
 
+// Split a powerData array into contiguous segments, breaking wherever two consecutive
+// timestamps are more than GAP_SECS apart (indicates an inverter disconnect).
+const _POWER_GAP_SECS = 120;
+function _splitByGaps(data) {
+  if (!data.length) return [];
+  const segs = [[data[0]]];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i].t - data[i-1].t > _POWER_GAP_SECS) segs.push([]);
+    segs[segs.length - 1].push(data[i]);
+  }
+  return segs;
+}
+
 // Catmull-Rom spline path helper — smooth curve that passes through every point.
 // Call after c.moveTo(pts[0].x, pts[0].y); closes nothing, caller handles start/end.
 function _catmullPath(c, pts) {
@@ -4321,38 +4484,42 @@ function drawPowerChart() {
     }
   }
 
-  // Series fills
+  // Series fills -- split at data gaps to avoid triangle artifacts across disconnects
   POWER_SERIES.forEach(s => {
     if (!powerActive.has(s.key)) return;
-    const pts = powerData.map(d => ({ x: xPx(d.t), y: yPx(d[s.key]||0) }));
-    if (pts.length < 2) return;
+    const segs = _splitByGaps(powerData);
 
-    const fillArea = (clipY, clipH, color) => {
-      if (clipH <= 0) return;
-      c.save();
-      c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
+    segs.forEach(seg => {
+      const pts = seg.map(d => ({ x: xPx(d.t), y: yPx(d[s.key]||0) }));
+      if (pts.length < 2) return;
+
+      const fillArea = (clipY, clipH, color) => {
+        if (clipH <= 0) return;
+        c.save();
+        c.beginPath(); c.rect(PL, clipY, plotW, clipH); c.clip();
+        c.beginPath();
+        c.moveTo(pts[0].x, yZero);
+        c.lineTo(pts[0].x, pts[0].y);
+        _catmullPath(c, pts);
+        c.lineTo(pts[pts.length-1].x, yZero);
+        c.closePath();
+        c.fillStyle = color;
+        c.fill();
+        c.restore();
+      };
+
+      // Positive area (above zero -- y < yZero)
+      fillArea(PT, yZero - PT, s.colorPos + 'aa');
+      // Negative area (below zero -- y > yZero), only if series can go negative
+      if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
+
+      // Smooth series outline
       c.beginPath();
-      c.moveTo(pts[0].x, yZero);
-      c.lineTo(pts[0].x, pts[0].y);
+      c.moveTo(pts[0].x, pts[0].y);
       _catmullPath(c, pts);
-      c.lineTo(pts[pts.length-1].x, yZero);
-      c.closePath();
-      c.fillStyle = color;
-      c.fill();
-      c.restore();
-    };
-
-    // Positive area (above zero — y < yZero)
-    fillArea(PT, yZero - PT, s.colorPos + 'aa');
-    // Negative area (below zero — y > yZero), only if series can go negative
-    if (s.colorNeg) fillArea(yZero, PT + plotH - yZero, s.colorNeg + 'aa');
-
-    // Smooth series outline
-    c.beginPath();
-    c.moveTo(pts[0].x, pts[0].y);
-    _catmullPath(c, pts);
-    c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
-    c.stroke();
+      c.strokeStyle = s.colorPos + '66'; c.lineWidth = 1; c.setLineDash([]);
+      c.stroke();
+    });
   });
 
   // Right axis: % labels always shown; SOC line when enabled
@@ -4364,15 +4531,16 @@ function drawPowerChart() {
     c.fillText(pct+'%', PL+plotW+4, y);
   }
   if (powerShowSoc) {
-    const socPts = powerData.filter(d => d.soc != null);
-    if (socPts.length > 1) {
-      const sPts = socPts.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
-      c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+    const socSegs = _splitByGaps(powerData.filter(d => d.soc != null));
+    c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
+    socSegs.forEach(seg => {
+      if (seg.length < 2) return;
+      const sPts = seg.map(d => ({ x: xPx(d.t), y: PT + plotH - (d.soc/100) * plotH }));
       c.beginPath();
       c.moveTo(sPts[0].x, sPts[0].y);
       _catmullPath(c, sPts);
       c.stroke();
-    }
+    });
   }
 
   // Adaptive X axis time labels
