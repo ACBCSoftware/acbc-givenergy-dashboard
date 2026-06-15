@@ -2286,11 +2286,12 @@ def _run_listen(st: dict):
                             pass
                         try:
                             time.sleep(0.5)
-                            # Gen1 rejects count>60 via fresh TCP (same limit as control page).
-                            # Two reads of ≤60 each cover HR 20-116.
-                            _p1 = _hr_read(_inverter_slave, 20, 60, timeout=5.0)
-                            _p2 = _hr_read(_inverter_slave, 80, 37, timeout=5.0)
-                            _snap_hr_data = _p1 + _p2
+                            # Gen1 only responds to standard Modbus reads at base=0 and
+                            # base=60 (page-aligned).  Read both pages -- same calls the
+                            # control page makes -- then slice out HR 20-116.
+                            _r0  = _hr_read(_inverter_slave,  0, 60, timeout=5.0)
+                            _r60 = _hr_read(_inverter_slave, 60, 60, timeout=5.0)
+                            _snap_hr_data = (_r0 + _r60)[20:117]
                             log.info("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
                         except Exception as exc2:
                             log.warning("Snapshot poll fallback failed: %s", exc2)
