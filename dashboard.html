@@ -53,7 +53,7 @@ html,body{
   border-radius:14px;padding:7px 13px;min-width:110px;cursor:default;
 }
 #wx-row1{display:flex;align-items:center;gap:7px}
-#wx-icon{font-size:1.4rem;line-height:1}
+#wx-icon{display:inline-flex;align-items:center;line-height:1}
 #wx-temp{font-size:1.1rem;font-weight:700;color:var(--text)}
 #wx-row2{font-size:.75rem;color:var(--muted);white-space:nowrap}
 #wx-row3{font-size:.65rem;color:var(--muted);opacity:.7;white-space:nowrap}
@@ -116,6 +116,20 @@ select optgroup{background:#172035;color:#7fa8cc}
 .sett-nav-link:active{background:rgba(255,255,255,.06)}
 .sett-nav-link span:first-child{font-size:.83rem;color:var(--text)}
 .sett-nav-link span:last-child{font-size:1.1rem;color:var(--muted);opacity:.6}
+/* Settings tile menu */
+#settings-menu-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px}
+.sett-tile{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  padding:22px 14px 18px;cursor:pointer;text-align:center;transition:background .2s;
+  display:flex;flex-direction:column;align-items:center;gap:8px}
+.sett-tile:active{background:rgba(255,255,255,.1)}
+.sett-tile-icon{font-size:1.4rem;line-height:1;color:var(--amber)}
+.sett-tile-label{font-size:.88rem;color:var(--text);font-weight:600}
+.sett-tile-hint{font-size:.7rem;color:var(--muted);opacity:.8}
+/* Settings sub-panels */
+.sett-sub-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+.sett-sub-top-row{display:flex;align-items:center;gap:12px;padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border)}
+.sett-sub-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
+.sett-sub-body{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:14px}
 /* Tariff panel */
 #tariff-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #tariff-top-row{
@@ -192,8 +206,10 @@ select optgroup{background:#172035;color:#7fa8cc}
 .slot-box .slot-time:focus{color:var(--amber)}
 .slot-entry{display:contents}
 .slot-hidden{display:none!important}
-.slot-vis-ctrl{display:flex;align-items:center;gap:6px;margin:4px 0 2px;font-size:.78rem;color:var(--muted)}
-.slot-vis-ctrl button{background:none;border:1px solid var(--border);color:var(--text);border-radius:4px;width:22px;height:22px;cursor:pointer;font-size:.9rem;line-height:1;padding:0}
+.slot-vis-ctrl{display:flex;align-items:center;gap:8px;margin:6px 0 4px;font-size:.82rem;color:var(--text)}
+.slot-vis-ctrl button{background:rgba(245,158,11,.15);border:1px solid rgba(245,158,11,.4);color:var(--amber);border-radius:6px;width:28px;height:28px;cursor:pointer;font-size:1rem;font-weight:700;line-height:1;padding:0;transition:background .15s}
+.slot-vis-ctrl button:hover{background:rgba(245,158,11,.28)}
+.slot-vis-ctrl button:active{background:rgba(245,158,11,.4)}
 /* Status message */
 #ctrl-msg{font-size:.78rem;text-align:center;min-height:20px;margin-top:2px;padding:0 4px}
 
@@ -836,23 +852,37 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <button id="sett-back" class="hist-back-style">&#8592; Back</button>
       <span id="sett-title">Settings</span>
     </div>
-    <div id="sett-body">
-      <button class="sett-save-btn" id="sett-save-top">Save Settings</button>
-      <div class="sett-section">
-        <div class="sett-heading">Tariff &amp; Costs</div>
-        <div class="sett-hint">Configure energy rates to see live cost estimates on the home screen.</div>
-        <div class="sett-nav-link" onclick="showView('tariff')">
-          <span>Tariff Settings &#8250;</span>
-          <span>&#8250;</span>
-        </div>
+    <div id="settings-menu-grid">
+      <div class="sett-tile" onclick="showView('settings-display')">
+        <div class="sett-tile-icon">&#9681;</div>
+        <div class="sett-tile-label">Display</div>
+        <div class="sett-tile-hint">Colours &amp; buttons</div>
       </div>
-      <div class="sett-section">
-        <div class="sett-heading">Inverter</div>
-        <div class="sett-row"><label>IP Address</label><input id="s-ip" type="text" placeholder="192.168.x.x"></div>
-        <div class="sett-row"><label>Port</label><input id="s-port" type="number" min="1" max="65535"></div>
-        <div class="sett-row"><label>Batteries</label><input id="s-batt" type="number" min="0" max="10"></div>
-        <div class="sett-row"><label>Poll interval (sec)</label><input id="s-poll" type="number" min="5" max="300"></div>
+      <div class="sett-tile" onclick="showView('settings-integrations')">
+        <div class="sett-tile-icon">&#9889;</div>
+        <div class="sett-tile-label">Integrations</div>
+        <div class="sett-tile-hint">Solar, weather &amp; tariff</div>
       </div>
+      <div class="sett-tile" onclick="showView('settings-admin')">
+        <div class="sett-tile-icon">&#9881;</div>
+        <div class="sett-tile-label">Admin</div>
+        <div class="sett-tile-hint">Password, logs &amp; backup</div>
+      </div>
+      <div class="sett-tile" onclick="showView('settings-inverter')">
+        <div class="sett-tile-icon">&#9107;</div>
+        <div class="sett-tile-label">Inverter</div>
+        <div class="sett-tile-hint">Connection &amp; hardware</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings: Display sub-panel -->
+  <div id="settings-display-panel" class="sett-sub-panel">
+    <div class="sett-sub-top-row">
+      <button id="sett-display-back" class="hist-back-style">&#8592; Back</button>
+      <span class="sett-sub-title">Display</span>
+    </div>
+    <div id="sett-display-body" class="sett-sub-body">
       <div class="sett-section">
         <div class="sett-heading">Power display (Control page)</div>
         <div class="sett-hint">Show charge/discharge limits in watts instead of %. Set the max values to match the figures shown in the official GivEnergy app.</div>
@@ -867,26 +897,59 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Max discharge power (W)</label><input id="s-maxdis" type="number" min="100" max="20000" step="100"></div>
       </div>
       <div class="sett-section">
-        <div class="sett-heading">Server</div>
-        <div class="sett-row"><label>Data retention (days)</label><input id="s-retention" type="number" min="30"></div>
-      </div>
-      <div class="sett-section">
-        <div class="sett-heading">Backup &amp; Restore</div>
-        <div class="sett-hint">Daily backups are saved to the <strong>backups</strong> folder and pruned after the chosen number of days. Download a copy to move to another machine.</div>
+        <div class="sett-heading">Quick Actions</div>
+        <div class="sett-hint">Adds Quick Charge and Quick Discharge buttons to the home page. Each button forces a 1-hour charge or discharge from the grid at the configured power level, then automatically reverts to normal operation. Requires exclusive inverter control — disable any cloud integration (Octopus, Predbat) first.</div>
         <div class="sett-row">
-          <label>Auto daily backup</label>
-          <select id="s-bkenabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
-            <option value="yes">On</option>
+          <label>Show buttons</label>
+          <select id="s-qa-enabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
             <option value="no">Off</option>
+            <option value="yes">On</option>
           </select>
         </div>
-        <div class="sett-row"><label>Keep backups (days)</label><input id="s-bkkeep" type="number" min="1" max="60"></div>
-        <div class="sett-row"><label>Last backup</label><span class="sett-value" id="s-bklast" style="font-size:.8rem;color:var(--muted)">—</span></div>
-        <button class="ctrl-btn ctrl-btn-sm" onclick="downloadBackup()" style="margin-top:6px">&#11015; Download backup</button>
-        <div class="sett-hint" style="margin-top:8px">Restore replaces all current history. The dashboard must be restarted afterwards.</div>
-        <input type="file" id="s-bkfile" accept=".gz,.db" style="font-size:.8rem;color:var(--muted)">
-        <button class="ctrl-btn red ctrl-btn-sm" onclick="restoreBackup()" style="margin-top:4px">&#8635; Restore from file</button>
-        <div id="s-bkmsg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
+        <div class="sett-row"><label>Charge power (%)</label><input id="s-qa-chg-pct" type="number" min="1" max="100"></div>
+        <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
+        <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Bar Chart Colours</div>
+        <div class="sett-hint">Colours used for the history and hourly bar charts, and the SOC line.</div>
+        <div class="sett-row"><label>Solar bars</label><input id="s-col-solar"    type="color" class="color-swatch" value="#f59e0b"></div>
+        <div class="sett-row"><label>Home bars</label><input id="s-col-home"     type="color" class="color-swatch" value="#38bdf8"></div>
+        <div class="sett-row"><label>Grid In bars</label><input id="s-col-grid_in"  type="color" class="color-swatch" value="#f87171"></div>
+        <div class="sett-row"><label>Grid Out bars</label><input id="s-col-grid_out" type="color" class="color-swatch" value="#4ade80"></div>
+        <div class="sett-row"><label>Bat Chg bars</label><input id="s-col-bat_chg"  type="color" class="color-swatch" value="#818cf8"></div>
+        <div class="sett-row"><label>Bat Dis bars</label><input id="s-col-bat_dis"  type="color" class="color-swatch" value="#c084fc"></div>
+        <div class="sett-row"><label>SOC % line</label><input id="s-col-soc"     type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Power Graph Colours</div>
+        <div class="sett-hint">Colours used for the Power graph (signed area chart).</div>
+        <div class="sett-row"><label>Solar</label><input id="s-col-graph_solar"   type="color" class="color-swatch" value="#f59e0b"></div>
+        <div class="sett-row"><label>Home</label><input id="s-col-graph_home"    type="color" class="color-swatch" value="#38bdf8"></div>
+        <div class="sett-row"><label>Battery charge</label><input id="s-col-graph_bat_chg" type="color" class="color-swatch" value="#818cf8"></div>
+        <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
+        <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
+        <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
+      </div>
+      <button class="sett-save-btn" id="sett-save-display">Save Settings</button>
+      <div id="sett-msg-display" class="sett-msg"></div>
+    </div>
+  </div>
+
+  <!-- Settings: Integrations sub-panel -->
+  <div id="settings-integrations-panel" class="sett-sub-panel">
+    <div class="sett-sub-top-row">
+      <button id="sett-integrations-back" class="hist-back-style">&#8592; Back</button>
+      <span class="sett-sub-title">Integrations</span>
+    </div>
+    <div id="sett-integrations-body" class="sett-sub-body">
+      <div class="sett-section">
+        <div class="sett-heading">Tariff &amp; Costs</div>
+        <div class="sett-hint">Configure energy rates to see live cost estimates on the home screen.</div>
+        <div class="sett-nav-link" onclick="showView('tariff')">
+          <span>Tariff Settings &#8250;</span>
+          <span>&#8250;</span>
+        </div>
       </div>
       <div class="sett-section">
         <div class="sett-heading">Weather (Met Office)</div>
@@ -914,22 +977,10 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           </div>
         </div>
         <div id="s-sf-lookup-hint" style="font-size:.72rem;color:var(--muted);padding:0 0 4px"></div>
-        <div class="sett-row">
-          <label>Latitude</label>
-          <input id="s-sf-lat" type="text" placeholder="e.g. 50.7184">
-        </div>
-        <div class="sett-row">
-          <label>Longitude</label>
-          <input id="s-sf-lon" type="text" placeholder="e.g. -3.5339">
-        </div>
-        <div class="sett-row">
-          <label>Panel tilt (0-90&deg;)</label>
-          <input id="s-sf-tilt" type="number" min="0" max="90" placeholder="e.g. 35">
-        </div>
-        <div class="sett-row">
-          <label>Azimuth from South</label>
-          <input id="s-sf-az" type="number" min="-180" max="180" placeholder="-90=E, 0=S, +90=W">
-        </div>
+        <div class="sett-row"><label>Latitude</label><input id="s-sf-lat" type="text" placeholder="e.g. 50.7184"></div>
+        <div class="sett-row"><label>Longitude</label><input id="s-sf-lon" type="text" placeholder="e.g. -3.5339"></div>
+        <div class="sett-row"><label>Panel tilt (0-90&deg;)</label><input id="s-sf-tilt" type="number" min="0" max="90" placeholder="e.g. 35"></div>
+        <div class="sett-row"><label>Azimuth from South</label><input id="s-sf-az" type="number" min="-180" max="180" placeholder="-90=E, 0=S, +90=W"></div>
         <div style="display:flex;gap:6px;align-items:center;padding:2px 0">
           <label style="font-size:.76rem;color:var(--muted);opacity:.8;flex-shrink:0">Or compass bearing</label>
           <input id="s-sf-compass" type="number" min="0" max="360" placeholder="e.g. 168" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:6px 8px;width:70px;text-align:center">
@@ -937,26 +988,21 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
           <span id="s-sf-compass-hint" style="font-size:.72rem;color:var(--muted);flex:1"></span>
         </div>
         <div class="sett-hint" style="opacity:.7">Compass bearing is 0=N, 90=E, 180=S, 270=W (as shown by a phone compass or solar survey). Convert fills the azimuth field above.</div>
-        <div class="sett-row">
-          <label>Panel kWp</label>
-          <input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0">
-        </div>
-        <div class="sett-row">
-          <label>API key (optional)</label>
-          <input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier">
-        </div>
+        <div class="sett-row"><label>Panel kWp</label><input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0"></div>
+        <div class="sett-row"><label>API key (optional)</label><input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier"></div>
       </div>
-      <div class="sett-section">
-        <div class="sett-heading">Updates</div>
-        <div class="sett-hint">Checks GitHub once a day for a new release. No personal data is sent.</div>
-        <div class="sett-row">
-          <label>Check for updates</label>
-          <select id="s-checkupdates" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
-            <option value="yes">On</option>
-            <option value="no">Off</option>
-          </select>
-        </div>
-      </div>
+      <button class="sett-save-btn" id="sett-save-integrations">Save Settings</button>
+      <div id="sett-msg-integrations" class="sett-msg"></div>
+    </div>
+  </div>
+
+  <!-- Settings: Admin sub-panel -->
+  <div id="settings-admin-panel" class="sett-sub-panel">
+    <div class="sett-sub-top-row">
+      <button id="sett-admin-back" class="hist-back-style">&#8592; Back</button>
+      <span class="sett-sub-title">Admin</span>
+    </div>
+    <div id="sett-admin-body" class="sett-sub-body">
       <div class="sett-section">
         <div class="sett-heading">Admin Password</div>
         <div class="sett-hint">Leave blank to keep current password</div>
@@ -972,41 +1018,23 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-hint">When off, Quick Actions, Inverter Control and the Scheduler work without a password. Settings always stays password-protected. Only turn this off if the dashboard is on a trusted local network.</div>
       </div>
       <div class="sett-section">
-        <div class="sett-heading">Bar Chart Colours</div>
-        <div class="sett-hint">Colours used for the history and hourly bar charts, and the SOC line.</div>
-        <div class="sett-row"><label>Solar bars</label><input id="s-col-solar"    type="color" class="color-swatch" value="#f59e0b"></div>
-        <div class="sett-row"><label>Home bars</label><input id="s-col-home"     type="color" class="color-swatch" value="#38bdf8"></div>
-        <div class="sett-row"><label>Grid In bars</label><input id="s-col-grid_in"  type="color" class="color-swatch" value="#f87171"></div>
-        <div class="sett-row"><label>Grid Out bars</label><input id="s-col-grid_out" type="color" class="color-swatch" value="#4ade80"></div>
-        <div class="sett-row"><label>Bat Chg bars</label><input id="s-col-bat_chg"  type="color" class="color-swatch" value="#818cf8"></div>
-        <div class="sett-row"><label>Bat Dis bars</label><input id="s-col-bat_dis"  type="color" class="color-swatch" value="#c084fc"></div>
-        <div class="sett-row"><label>SOC % line</label><input id="s-col-soc"     type="color" class="color-swatch" value="#fbbf24"></div>
-      </div>
-      <div class="sett-section">
-        <div class="sett-heading">Power Graph Colours</div>
-        <div class="sett-hint">Colours used for the Power graph (signed area chart).</div>
-        <div class="sett-row"><label>Solar</label><input id="s-col-graph_solar"   type="color" class="color-swatch" value="#f59e0b"></div>
-        <div class="sett-row"><label>Home</label><input id="s-col-graph_home"    type="color" class="color-swatch" value="#38bdf8"></div>
-        <div class="sett-row"><label>Battery charge</label><input id="s-col-graph_bat_chg" type="color" class="color-swatch" value="#818cf8"></div>
-        <div class="sett-row"><label>Battery discharge</label><input id="s-col-graph_bat_dis" type="color" class="color-swatch" value="#c084fc"></div>
-        <div class="sett-row"><label>Grid</label><input id="s-col-graph_grid"    type="color" class="color-swatch" value="#f87171"></div>
-        <div class="sett-row"><label>SOC % line</label><input id="s-col-graph_soc" type="color" class="color-swatch" value="#fbbf24"></div>
-      </div>
-      <div class="sett-section">
-        <div class="sett-heading">Quick Actions</div>
-        <div class="sett-hint">Adds Quick Charge and Quick Discharge buttons to the home page. Each button forces a 1-hour charge or discharge from the grid at the configured power level, then automatically reverts to normal operation. Requires exclusive inverter control — disable any cloud integration (Octopus, Predbat) first.</div>
+        <div class="sett-heading">Backup &amp; Restore</div>
+        <div class="sett-hint">Daily backups are saved to the <strong>backups</strong> folder and pruned after the chosen number of days. Download a copy to move to another machine.</div>
         <div class="sett-row">
-          <label>Show buttons</label>
-          <select id="s-qa-enabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
-            <option value="no">Off</option>
+          <label>Auto daily backup</label>
+          <select id="s-bkenabled" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
             <option value="yes">On</option>
+            <option value="no">Off</option>
           </select>
         </div>
-        <div class="sett-row"><label>Charge power (%)</label><input id="s-qa-chg-pct" type="number" min="1" max="100"></div>
-        <div class="sett-row"><label>Discharge power (%)</label><input id="s-qa-dis-pct" type="number" min="1" max="100"></div>
-        <div class="sett-row"><label>Charge target SOC (%)</label><input id="s-qa-chg-soc" type="number" min="4" max="100"></div>
+        <div class="sett-row"><label>Keep backups (days)</label><input id="s-bkkeep" type="number" min="1" max="60"></div>
+        <div class="sett-row"><label>Last backup</label><span class="sett-value" id="s-bklast" style="font-size:.8rem;color:var(--muted)">—</span></div>
+        <button class="ctrl-btn ctrl-btn-sm" onclick="downloadBackup()" style="margin-top:6px">&#11015; Download backup</button>
+        <div class="sett-hint" style="margin-top:8px">Restore replaces all current history. The dashboard must be restarted afterwards.</div>
+        <input type="file" id="s-bkfile" accept=".gz,.db" style="font-size:.8rem;color:var(--muted)">
+        <button class="ctrl-btn red ctrl-btn-sm" onclick="restoreBackup()" style="margin-top:4px">&#8635; Restore from file</button>
+        <div id="s-bkmsg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
       </div>
-
       <div class="sett-section">
         <div class="sett-heading">Diagnostics</div>
         <div class="sett-hint">Log files are saved alongside the app and rotated daily. Use Debug level to capture detailed inverter communication for fault diagnosis -- switch back to Warning for normal use.</div>
@@ -1022,9 +1050,42 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="ctrl-btn ctrl-btn-sm" onclick="downloadLog()" style="margin-top:6px">&#11015; Download log</button>
         <div id="s-log-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
       </div>
+      <div class="sett-section">
+        <div class="sett-heading">Data</div>
+        <div class="sett-row"><label>Data retention (days)</label><input id="s-retention" type="number" min="30"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Updates</div>
+        <div class="sett-hint">Checks GitHub once a day for a new release. No personal data is sent.</div>
+        <div class="sett-row">
+          <label>Check for updates</label>
+          <select id="s-checkupdates" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="yes">On</option>
+            <option value="no">Off</option>
+          </select>
+        </div>
+      </div>
+      <button class="sett-save-btn" id="sett-save-admin">Save Settings</button>
+      <div id="sett-msg-admin" class="sett-msg"></div>
+    </div>
+  </div>
 
-      <button id="sett-save" class="sett-save-btn">Save Settings</button>
-      <div id="sett-msg" class="sett-msg"></div>
+  <!-- Settings: Inverter sub-panel -->
+  <div id="settings-inverter-panel" class="sett-sub-panel">
+    <div class="sett-sub-top-row">
+      <button id="sett-inverter-back" class="hist-back-style">&#8592; Back</button>
+      <span class="sett-sub-title">Inverter</span>
+    </div>
+    <div id="sett-inverter-body" class="sett-sub-body">
+      <div class="sett-section">
+        <div class="sett-heading">Connection</div>
+        <div class="sett-row"><label>IP Address</label><input id="s-ip" type="text" placeholder="192.168.x.x"></div>
+        <div class="sett-row"><label>Port</label><input id="s-port" type="number" min="1" max="65535"></div>
+        <div class="sett-row"><label>Batteries</label><input id="s-batt" type="number" min="0" max="10"></div>
+        <div class="sett-row"><label>Poll interval (sec)</label><input id="s-poll" type="number" min="5" max="300"></div>
+      </div>
+      <button class="sett-save-btn" id="sett-save-inverter">Save Settings</button>
+      <div id="sett-msg-inverter" class="sett-msg"></div>
     </div>
   </div>
 
@@ -1914,13 +1975,41 @@ async function poll() {
 }
 
 // ── Weather ──────────────────────────────────────────────────────────────────
-const WX_ICON = {
-  0:'🌙', 1:'☀️', 2:'🌤️', 3:'🌤️', 5:'🌁', 6:'🌁',
-  7:'☁️', 8:'☁️', 9:'🌦️', 10:'🌦️', 11:'🌧️', 12:'🌧️',
-  13:'🌧️', 14:'🌧️', 15:'🌧️', 16:'🌨️', 17:'🌨️', 18:'🌨️',
-  19:'🌨️', 20:'🌨️', 21:'🌨️', 22:'❄️', 23:'❄️', 24:'❄️',
-  25:'❄️', 26:'❄️', 27:'❄️', 28:'⛈️', 29:'⛈️', 30:'⛈️'
-};
+const WX_ICON = (() => {
+  const img = f => `<img src="/icons/weather/mc-${f}.svg" width="32" height="32" alt="">`;
+  return {
+    0:  img('clear-night'),
+    1:  img('clear-day'),
+    2:  img('partly-cloudy-night'),
+    3:  img('partly-cloudy-day'),
+    5:  img('fog-day'),
+    6:  img('fog-day'),
+    7:  img('overcast-day'),
+    8:  img('overcast'),
+    9:  img('partly-cloudy-night-rain'),
+    10: img('partly-cloudy-day-drizzle'),
+    11: img('drizzle'),
+    12: img('rain'),
+    13: img('partly-cloudy-night-rain'),
+    14: img('partly-cloudy-day-rain'),
+    15: img('overcast-rain'),
+    16: img('partly-cloudy-night-sleet'),
+    17: img('partly-cloudy-day-sleet'),
+    18: img('sleet'),
+    19: img('hail'),
+    20: img('hail'),
+    21: img('overcast-hail'),
+    22: img('snow'),
+    23: img('snow'),
+    24: img('snow'),
+    25: img('overcast-snow'),
+    26: img('overcast-snow'),
+    27: img('overcast-snow'),
+    28: img('thunderstorms-night-rain'),
+    29: img('thunderstorms-day-rain'),
+    30: img('thunderstorms'),
+  };
+})();
 
 async function pollWeather() {
   let retryMs = 600000;   // default: refresh every 10 mins
@@ -1930,7 +2019,7 @@ async function pollWeather() {
     if (!r.ok) throw new Error('HTTP '+r.status);
     const w = await r.json();
     if (w.ok) {
-      $('wx-icon').textContent = WX_ICON[w.weather_code] ?? '🌡️';
+      $('wx-icon').innerHTML = WX_ICON[w.weather_code] ?? WX_ICON[1];
       $('wx-temp').textContent = w.temp + '°C';
       const hum = w.humidity != null ? ' · ' + w.humidity + '%' : '';
       $('wx-row2').textContent = w.wind_dir + ' ' + w.wind_mph + 'mph' + hum;
@@ -2125,7 +2214,7 @@ function _renderSlots(type, slots, profile) {
   });
 
   let html = '';
-  if (extended && slots.length > 1) {
+  if (slots.length > 1) {
     const cid = type + '-vis-count';
     html += `<div class="slot-vis-ctrl">
       <button onclick="_setSlotVisible(_slotVisible-1)" title="Show fewer slots">&#8722;</button>
@@ -2179,7 +2268,7 @@ function _renderSlots(type, slots, profile) {
     el.addEventListener('input', () => { el.dataset.dirty = '1'; });
   });
 
-  if (extended) _applySlotVisibility(type);
+  if (slots.length > 1) _applySlotVisibility(type);
 }
 
 function _setSlotVisible(n) {
@@ -2200,7 +2289,8 @@ function _applySlotVisibility(type) {
     const n        = parseInt(entry.dataset.slot);
     const start    = document.getElementById(`${pfx}${n}-start`);
     const end      = document.getElementById(`${pfx}${n}-end`);
-    const hasValue = start && end && (start.value || end.value);
+    const nonEmpty = v => v && v !== '00:00';
+    const hasValue = start && end && (nonEmpty(start.value) || nonEmpty(end.value));
     entry.classList.toggle('slot-hidden', n > _slotVisible && !hasValue);
   });
 }
@@ -2861,10 +2951,20 @@ function _confirmLeave(dirty, action) {
 $('sett-back').addEventListener('click', () => {
   _confirmLeave(_settDirty, () => { _settDirty = false; _adminPw = ''; showView('live'); });
 });
-$('sett-save-top').addEventListener('click', () => $('sett-save').click());
+// Wire 4 sub-panel back buttons — return to menu without clearing _adminPw
+['display', 'integrations', 'admin', 'inverter'].forEach(name => {
+  $('sett-' + name + '-back').addEventListener('click', () => {
+    _confirmLeave(_settDirty, () => { _settDirty = false; showView('settings'); });
+  });
+});
 
-// Wire dirty tracking on all App Settings inputs
-document.querySelectorAll('#sett-body input, #sett-body select').forEach(el => {
+// Wire dirty tracking on all Settings sub-panel inputs
+document.querySelectorAll(
+  '#sett-display-body input, #sett-display-body select,' +
+  '#sett-integrations-body input, #sett-integrations-body select,' +
+  '#sett-admin-body input, #sett-admin-body select,' +
+  '#sett-inverter-body input, #sett-inverter-body select'
+).forEach(el => {
   el.addEventListener('change', _markSettDirty);
   el.addEventListener('input',  _markSettDirty);
 });
@@ -3199,7 +3299,7 @@ async function saveTariff() {
 }
 
 $('tariff-back').addEventListener('click', () => {
-  _confirmLeave(_tariffDirty, () => { _tariffDirty = false; showView('settings'); });
+  _confirmLeave(_tariffDirty, () => { _tariffDirty = false; showView('settings-integrations'); });
 });
 ['tariff-save-top','tariff-save-bot'].forEach(id => {
   $( id).addEventListener('click', saveTariff);
@@ -3362,7 +3462,8 @@ async function loadSettings() {
     $('s-log-level').value     = s.log_level          || 'warning';
     $('s-log-retention').value = s.log_retention_days || 7;
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
-    $('sett-msg').textContent = '';
+    ['sett-msg-display','sett-msg-integrations','sett-msg-admin','sett-msg-inverter']
+      .forEach(id => { $(id).textContent = ''; });
     _settDirty = false;
     if (s.chart_colors) {
       ['solar','home','grid_in','grid_out','bat_chg','bat_dis','soc',
@@ -3375,19 +3476,18 @@ async function loadSettings() {
   } catch(e) {}
 }
 
-$('sett-save').addEventListener('click', async () => {
-  // Password change validation
+async function _doSaveSettings(msgEl) {
   const newPw  = $('s-newpw').value.trim();
   const confPw = $('s-confirmpw').value.trim();
   if (newPw && newPw !== confPw) {
-    $('sett-msg').style.color = '#f87171';
-    $('sett-msg').textContent = 'Passwords do not match';
+    msgEl.style.color = '#f87171';
+    msgEl.textContent = 'Passwords do not match';
     return;
   }
   const geohashVal = $('s-wxhash').value.trim();
   if (geohashVal && geohashVal.length !== 6) {
-    $('sett-msg').style.color = '#f87171';
-    $('sett-msg').textContent = 'Geohash must be exactly 6 characters -- use the Lookup button to find yours';
+    msgEl.style.color = '#f87171';
+    msgEl.textContent = 'Geohash must be exactly 6 characters -- use the Lookup button to find yours';
     return;
   }
   const body = {
@@ -3439,29 +3539,33 @@ $('sett-save').addEventListener('click', async () => {
   };
   try {
     const r   = await fetch('/api/settings', {method:'POST', headers:_settHeaders(), body:JSON.stringify(body)});
-    if (r.status === 401) { $('sett-msg').style.color='#f87171'; $('sett-msg').textContent='Session expired — please re-enter password'; return; }
+    if (r.status === 401) { msgEl.style.color='#f87171'; msgEl.textContent='Session expired — please re-enter password'; return; }
     const res = await r.json();
     if (res.ok) {
-      if (newPw) _adminPw = newPw;   // keep session in sync with new password
+      if (newPw) _adminPw = newPw;
       _weatherConfigured = res.weather_configured;
       _sfConfigured      = !!res.solar_forecast_configured;
       applyChartColors(body.chart_colors);
       _settDirty = false;
-      $('sett-msg').style.color = '#4ade80';
-      $('sett-msg').textContent = '✓ Saved';
+      msgEl.style.color = '#4ade80';
+      msgEl.textContent = '✓ Saved';
       $('s-wxkey').value = ''; $('s-newpw').value = ''; $('s-confirmpw').value = '';
       $('s-sf-apikey').value = '';
       $('s-wxkey').placeholder = _weatherConfigured ? 'Key is set — paste new key to change' : 'Paste API key';
       if (_weatherConfigured) pollWeather();
       _updateSfVisibility();
     } else {
-      $('sett-msg').style.color = '#f87171';
-      $('sett-msg').textContent = 'Error: ' + (res.error || 'unknown');
+      msgEl.style.color = '#f87171';
+      msgEl.textContent = 'Error: ' + (res.error || 'unknown');
     }
   } catch(e) {
-    $('sett-msg').style.color = '#f87171';
-    $('sett-msg').textContent = 'Save failed';
+    msgEl.style.color = '#f87171';
+    msgEl.textContent = 'Save failed';
   }
+}
+
+['sett-save-display', 'sett-save-integrations', 'sett-save-admin', 'sett-save-inverter'].forEach(btnId => {
+  $(btnId).addEventListener('click', () => _doSaveSettings($(btnId.replace('sett-save-', 'sett-msg-'))));
 });
 
 // ── Solar forecast ────────────────────────────────────────────────────────────
@@ -3758,8 +3862,12 @@ function showView(v) {
   $('bat-section').style.display    = live         ? '' : 'none';
   $('tiles').style.display          = live         ? '' : 'none';
   $('hist-panel').style.display     = v==='history'? 'flex' : 'none';
-  $('settings-panel').style.display = v==='settings'? 'flex' : 'none';
-  $('tariff-panel').style.display   = v==='tariff'  ? 'flex' : 'none';
+  $('settings-panel').style.display             = v==='settings'             ? 'flex' : 'none';
+  $('settings-display-panel').style.display     = v==='settings-display'     ? 'flex' : 'none';
+  $('settings-integrations-panel').style.display= v==='settings-integrations'? 'flex' : 'none';
+  $('settings-admin-panel').style.display       = v==='settings-admin'       ? 'flex' : 'none';
+  $('settings-inverter-panel').style.display    = v==='settings-inverter'    ? 'flex' : 'none';
+  $('tariff-panel').style.display               = v==='tariff'               ? 'flex' : 'none';
   $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
@@ -3788,7 +3896,8 @@ function showView(v) {
     _pauseLoop();
   }
   if (v==='history')  loadHistory();
-  if (v==='settings') loadSettings();
+  if (v==='settings' || v==='settings-display' || v==='settings-integrations' ||
+      v==='settings-admin' || v==='settings-inverter') loadSettings();
   if (v==='tariff')   loadTariff();
   if (v==='control')  loadControlState();
   if (v==='logs')     loadLogs();

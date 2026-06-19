@@ -112,6 +112,12 @@ CHECK_UPDATES = _cfg.getboolean("server", "check_for_updates", fallback=True)
 SCHEDULER_ENABLED  = _cfg.getboolean("scheduler", "enabled", fallback=False)
 SCHEDULER_BASELINE = _cfg.get("scheduler", "baseline", fallback="eco").strip().lower()
 SCHEDULER_BASELINE_SOC_RESERVE = max(4, min(100, _cfg.getint("scheduler", "baseline_soc_reserve", fallback=4)))
+
+# ── Database schema version ────────────────────────────────────────────────────
+# Increment when a new migration step is added to init_db().
+# PRAGMA user_version tracks which version the installed DB is on.
+# Migration steps follow the pattern: if version < N: …; conn.execute("PRAGMA user_version = N")
+_SCHEMA_VERSION = 1
 # NOTE: the scheduler requires exclusive inverter control.  If a cloud integration
 # (Octopus Intelligent Flux, Predbat, etc.) is active, its register locks will cause
 # scheduler writes to be silently rejected by the firmware — behaviour is undefined.
@@ -1047,12 +1053,12 @@ def _db():
 def init_db():
     # ── Schema migration policy ────────────────────────────────────────────────
     # This runs on every startup and upgrades an existing database IN PLACE
-    # without ever dropping data:
-    #   • New tables  → CREATE TABLE IF NOT EXISTS
-    #   • New columns → ALTER TABLE ADD COLUMN, guarded by a PRAGMA check
-    # Existing rows and the user's history are always preserved across upgrades.
-    # When adding future schema changes, follow the same additive pattern below.
+    # without ever dropping data.  PRAGMA user_version tracks which migrations
+    # have been applied; increment _SCHEMA_VERSION and add a guarded block below
+    # for each new change.  Existing tables use CREATE IF NOT EXISTS; new columns
+    # use ALTER TABLE guarded by a PRAGMA table_info check.
     with _db() as conn:
+        _db_version = conn.execute("PRAGMA user_version").fetchone()[0]
         conn.execute("""
             CREATE TABLE IF NOT EXISTS snapshots (
                 ts                  INTEGER PRIMARY KEY,
@@ -1131,6 +1137,11 @@ def init_db():
                 export_p   REAL NOT NULL DEFAULT 0
             )
         """)
+        # ── Mark schema version 1 (all tables above + additive column migrations)
+        if _db_version < 1:
+            conn.execute(f"PRAGMA user_version = 1")
+        # Future migrations: add `if _db_version < N:` blocks here and
+        # bump _SCHEMA_VERSION at the top of the file.
         conn.commit()
 
 def _log_snapshot(data):
@@ -3800,6 +3811,60 @@ def _sched_apply(desired: dict) -> None:
         _log_control("scheduler", desired, True, "Scheduler: " + summary)
         log.warning("Scheduler applied: %s", summary)
 
+def _group_regs(reg_keys, gap=5):
+    """Group register numbers into contiguous read ranges, merging gaps <= gap registers.
+    Returns [(base, count), ...] — minimises the number of _hr_read calls."""
+    if not reg_keys:
+        return []
+    keys = sorted(reg_keys)
+    ranges, start, end = [], keys[0], keys[0]
+    for k in keys[1:]:
+        if k <= end + gap:
+            end = k
+        else:
+            ranges.append((start, end - start + 1))
+            start = end = k
+    ranges.append((start, end - start + 1))
+    return ranges
+
+
+def _sched_drift_check():
+    """Read back registers the scheduler last wrote and re-apply if any have drifted.
+    Runs every 5 minutes so external changes (GE app, HA, cloud portal, inverter reset)
+    are corrected within that window rather than waiting for the next block boundary."""
+    global _sched_applied_sig
+    if not SCHEDULER_ENABLED or not _sched_applied_regs or _sched_applied_sig is None:
+        return
+    snap = dict(_sched_applied_regs)   # thread-safe snapshot
+    slave = _inverter_slave if _inverter_slave else 0x11
+    drifted = []
+    try:
+        for base, count in _group_regs(snap.keys()):
+            vals = _hr_read(slave, base, count, timeout=3.0)
+            for i, reg in enumerate(range(base, base + count)):
+                if reg in snap and i < len(vals) and vals[i] != snap[reg]:
+                    drifted.append((reg, snap[reg], vals[i]))
+    except Exception as exc:
+        log.warning("Scheduler drift check read failed: %s", exc)
+        return
+    if drifted:
+        detail = ", ".join(f"HR{r}={a}(exp {e})" for r, e, a in drifted)
+        log.warning("Scheduler: state drift detected — re-applying (%s)", detail)
+        _log_event("info", "Scheduler: state drift detected — re-applying")
+        _sched_applied_sig = None   # force full re-apply on next 15 s tick
+
+
+def _sched_drift_loop():
+    """Every 5 minutes verify the scheduler's last-written registers still match the inverter."""
+    time.sleep(60)   # let startup and first apply settle
+    while True:
+        try:
+            _sched_drift_check()
+        except Exception as exc:
+            log.error("Scheduler drift loop: %s", exc)
+        time.sleep(300)
+
+
 def _scheduler_loop():
     """Evaluate the active block every 15s and, on a change (or at startup so a reboot
     self-corrects within one block), apply it via _sched_apply — in THIS thread, so the
@@ -3877,7 +3942,9 @@ def get_control():
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     try:
-        return jsonify(_read_control_state())
+        resp = make_response(jsonify(_read_control_state()))
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
 
@@ -3885,7 +3952,7 @@ def get_control():
 def post_control():
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data    = request.get_json(force=True) or {}
+    data    = (request.get_json(silent=True) or {})
     command = data.get("command", "")
     params  = data.get("params", {})
     if not isinstance(params, dict):
@@ -3963,7 +4030,7 @@ def save_schedule():
     """Create (no id) or update (id present) a single rule."""
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
     try:
         clean = _validate_rule(data)
     except (ValueError, KeyError, TypeError) as exc:
@@ -4002,7 +4069,7 @@ def save_schedule_config():
     global SCHEDULER_ENABLED, SCHEDULER_BASELINE, SCHEDULER_BASELINE_SOC_RESERVE
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(Path(__file__).parent / "config.ini")
     if not cfg.has_section("scheduler"):
@@ -4035,7 +4102,7 @@ def quick_action_endpoint():
     if not QUICK_ACTIONS_ENABLED:
         return jsonify({"ok": False, "error": "Quick actions are not enabled in settings"})
 
-    data   = request.get_json(force=True) or {}
+    data   = (request.get_json(silent=True) or {})
     action = data.get("action", "")          # "charge" or "discharge"
     start  = bool(data.get("start", True))
 
@@ -4341,7 +4408,7 @@ def save_settings():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
 
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
 
     # -- input validation --
     if "inverter_ip" in data:
@@ -4517,7 +4584,7 @@ def save_tariff():
     global TARIFF_SOURCE, OCTOPUS_REGION, OCTOPUS_POSTCODE
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
 
     # -- input validation --
     if "tariff_source" in data and str(data["tariff_source"]) not in _TARIFF_SOURCES:
@@ -4650,7 +4717,7 @@ def tariff_fetch_now():
 def tariff_lookup_region():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data     = request.get_json(force=True) or {}
+    data     = (request.get_json(silent=True) or {})
     postcode = data.get("postcode", "").strip()
     if not postcode:
         return jsonify({"ok": False, "error": "Postcode required"}), 400
@@ -4672,8 +4739,9 @@ def get_log():
     log_path = Path(__file__).parent / "dashboard.log"
     if not log_path.exists():
         return jsonify({"ok": False, "error": "No log file yet"}), 404
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return send_file(str(log_path), as_attachment=True,
-                     download_name="dashboard.log", mimetype="text/plain")
+                     download_name=f"dashboard_{stamp}.log", mimetype="text/plain")
 
 
 @app.route("/api/backup/export")
@@ -4781,7 +4849,7 @@ def weather_lookup_postcode():
         return jsonify({"ok": False,
                         "error": "Met Office API key not configured — "
                                  "enter and save your API key first, then retry Lookup"}), 400
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
@@ -4823,7 +4891,7 @@ def sf_lookup_postcode():
     configured without any weather setup.  Returns {ok, lat, lng, area}."""
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data = request.get_json(force=True) or {}
+    data = (request.get_json(silent=True) or {})
     raw = (data.get("postcode") or "").strip().upper().replace(" ", "")
     if not raw:
         return jsonify({"ok": False, "error": "No postcode provided"}), 400
@@ -5094,6 +5162,19 @@ def add_security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    # CSP: allow inline scripts/styles (single-page app requirement) but block
+    # external origins, object embeds, and framing from outside.
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "font-src 'self' data:; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "frame-ancestors 'none'"
+    )
     return response
 
 
@@ -5106,7 +5187,8 @@ if __name__ == "__main__":
     t.start()
 
     # Scheduler block engine — inert until the master switch is enabled.
-    threading.Thread(target=_scheduler_loop, daemon=True).start()
+    threading.Thread(target=_scheduler_loop,    daemon=True).start()
+    threading.Thread(target=_sched_drift_loop,  daemon=True).start()
 
     # Quick-action startup recovery: re-arm the in-memory timer or run housekeeping
     # if a quick action was active when the process last stopped.
