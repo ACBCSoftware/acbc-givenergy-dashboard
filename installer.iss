@@ -192,9 +192,11 @@ Source: "generate_icons.py";   DestDir: "{app}"; Flags: ignoreversion
 Source: "config.ini.example";  DestDir: "{app}"; Flags: ignoreversion
 Source: "start_dashboard.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "stop_dashboard.bat";  DestDir: "{app}"; Flags: ignoreversion
+Source: "icons\weather\*";     DestDir: "{app}\icons\weather"; Flags: ignoreversion
 
 [Dirs]
 Name: "{app}\icons"
+Name: "{app}\icons\weather"
 
 [Run]
 ; 1. Create Python virtual environment using the resolved interpreter

@@ -53,6 +53,15 @@ def add_command(zf, name):
     zf.writestr(zi, text.encode("utf-8"))
 
 
+def add_dir(zf, rel_dir):
+    """Add all files in a subdirectory, preserving the relative path."""
+    abs_dir = os.path.join(REPO, rel_dir)
+    for fname in sorted(os.listdir(abs_dir)):
+        src = os.path.join(abs_dir, fname)
+        if os.path.isfile(src):
+            add_plain(zf, os.path.join(rel_dir, fname).replace("\\", "/"))
+
+
 def main():
     if os.path.exists(OUT):
         os.remove(OUT)
@@ -61,6 +70,7 @@ def main():
             add_plain(zf, n)
         for n in COMMANDS:
             add_command(zf, n)
+        add_dir(zf, "icons/weather")
     # Verify
     print(f"Built {OUT}")
     with zipfile.ZipFile(OUT) as zf:

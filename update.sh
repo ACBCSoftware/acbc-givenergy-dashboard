@@ -61,6 +61,11 @@ info "Updating application files..."
 for f in $APP_FILES; do
     [ -f "$f" ] && sudo cp "$f" "$INSTALL_DIR/"
 done
+# Weather icons directory (added v2.8)
+if [ -d "icons/weather" ]; then
+    sudo mkdir -p "$INSTALL_DIR/icons/weather"
+    sudo cp icons/weather/*.svg "$INSTALL_DIR/icons/weather/"
+fi
 sudo chown -R "$RUN_USER":"$RUN_USER" "$INSTALL_DIR"
 
 # ── 4. Refresh Python dependencies (in case new ones were added) ──────────────
