@@ -71,6 +71,21 @@ standing_charge_p = 0
 ; tou_1_rate_p         = 7.50    ; import rate during this window
 ; tou_1_export_rate_p  = 15.00   ; export rate during this window (0 = use flat export_rate_p)
 
+[predictive_charge]
+; Predictive overnight charge target. When a charge schedule has "predictive"
+; enabled, the app sets the charge target SOC from tomorrow's solar forecast
+; minus your typical morning demand, so you don't import a fuller charge than
+; the day needs. Requires the solar forecast (see the dashboard's Solar Forecast
+; setup) and your usable battery capacity below.
+; battery_kwh must be set for the feature to work -- 0 leaves it disabled.
+battery_kwh         = 0
+; Fraction of the forecast to trust (0-1). Lower = more cautious, charges more.
+pessimism_factor    = 0.85
+; kWh to keep in reserve for the coming evening if there is no demand history yet.
+evening_reserve_kwh = 3.0
+; Floor for the computed target -- it will never set a charge target below this %.
+minimum_soc         = 20
+
 [logging]
 ; Log level: warning (default) | info | debug
 ; Debug captures detailed inverter communication -- use only for fault diagnosis.

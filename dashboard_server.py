@@ -93,6 +93,11 @@ SF_AZ      = _cfg.get("solar_forecast", "panel_azimuth", fallback="").strip()
 SF_KWP     = _cfg.get("solar_forecast", "panel_kwp",     fallback="").strip()
 SF_API_KEY = _cfg.get("solar_forecast", "api_key",       fallback="").strip()
 
+PRED_BATTERY_KWH     = _cfg.getfloat("predictive_charge", "battery_kwh",        fallback=0.0)
+PRED_PESSIMISM       = _cfg.getfloat("predictive_charge", "pessimism_factor",    fallback=0.85)
+PRED_EVENING_RESERVE = _cfg.getfloat("predictive_charge", "evening_reserve_kwh", fallback=3.0)
+PRED_MIN_SOC         = _cfg.getint(  "predictive_charge", "minimum_soc",         fallback=20)
+
 
 def _sf_configured() -> bool:
     return all([SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP])
@@ -970,7 +975,7 @@ def _maybe_backup():
     try:
         _make_backup_gz(dest)
         _prune_backups(BACKUP_KEEP_DAYS)
-        log.warning("Daily backup written: %s", dest.name)
+        log.info("Daily backup written: %s", dest.name)
     except Exception as exc:
         log.error("Backup failed: %s", exc)
 
@@ -1002,7 +1007,7 @@ def _apply_pending_import():
             if p.exists():
                 p.unlink(missing_ok=True)
         shutil.move(str(PENDING_IMPORT), str(DB_PATH))
-        log.warning("Imported database applied from staged restore.")
+        log.info("Imported database applied from staged restore.")
     except Exception as exc:
         log.error("Failed to apply pending import: %s", exc)
 
@@ -1121,6 +1126,8 @@ def init_db():
         sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
         if "power_pct" not in sched_cols:
             conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
+        if "predictive" not in sched_cols:
+            conn.execute("ALTER TABLE schedules ADD COLUMN predictive INTEGER NOT NULL DEFAULT 0")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_costs (
                 date              TEXT PRIMARY KEY,   -- YYYY-MM-DD
@@ -1454,11 +1461,18 @@ _last_good:   dict = {}
 # ~0.08 % per 10 s poll.  A threshold of 5 % is ~60× the physical maximum,
 # so this will never suppress real movement while catching corrupt IR59 reads.
 _SOC_MAX_DELTA = 5
-_last_soc: int | None = None
+_last_soc:       int   | None = None
+
+# BMS splice guard — track last good voltage and temperature so we can detect
+# the sub-bus corruption signature documented in givenergy-modbus #256:
+# the dongle re-frames corrupt RS485 data with a valid CRC, causing v_battery
+# and t_battery to drop to 0 simultaneously while SOC also zeroes.
+_last_v_battery: float | None = None
+_last_t_battery: float | None = None
 
 def _smooth(data: dict) -> dict:
-    """Return a copy of data with brief zero-blips and SOC spikes suppressed."""
-    global _last_soc
+    """Return a copy of data with zero-blips, SOC spikes, and BMS splice corruption suppressed."""
+    global _last_soc, _last_v_battery, _last_t_battery
     out = dict(data)
 
     # Zero-blip debounce for power fields
@@ -1490,6 +1504,28 @@ def _smooth(data: dict) -> dict:
                 out["soc_source"] = "bms"
         else:
             _last_soc = soc
+
+    # BMS splice guard — simultaneous zero of v_battery + t_battery is the
+    # sub-bus splice corruption signature (givenergy-modbus #256). Genuine
+    # readings cannot both be zero at the same time: no battery reads 0 V while
+    # also at exactly 0 °C. Hold last-good for the whole cohort and also hold
+    # SOC if it zeroed in the same poll.
+    v_bat = out.get("v_battery")
+    t_bat = out.get("t_battery")
+    if (v_bat is not None and v_bat <= 0 and _last_v_battery
+            and t_bat is not None and t_bat <= 0 and _last_t_battery is not None):
+        log.warning("BMS splice suspected: v_battery=%.2f t_battery=%.1f "
+                    "-- holding last-good (%.2f V / %.1f C)",
+                    v_bat, t_bat, _last_v_battery, _last_t_battery)
+        out["v_battery"] = _last_v_battery
+        out["t_battery"] = _last_t_battery
+        if out.get("soc") == 0 and _last_soc:
+            out["soc"] = _last_soc
+    else:
+        if v_bat and v_bat > 0:
+            _last_v_battery = v_bat
+        if t_bat is not None and t_bat != 0:
+            _last_t_battery = t_bat
 
     return out
 
@@ -1563,7 +1599,8 @@ def _build_from_input_page(g) -> dict:
         "grid_w":              abs(grid_w_raw),
         "grid_importing":      grid_w_raw < 0,
         "grid_exporting":      grid_w_raw > 0,
-        "soc":        max(0, min(100, g(59))),            # BATTERY_PERCENT — clamp uint16 to valid %
+        "soc":           max(0, min(100, g(59))),         # BATTERY_PERCENT — clamp uint16 to valid %
+        "charge_status": g(14),                        # CHARGE_STATUS (0=idle 2=charging 3=finishing 5=discharging)
         "v_battery":  g(50) / 100,                    # V_BATTERY
         "t_battery":  g(56) / 10,                     # TEMP_BATTERY
         "t_heatsink": g(41) / 10,                     # TEMP_INVERTER_HEATSINK
@@ -1601,7 +1638,8 @@ def _build_from_gateway_page(g) -> dict:
         "grid_w":              abs(grid_raw),
         "grid_importing":      grid_raw < 0,
         "grid_exporting":      grid_raw > 0,
-        "soc":        _gateway_soc,
+        "soc":           _gateway_soc,
+        "charge_status": None,
         "v_battery":  0,
         "t_battery":  0,
         "t_heatsink": 0,
@@ -1632,7 +1670,8 @@ def _build_data(iv, *, soc, t_battery, t_heatsink, status) -> dict:
         "grid_w":              abs(grid_w_raw),
         "grid_importing":      grid_w_raw < 0,
         "grid_exporting":      grid_w_raw > 0,
-        "soc":        soc,
+        "soc":           soc,
+        "charge_status": int(iv.charge_status or 0) if iv.charge_status is not None else None,
         "v_battery":  iv.v_battery,
         "t_battery":  t_battery,
         "t_heatsink": t_heatsink,
@@ -2051,6 +2090,87 @@ def _maybe_solar_forecast():
     threading.Thread(target=_fetch_bg, daemon=True).start()
 
 
+# ── Predictive charge target ──────────────────────────────────────────────────
+
+def _get_tomorrow_forecast_kwh() -> "float | None":
+    """Return tomorrow's total solar forecast in kWh from the cache, or None."""
+    if not _sf_cached:
+        return None
+    days  = _sf_cached.get("watt_hours_day", [])
+    today = datetime.now().date().isoformat()
+    entry = next((d for d in days if d["date"] > today), None)
+    return round(entry["value"] / 1000.0, 2) if entry else None
+
+
+_MORNING_START = 6    # 06:00 -- typical end of overnight charge slot
+_MORNING_END   = 13   # 13:00 -- solar usually exceeds load by this point
+_DEMAND_DAYS   = 60   # rolling window for historical demand
+_DEMAND_TOP_PC = 0.25 # fraction of highest-demand days to average
+
+
+def _compute_morning_demand_kwh() -> "float | None":
+    """Return expected morning demand (kWh) from historical snapshots.
+
+    Sums home_w over the morning window (_MORNING_START to _MORNING_END) for
+    each of the last _DEMAND_DAYS days, then averages the top _DEMAND_TOP_PC
+    fraction (highest-demand days) to give a conservatively high estimate.
+    Returns None if fewer than 3 days of data are available."""
+    try:
+        with _db() as conn:
+            rows = list(conn.execute(
+                "SELECT date(ts,'unixepoch','localtime') AS day, ts, home_w "
+                "FROM snapshots "
+                "WHERE ts >= unixepoch('now','localtime',? || ' days') "
+                "  AND CAST(strftime('%H',ts,'unixepoch','localtime') AS INTEGER) "
+                "      BETWEEN ? AND ? "
+                "ORDER BY ts",
+                (f"-{_DEMAND_DAYS}", _MORNING_START, _MORNING_END - 1)
+            ))
+    except Exception:
+        return None
+
+    # Accumulate kWh per day using trapezoidal-style gap-capped integration
+    days: "dict[str, list]" = {}
+    for row in rows:
+        days.setdefault(row["day"], []).append(row)
+
+    daily_kwh = []
+    for day_rows in days.values():
+        kwh = 0.0
+        prev_ts = None
+        for row in sorted(day_rows, key=lambda r: r["ts"]):
+            if prev_ts is not None:
+                delta = min(row["ts"] - prev_ts, 120.0)
+                kwh  += (row["home_w"] or 0) / 1000.0 * delta / 3600.0
+            prev_ts = row["ts"]
+        if kwh > 0.01:
+            daily_kwh.append(kwh)
+
+    if len(daily_kwh) < 3:
+        return None
+
+    daily_kwh.sort(reverse=True)
+    n = max(1, round(len(daily_kwh) * _DEMAND_TOP_PC))
+    return round(sum(daily_kwh[:n]) / n, 2)
+
+
+def _compute_predictive_target() -> "int | None":
+    """Compute the overnight charge SOC target from tomorrow's solar forecast
+    and historical morning demand.  Returns None if forecast or battery capacity
+    is not configured, so callers fall back to the rule's fixed target_soc."""
+    if PRED_BATTERY_KWH <= 0:
+        return None
+    kwh = _get_tomorrow_forecast_kwh()
+    if kwh is None:
+        return None
+    morning_demand = _compute_morning_demand_kwh()
+    if morning_demand is None:
+        morning_demand = PRED_EVENING_RESERVE   # fallback until enough history
+    usable = kwh * PRED_PESSIMISM - morning_demand
+    raw    = 100.0 * (1.0 - usable / PRED_BATTERY_KWH)
+    return int(max(PRED_MIN_SOC, min(100, round(raw))))
+
+
 # ── Update check ──────────────────────────────────────────────────────────────
 _update_info: dict = {}
 _last_update_check: float = 0.0
@@ -2118,7 +2238,7 @@ def _run_poll(st: dict):
         try:
             data = loop.run_until_complete(_fetch_v2()) if _API_V2 else _fetch_v0()
             _handle_reading(data, st)
-            log.info("Polled: solar=%dW soc=%d%%", data["solar_w"], data["soc"])
+            log.debug("Polled: solar=%dW soc=%d%%", data["solar_w"], data["soc"])
             fail = 0
         except Exception as exc:
             msg = str(exc)
@@ -2247,7 +2367,7 @@ def _run_listen(st: dict):
                         if _is_heartbeat_frame(frame):
                             last_frame = _note_heartbeat()  # reset watchdog, send nothing
                             if not st.get("hb_seen"):
-                                log.info("Heartbeat received — connection alive")
+                                log.debug("Heartbeat received — connection alive")
                                 st["hb_seen"] = True
                             continue
                         d = _decode_listen_frame(frame)
@@ -2272,7 +2392,7 @@ def _run_listen(st: dict):
                 # Publish at most once per interval
                 if latest and now - last_proc >= POLL_INTERVAL:
                     _handle_reading(latest, st)
-                    log.info("Listen: solar=%dW soc=%d%%", latest["solar_w"], latest["soc"])
+                    log.debug("Listen: solar=%dW soc=%d%%", latest["solar_w"], latest["soc"])
                     last_proc = now
                 _maybe_weather()
                 _maybe_solar_forecast()
@@ -2303,7 +2423,7 @@ def _run_listen(st: dict):
                             _r0  = _hr_read(_inverter_slave,  0, 60, timeout=5.0)
                             _r60 = _hr_read(_inverter_slave, 60, 60, timeout=5.0)
                             _snap_hr_data = (_r0 + _r60)[20:117]
-                            log.info("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
+                            log.debug("Snapshot poll fallback: read %d regs", len(_snap_hr_data))
                         except Exception as exc2:
                             log.warning("Snapshot poll fallback failed: %s", exc2)
                         _snap_done.set()
@@ -2434,6 +2554,8 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
     length  = len(payload) + 2
     frame   = b"\x59\x59\x00\x01" + length.to_bytes(2, "big") + b"\x01\x02" + payload
 
+    t0 = time.time()
+    log.debug("HR read: slave=0x%02x base=%d count=%d", slave, base, count)
     s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
     s.settimeout(timeout)
     try:
@@ -2459,6 +2581,8 @@ def _hr_read(slave: int, base: int, count: int, timeout: float = 5.0) -> list:
                     continue
                 if len(f) < 42 + count * 2:
                     continue
+                log.debug("HR read: OK base=%d count=%d (%.0fms)",
+                          base, count, (time.time() - t0) * 1000)
                 return [(f[42 + i*2] << 8) | f[43 + i*2] for i in range(count)]
     finally:
         s.close()
@@ -2587,6 +2711,7 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
                         echo_reg = (f[38] << 8) | f[39]
                         echo_val = (f[40] << 8) | f[41]
                         if echo_reg == reg and echo_val == value:
+                            log.debug("HR write: reg=%d val=%d OK", reg, value)
                             return  # success
                         # Stale echo: some dongles (notably the AIO) keep
                         # re-emitting confirmation frames for earlier writes in a
@@ -2885,8 +3010,24 @@ def _read_control_state() -> dict:
     # (confirmed from wire capture). Treat as 2-slot for HR reads.
 
     # ── Read holding registers ────────────────────────────────────────────────
-    regs_0   = _hr_read(slave, 0,   60)   # HR  0-59
-    regs_60  = _hr_read(slave, 60,  60)   # HR 60-119
+    # Retry up to 2 times with 2s backoff -- the dongle is single-client and
+    # a competing TCP connection from _hr_read can race with the listen loop,
+    # causing a timeout on the first attempt.  Waiting 2s gives the listen
+    # loop time to re-establish before we try again.
+    _HR_CTRL_RETRIES = 2
+    _HR_CTRL_BACKOFF = 2.0
+    for _attempt in range(_HR_CTRL_RETRIES + 1):
+        try:
+            regs_0  = _hr_read(slave, 0,  60)   # HR  0-59
+            regs_60 = _hr_read(slave, 60, 60)   # HR 60-119
+            break
+        except TimeoutError:
+            if _attempt < _HR_CTRL_RETRIES:
+                log.warning("Control: HR read attempt %d/%d timed out -- retrying in %.0fs",
+                            _attempt + 1, _HR_CTRL_RETRIES + 1, _HR_CTRL_BACKOFF)
+                time.sleep(_HR_CTRL_BACKOFF)
+            else:
+                raise
 
     def hr(n):
         if n < 60:   return regs_0[n]
@@ -3037,11 +3178,11 @@ def _execute_control(command: str, params: dict) -> dict:
             synced = now.strftime("%H:%M:%S %d/%m/%Y")
             msg = f"Inverter clock set to {synced}"
             _log_control(command, params, True, msg)
-            log.warning("Control: %s", msg)
+            log.info("Control: %s", msg)
             return {"ok": True, "message": msg, "synced_to": synced}
         except Exception as exc:
             err = str(exc)
-            _log_control(command, params, False, err)
+            _log_control(command, params, False, f"Control failed {command}: {err}")
             log.error("Control failed sync_time: %s", err)
             return {"ok": False, "message": err}
 
@@ -3061,11 +3202,11 @@ def _execute_control(command: str, params: dict) -> dict:
     try:
         msg = _do_control(slave, profile, command, params)
         _log_control(command, params, True, msg)
-        log.warning("Control: %s", msg)
+        log.info("Control: %s", msg)
         return {"ok": True, "message": msg}
     except Exception as exc:
         err = str(exc)
-        _log_control(command, params, False, err)
+        _log_control(command, params, False, f"Control failed {command}: {err}")
         log.error("Control failed %s: %s", command, err)
         return {"ok": False, "message": err}
 
@@ -3231,11 +3372,19 @@ def _sched_desired_state(rules: list, weekday: int, t_min: int) -> dict:
     if winner is None:
         return {"mode": "baseline"}
     if winner["action"] == "charge":
+        tgt = winner["target_soc"]
+        pred_used = False
+        if winner.get("predictive"):
+            pred_tgt = _compute_predictive_target()
+            if pred_tgt is not None:
+                tgt       = pred_tgt
+                pred_used = True
         return {"mode": "charge",
-                "target_soc": winner["target_soc"],
+                "target_soc": tgt,
                 "power_pct":  winner.get("power_pct", 50),
-                "slot_start": winner["start"],   # minutes from midnight
-                "slot_end":   winner["end"]}
+                "slot_start": winner["start"],
+                "slot_end":   winner["end"],
+                "predictive": pred_used}
     if winner["action"] == "export":
         return {"mode": "export",
                 "stop_soc":  winner.get("target_soc") or 4,
@@ -3247,11 +3396,12 @@ def _sched_desired_state(rules: list, weekday: int, t_min: int) -> dict:
 def _sched_load_rules() -> list:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT action, start_hhmm, end_hhmm, days_mask, target_soc, power_pct "
+            "SELECT action, start_hhmm, end_hhmm, days_mask, target_soc, power_pct, predictive "
             "FROM schedules WHERE enabled=1").fetchall()
     return [{"enabled": True, "action": r["action"], "start": r["start_hhmm"],
              "end": r["end_hhmm"], "days_mask": r["days_mask"],
-             "target_soc": r["target_soc"], "power_pct": r["power_pct"]} for r in rows]
+             "target_soc": r["target_soc"], "power_pct": r["power_pct"],
+             "predictive": bool(r["predictive"])} for r in rows]
 
 def _sched_compute_writes(desired: dict):
     """Translate a desired-state dict into (slave, [(reg,val),...], summary).
@@ -3294,7 +3444,14 @@ def _sched_compute_writes(desired: dict):
               (_HR["CHARGE_TARGET_SOC"],                    target),
               (_chrg_limit_reg,                       _chrg_limit_val),
               (_HR["ENABLE_CHARGE"],                             1)]
-        summary = f"Charge to {target}% at {pct}% power"
+        if desired.get("predictive"):
+            kwh = _get_tomorrow_forecast_kwh()
+            kwh_str = f"{kwh:.1f} kWh" if kwh is not None else "forecast"
+            demand = _compute_morning_demand_kwh()
+            demand_src = f"{demand:.1f} kWh historical demand" if demand is not None else f"{PRED_EVENING_RESERVE:.1f} kWh fallback reserve"
+            summary = f"Predictive charge: {kwh_str} tomorrow -- {demand_src} → target {target}% at {pct}% power"
+        else:
+            summary = f"Charge to {target}% at {pct}% power"
 
     elif mode == "export":
         stop = max(4, min(100, int(desired.get("stop_soc", 4))))
@@ -3809,7 +3966,7 @@ def _sched_apply(desired: dict) -> None:
         _sched_applied_sig = json.dumps(desired, sort_keys=True)
         _sched_last_status = summary
         _log_control("scheduler", desired, True, "Scheduler: " + summary)
-        log.warning("Scheduler applied: %s", summary)
+        log.info("Scheduler applied: %s", summary)
 
 def _group_regs(reg_keys, gap=5):
     """Group register numbers into contiguous read ranges, merging gaps <= gap registers.
@@ -3942,10 +4099,14 @@ def get_control():
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     try:
-        resp = make_response(jsonify(_read_control_state()))
+        state = _read_control_state()
+        log.info("Control: GET completed, profile=%s model=%s",
+                 state.get("profile", "?"), state.get("model", "?"))
+        resp = make_response(jsonify(state))
         resp.headers["Cache-Control"] = "no-store"
         return resp
     except Exception as exc:
+        log.warning("Control state read failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
 
 @app.route("/api/control", methods=["POST"])
@@ -3983,6 +4144,7 @@ def _rule_row(r) -> dict:
         "days_mask":  r["days_mask"],
         "target_soc": r["target_soc"],
         "power_pct":  r["power_pct"],
+        "predictive": bool(r["predictive"]),
     }
 
 def _validate_rule(data: dict) -> dict:
@@ -4003,9 +4165,11 @@ def _validate_rule(data: dict) -> dict:
         target_soc = max(4, min(100, int(data.get("target_soc", 100))))
     elif action == "export":
         target_soc = max(4, min(100, int(data.get("target_soc", 4))))
-    power_pct = max(0, min(50, int(data.get("power_pct", 50))))
+    power_pct  = max(0, min(50, int(data.get("power_pct", 50))))
+    predictive = bool(data.get("predictive", False)) and action == "charge"
     return {"action": action, "start": start, "end": end,
-            "days_mask": days_mask, "target_soc": target_soc, "power_pct": power_pct}
+            "days_mask": days_mask, "target_soc": target_soc,
+            "power_pct": power_pct, "predictive": predictive}
 
 @app.route("/api/schedules", methods=["GET"])
 def get_schedules():
@@ -4041,15 +4205,17 @@ def save_schedule():
         if rid:
             conn.execute(
                 "UPDATE schedules SET enabled=?, action=?, start_hhmm=?, end_hhmm=?, "
-                "days_mask=?, target_soc=?, power_pct=? WHERE id=?",
+                "days_mask=?, target_soc=?, power_pct=?, predictive=? WHERE id=?",
                 (enabled, clean["action"], clean["start"], clean["end"],
-                 clean["days_mask"], clean["target_soc"], clean["power_pct"], int(rid)))
+                 clean["days_mask"], clean["target_soc"], clean["power_pct"],
+                 int(clean["predictive"]), int(rid)))
         else:
             cur = conn.execute(
                 "INSERT INTO schedules (enabled, action, start_hhmm, end_hhmm, "
-                "days_mask, target_soc, power_pct, created) VALUES (?,?,?,?,?,?,?,?)",
+                "days_mask, target_soc, power_pct, predictive, created) VALUES (?,?,?,?,?,?,?,?,?)",
                 (enabled, clean["action"], clean["start"], clean["end"],
-                 clean["days_mask"], clean["target_soc"], clean["power_pct"], int(time.time())))
+                 clean["days_mask"], clean["target_soc"], clean["power_pct"],
+                 int(clean["predictive"]), int(time.time())))
             rid = cur.lastrowid
         conn.commit()
     return jsonify({"ok": True, "id": rid})
@@ -4388,6 +4554,14 @@ def get_settings():
         "sf_panel_azimuth":          SF_AZ,
         "sf_panel_kwp":              SF_KWP,
         "solar_forecast_configured": _sf_configured(),
+        "pred_battery_kwh":          PRED_BATTERY_KWH,
+        "pred_pessimism_factor":     PRED_PESSIMISM,
+        "pred_evening_reserve":      PRED_EVENING_RESERVE,
+        "pred_minimum_soc":          PRED_MIN_SOC,
+        "pred_current_target":       _compute_predictive_target(),
+        "pred_tomorrow_kwh":         _get_tomorrow_forecast_kwh(),
+        "pred_morning_demand_kwh":   _compute_morning_demand_kwh(),
+        "pred_demand_days":          _DEMAND_DAYS,
         "log_level":          LOG_LEVEL,
         "log_retention_days": LOG_RETENTION_DAYS,
         # API keys are intentionally never returned to the browser
@@ -4532,6 +4706,25 @@ def save_settings():
         _sf_dirty = True
     if _sf_dirty:
         _last_sf_ts = 0   # force a fetch on next poll cycle
+
+    # ── Predictive charge settings ────────────────────────────────────────────
+    global PRED_BATTERY_KWH, PRED_PESSIMISM, PRED_EVENING_RESERVE, PRED_MIN_SOC
+    _pred_section = "predictive_charge"
+    for _pk, _pattr, _pcfg, _pfn in (
+            ("pred_battery_kwh",     "PRED_BATTERY_KWH",     "battery_kwh",        float),
+            ("pred_pessimism_factor","PRED_PESSIMISM",        "pessimism_factor",   float),
+            ("pred_evening_reserve", "PRED_EVENING_RESERVE", "evening_reserve_kwh",float),
+            ("pred_minimum_soc",     "PRED_MIN_SOC",         "minimum_soc",        int),
+    ):
+        if _pk in data:
+            try:
+                _pv = _pfn(data[_pk])
+            except (ValueError, TypeError):
+                return jsonify({"ok": False, "error": f"{_pk} must be a number"}), 400
+            globals()[_pattr] = _pv
+            if not cfg.has_section(_pred_section):
+                cfg.add_section(_pred_section)
+            cfg.set(_pred_section, _pcfg, str(_pv))
 
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:
@@ -5107,6 +5300,140 @@ def api_hourly():
         })
 
     return jsonify({"ok": True, "day": day, "hours": hours})
+
+
+# ── Year in Review ────────────────────────────────────────────────────────────
+
+_yr_cache: "dict[int, tuple]" = {}   # year -> (data_dict, fetched_ts)
+_YR_TTL_CURRENT = 60      # 60 s for current year so today's live records track in near-real-time
+_YR_TTL_PAST    = 86400   # 24 h for past years (historical, rarely changes)
+
+# Carbon-offset badge factors.
+# Every solar kWh generated displaces grid electricity that would otherwise have
+# been imported, so total generation x grid factor = CO2 avoided.
+_CO2_KG_PER_KWH  = 0.207   # UK grid average (DEFRA), kgCO2 per kWh electricity
+_CO2_KG_PER_TREE = 21.0    # CO2 a mature tree absorbs in a year, kg
+_CO2_KG_PER_MILE = 0.27    # tailpipe CO2 for an average petrol car, kg per mile
+
+
+def _year_review_data(year: int) -> dict:
+    year_str = str(year)
+    with _db() as conn:
+        # Daily totals: last snapshot per day holds the inverter's final register values.
+        # Same "last per day" pattern as api_history to avoid midnight carryover.
+        # Today IS included here. The per-metric split below decides which tiles
+        # may use today's partial (still-accumulating) totals: "record high"
+        # tiles count today, "lowest day" tiles exclude it so a part-day doesn't
+        # masquerade as the minimum.
+        daily_rows = list(conn.execute(
+            "SELECT date(ts,'unixepoch','localtime') AS day, "
+            "       solar_today AS s, grid_in_today AS gi, grid_out_today AS go_, "
+            "       bat_chg_today AS bc, bat_dis_today AS bd "
+            "FROM snapshots "
+            "WHERE ts IN ("
+            "    SELECT MAX(ts) FROM snapshots "
+            "    GROUP BY date(ts,'unixepoch','localtime')"
+            ") AND strftime('%Y', date(ts,'unixepoch','localtime')) = ? "
+            "ORDER BY day",
+            (year_str,)
+        ))
+        cost_rows = list(conn.execute(
+            "SELECT date, import_cost_p, export_income_p FROM daily_costs "
+            "WHERE strftime('%Y', date) = ?",
+            (year_str,)
+        ))
+        hourly_rows = list(conn.execute(
+            "SELECT CAST(strftime('%H',ts,'unixepoch','localtime') AS INTEGER) AS hr, "
+            "       ROUND(AVG(home_w),  1) AS avg_home_w, "
+            "       ROUND(AVG(solar_w), 1) AS avg_solar_w "
+            "FROM snapshots "
+            "WHERE strftime('%Y',ts,'unixepoch','localtime') = ? "
+            "  AND home_w IS NOT NULL "
+            "GROUP BY hr ORDER BY hr",
+            (year_str,)
+        ))
+
+    costs = {r["date"]: dict(r) for r in cost_rows}
+
+    # daily_costs only gets today's row written at end of day, so for the current
+    # year splice in the live in-memory accumulators so today's tiles can show
+    # their running £ income / cost too.
+    today = datetime.now().strftime("%Y-%m-%d")
+    if year == datetime.now().year:
+        costs[today] = {"import_cost_p":   _today_import_cost_p,
+                        "export_income_p": _today_export_income_p}
+
+    def _home(r):
+        s  = r["s"]  or 0; gi = r["gi"] or 0; go = r["go_"] or 0
+        bc = r["bc"] or 0; bd = r["bd"] or 0
+        return max(0.0, s + gi + bd - go - bc)
+
+    def _pick(pairs, top):
+        if not pairs:
+            return None
+        day, val = (max if top else min)(pairs, key=lambda x: x[1])
+        c = costs.get(day, {})
+        return {"date": day, "kwh": round(val, 2),
+                "import_cost_p":   round(float(c.get("import_cost_p",   0) or 0), 2),
+                "export_income_p": round(float(c.get("export_income_p", 0) or 0), 2)}
+
+    # Two candidate sets. "record high" tiles (best solar/export, worst import,
+    # highest demand) count today; "lowest day" tiles (worst solar, most
+    # efficient home) exclude it so a still-accumulating part-day can't win.
+    def _rows(include_today):
+        return daily_rows if include_today else [r for r in daily_rows if r["day"] != today]
+
+    _all  = _rows(True)
+    _past = _rows(False)
+
+    solar_best  = [(r["day"], r["s"]  ) for r in _all  if (r["s"]  or 0) > 0.1]
+    solar_worst = [(r["day"], r["s"]  ) for r in _past if (r["s"]  or 0) > 0.1]
+    import_days = [(r["day"], r["gi"] ) for r in _all  if (r["gi"] or 0) > 0.1]
+    export_days = [(r["day"], r["go_"]) for r in _all  if (r["go_"]or 0) > 0.1]
+    home_high   = [(r["day"], _home(r)) for r in _all  if _home(r)      > 0.1]
+    home_eff    = [(r["day"], _home(r)) for r in _past if _home(r)      > 0.1]
+
+    # Carbon offset: total solar generated this year (today included) displaces
+    # grid electricity, giving CO2 avoided and its tree / car-mile equivalents.
+    total_solar = sum((r["s"] or 0) for r in daily_rows)
+    co2_kg      = total_solar * _CO2_KG_PER_KWH
+
+    return {
+        "year":       year,
+        "data_days":  len(daily_rows),
+        "solar":      {"best": _pick(solar_best,  True),  "worst": _pick(solar_worst, False)},
+        "export":     {"best": _pick(export_days, True)},
+        "import":     {"worst": _pick(import_days, True)},
+        "home":       {"best": _pick(home_eff,    False), "worst": _pick(home_high,   True)},
+        "carbon":     {"solar_kwh": round(total_solar, 0),
+                       "co2_kg":    round(co2_kg, 1),
+                       "trees":     round(co2_kg / _CO2_KG_PER_TREE),
+                       "miles":     round(co2_kg / _CO2_KG_PER_MILE)},
+        "hourly_profile": [{"hour": r["hr"], "home_w": r["avg_home_w"],
+                            "solar_w": r["avg_solar_w"]} for r in hourly_rows],
+        "currency_symbol": TARIFF_CURRENCY,
+    }
+
+
+@app.route("/api/year_review")
+def api_year_review():
+    now_year = datetime.now().year
+    try:
+        year = int(request.args.get("year", now_year))
+    except ValueError:
+        return jsonify({"ok": False, "error": "invalid year"}), 400
+    ttl = _YR_TTL_CURRENT if year == now_year else _YR_TTL_PAST
+    cached, fetched = _yr_cache.get(year, (None, 0))
+    if cached and (time.time() - fetched) < ttl:
+        return jsonify(cached)
+    try:
+        data = _year_review_data(year)
+    except Exception as exc:
+        log.warning("Year review query failed: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    _yr_cache[year] = (data, time.time())
+    return jsonify(data)
+
 
 @app.route("/api/power")
 def api_power():

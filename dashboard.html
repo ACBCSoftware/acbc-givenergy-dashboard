@@ -131,6 +131,45 @@ select optgroup{background:#172035;color:#7fa8cc}
 .sett-sub-title{font-size:.9rem;font-weight:600;color:var(--text);flex:1;text-align:center;margin-right:44px}
 .sett-sub-body{flex:1;overflow-y:auto;padding:12px 12px 24px;display:flex;flex-direction:column;gap:14px}
 /* Tariff panel */
+#yr-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#yr-top-row{display:flex;align-items:center;gap:8px;padding:10px 12px 8px;flex-shrink:0;border-bottom:1px solid var(--border)}
+#yr-title{flex:1;text-align:center;font-size:.9rem;font-weight:600;color:var(--text)}
+#yr-year-tabs{display:flex;gap:4px}
+.yr-tab{background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:14px;
+  color:var(--muted);padding:8px 14px;font-size:.78rem;cursor:pointer;transition:all .2s}
+.yr-tab.active{background:rgba(245,158,11,.18);border-color:#f59e0b;color:#f59e0b}
+#yr-body{flex:1;overflow-y:auto;padding:10px 12px 20px;display:flex;flex-direction:column;gap:10px}
+.yr-stats-wrap{display:flex;flex-direction:column;gap:10px}
+.yr-sec{display:flex;flex-direction:column;gap:4px}
+.yr-sec-title{font-size:.68rem;font-weight:700;color:var(--muted);text-transform:uppercase;
+  letter-spacing:.06em}
+.yr-cards{display:flex;gap:8px}
+.yr-card{flex:1;background:var(--bg-card);border:1px solid var(--border);border-radius:16px;
+  padding:18px 10px;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:6px;min-width:0;text-align:center;min-height:110px}
+.yr-badge{font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.yr-badge.good{color:#4ade80}.yr-badge.bad{color:#f87171}
+.yr-val{font-size:1.25rem;font-weight:700;color:var(--text);line-height:1.1}
+.yr-sub{font-size:.72rem;color:#4ade80}
+.yr-sub.cost{color:#f87171}
+.yr-date{font-size:.68rem;color:var(--muted)}
+#yr-hourly-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:10px 12px}
+#yr-hourly-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+#yr-hourly-legend{display:flex;gap:10px;font-size:.68rem;color:var(--muted)}
+.yr-leg-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:3px}
+#yr-hourly-canvas-wrap{position:relative;height:120px}
+#yr-hourly-canvas{position:absolute;inset:0;width:100%;height:100%}
+#yr-carbon{background:linear-gradient(135deg,rgba(74,222,128,.14),rgba(56,189,248,.10));
+  border:1px solid rgba(74,222,128,.35);border-radius:16px;padding:22px 16px;text-align:center}
+#yr-carbon-hdr{font-size:1.45rem;font-weight:700;color:#4ade80;line-height:1.2}
+#yr-carbon-sub{margin-top:10px;font-size:.95rem;color:var(--muted);line-height:1.6}
+#yr-carbon-sub b{color:var(--text);font-weight:700}
+#yr-no-data{text-align:center;color:var(--muted);font-size:.82rem;padding:40px 0}
+#hist-yr-row{padding:8px 12px 12px;flex-shrink:0}
+#hist-yr-btn{display:block;width:100%;background:rgba(99,102,241,.15);border:1px solid #6366f1;
+  border-radius:14px;color:#a5b4fc;padding:12px;font-size:.82rem;cursor:pointer;transition:all .2s;
+  text-align:center}
+#hist-yr-btn:active{background:rgba(99,102,241,.3)}
 #tariff-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #tariff-top-row{
   display:flex;align-items:center;gap:12px;
@@ -383,10 +422,11 @@ select optgroup{background:#172035;color:#7fa8cc}
 /* ── History panel ──────────────────────────────── */
 #hist-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #hist-controls{flex-shrink:0;padding:8px 12px 4px;display:flex;flex-direction:column;gap:7px}
-#hist-top-row{display:flex;align-items:center;gap:6px}
+#hist-top-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .period-btn{
   background:rgba(255,255,255,0.06);border:1px solid var(--border);border-radius:14px;
-  color:var(--muted);padding:11px 18px;font-size:.82rem;cursor:pointer;transition:all .2s;
+  color:var(--muted);padding:11px 14px;font-size:.82rem;cursor:pointer;transition:all .2s;
+  flex-shrink:0;
 }
 .period-btn.active{background:rgba(245,158,11,.18);border-color:#f59e0b;color:#f59e0b}
 #hist-nav{display:flex;align-items:center;gap:8px}
@@ -546,7 +586,7 @@ input.tr-region-input{flex:0 0 44px;max-width:44px;text-align:center;text-transf
 #bat-section:active{opacity:.8}
 #bat-tap-hint{font-size:.6rem;color:var(--muted);opacity:.5;text-align:center;margin-top:1px}
 /* ── Control confirmation modal ─────────────────── */
-#ctrl-confirm{display:none;position:fixed;inset:0;z-index:200;
+#ctrl-confirm{display:none;position:fixed;inset:0;z-index:300;
   background:rgba(6,13,28,.88);align-items:center;justify-content:center}
 #ctrl-confirm.open{display:flex}
 #cc-box{background:var(--bg-top);border:1px solid var(--border);
@@ -991,6 +1031,18 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Panel kWp</label><input id="s-sf-kwp" type="number" min="0.1" step="0.1" placeholder="e.g. 4.0"></div>
         <div class="sett-row"><label>API key (optional)</label><input id="s-sf-apikey" type="password" placeholder="Leave blank for free tier"></div>
       </div>
+      <div class="sett-section">
+        <div class="sett-heading">Predictive Charge</div>
+        <div class="sett-hint">Uses tomorrow's solar forecast and your historical morning consumption to set the overnight charge target automatically. Enable on a charge rule via the "Use predictive target" toggle. Requires Solar Forecast to be configured above.</div>
+        <div class="sett-row"><label>Battery capacity (kWh)</label><input id="s-pred-kwh" type="number" min="0.1" step="0.1" placeholder="e.g. 9.5"></div>
+        <div class="sett-row"><label>Pessimism factor</label><input id="s-pred-pessimism" type="number" min="0.1" max="1.0" step="0.01" placeholder="e.g. 0.85"></div>
+        <div class="sett-hint" style="opacity:.7">Scales the forecast down -- Forecast.Solar tends to over-predict. 0.85 = use 85% of forecast kWh.</div>
+        <div class="sett-row"><label>Fallback morning reserve (kWh)</label><input id="s-pred-reserve" type="number" min="0" step="0.1" placeholder="e.g. 3.0"></div>
+        <div class="sett-hint" style="opacity:.7">Used only until enough history exists (first few weeks). After that, morning demand is learned automatically from the last 60 days of usage.</div>
+        <div class="sett-row"><label>Minimum charge SOC (%)</label><input id="s-pred-minsoc" type="number" min="4" max="100" placeholder="e.g. 20"></div>
+        <div id="s-pred-status" style="font-size:.78rem;color:var(--muted);padding:4px 0 2px"></div>
+        <div id="s-pred-demand" style="font-size:.78rem;color:var(--muted);padding:2px 0 4px"></div>
+      </div>
       <button class="sett-save-btn" id="sett-save-integrations">Save Settings</button>
       <div id="sett-msg-integrations" class="sett-msg"></div>
     </div>
@@ -1368,6 +1420,13 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <label>Days</label>
         <div class="se-days" id="se-days"></div>
       </div>
+      <div class="se-field" id="se-predictive-field" style="display:none">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="se-predictive" onchange="_sePredChanged()">
+          Use predictive target
+        </label>
+        <div id="se-pred-hint" style="font-size:.75rem;opacity:.7;margin-top:3px"></div>
+      </div>
       <div class="se-field" id="se-soc-field">
         <label id="se-soc-label">Charge to <span id="se-soc-val">100%</span></label>
         <input type="range" id="se-soc" min="4" max="100" value="100"
@@ -1442,6 +1501,17 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     <div id="hist-chart-wrap"><canvas id="hist-canvas"></canvas></div>
     <div id="hist-summary"></div>
     <div id="hist-cost-card"></div>
+    <div id="hist-yr-row"><button id="hist-yr-btn" onclick="showView('yr-review')"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" style="vertical-align:-2px;margin-right:5px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Year in Review</button></div>
+  </div>
+
+  <!-- Year in Review panel -->
+  <div id="yr-panel">
+    <div id="yr-top-row">
+      <button id="yr-back" class="hist-back-style">&#8592; Back</button>
+      <span id="yr-title">Year in Review</span>
+      <div id="yr-year-tabs"></div>
+    </div>
+    <div id="yr-body"><div id="yr-no-data">Loading...</div></div>
   </div>
 
   <!-- Hourly breakdown panel -->
@@ -1789,13 +1859,19 @@ function applyData(d) {
   $('v-home').textContent = fmtW(d.home_w);
 
   // Battery
-  const batCol = d.battery_charging ? '#60a5fa' : d.battery_discharging ? '#c084fc' : '#60a5fa';
+  // charge_status IR14: 0=idle 2=charging 3=finishing 5=discharging; null on gateway path
+  const cs = d.charge_status;
+  const csCharging    = cs === 2 || (cs == null && d.battery_charging);
+  const csFinishing   = cs === 3;
+  const csDischarging = cs === 5 || (cs == null && d.battery_discharging);
+  const batCol = csDischarging ? '#c084fc' : '#60a5fa';
   styleRing('r-battery', batCol, batOn);
   $('v-battery').textContent  = fmtW(d.battery_w);
   const bsEl = $('v-bat-state');
-  if (d.battery_charging)         { bsEl.textContent='▲ Charging';    bsEl.style.color='#60a5fa'; }
-  else if (d.battery_discharging) { bsEl.textContent='▼ Discharging'; bsEl.style.color='#c084fc'; }
-  else                            { bsEl.textContent='Idle';          bsEl.style.color='#5a7a9e'; }
+  if      (csFinishing)   { bsEl.textContent='▲ Finishing';   bsEl.style.color='#fbbf24'; }
+  else if (csCharging)    { bsEl.textContent='▲ Charging';    bsEl.style.color='#60a5fa'; }
+  else if (csDischarging) { bsEl.textContent='▼ Discharging'; bsEl.style.color='#c084fc'; }
+  else                    { bsEl.textContent='Idle';           bsEl.style.color='#5a7a9e'; }
   updateBatFill(d.soc);
 
   // Grid
@@ -1817,8 +1893,9 @@ function applyData(d) {
   bar.style.width      = soc + '%';
   bar.style.background = soc<15?'#f87171':soc<30?'#fb923c':soc<60?'#facc15':'#4ade80';
 
-  const batState = d.battery_charging    ? `Charging at ${fmtW(d.battery_w)}`
-                 : d.battery_discharging ? `Discharging at ${fmtW(d.battery_w)}`
+  const batState = csFinishing   ? `Finishing at ${fmtW(d.battery_w)}`
+                 : csCharging    ? `Charging at ${fmtW(d.battery_w)}`
+                 : csDischarging ? `Discharging at ${fmtW(d.battery_w)}`
                  : 'Idle';
   const temp = d.t_battery  != null ? ` · ${d.t_battery.toFixed(0)}°C`  : '';
   const inv  = d.t_heatsink != null ? ` · Inv ${d.t_heatsink.toFixed(0)}°C` : '';
@@ -2275,24 +2352,25 @@ function _setSlotVisible(n) {
   _slotVisible = Math.max(1, Math.min(10, n));
   localStorage.setItem('slotVisible', _slotVisible);
   ['charge', 'discharge'].forEach(_applySlotVisibility);
-  ['charge-vis-count', 'discharge-vis-count'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = _slotVisible;
-  });
 }
 
 function _applySlotVisibility(type) {
   const pfx = type === 'charge' ? 'cs' : 'ds';
   const container = $(type === 'charge' ? 'charge-slots-container' : 'discharge-slots-container');
   if (!container) return;
+  let shown = 0;
   container.querySelectorAll('.slot-entry').forEach(entry => {
     const n        = parseInt(entry.dataset.slot);
     const start    = document.getElementById(`${pfx}${n}-start`);
     const end      = document.getElementById(`${pfx}${n}-end`);
     const nonEmpty = v => v && v !== '00:00';
     const hasValue = start && end && (nonEmpty(start.value) || nonEmpty(end.value));
-    entry.classList.toggle('slot-hidden', n > _slotVisible && !hasValue);
+    const hidden   = n > _slotVisible && !hasValue;
+    entry.classList.toggle('slot-hidden', hidden);
+    if (!hidden) shown++;
   });
+  const countEl = document.getElementById(type + '-vis-count');
+  if (countEl) countEl.textContent = shown;
 }
 
 // ── Slot overlap detection ────────────────────────────────────────────────────
@@ -2654,7 +2732,8 @@ function renderSchedules() {
   }
   list.innerHTML = _schedRules.map(rl => {
     let extra = '';
-    if (rl.action === 'charge')  extra = ` to ${rl.target_soc}% · ${_fmtPower(rl.power_pct, 'charge')} power`;
+    if (rl.action === 'charge' && rl.predictive) extra = ` · predictive · ${_fmtPower(rl.power_pct, 'charge')} power`;
+    else if (rl.action === 'charge')  extra = ` to ${rl.target_soc}% · ${_fmtPower(rl.power_pct, 'charge')} power`;
     if (rl.action === 'export')  extra = ` · stop at ${rl.target_soc}% · ${_fmtPower(rl.power_pct, 'export')} power`;
     return `
       <div class="sched-rule ${rl.enabled ? '' : 'off'}" onclick="openEditor(${rl.id})">
@@ -2735,14 +2814,39 @@ function _fmtPower(reg, action) {
 function seActionChanged() {
   const action = $('se-action').value;
   const showSoc = action === 'charge' || action === 'export';
-  $('se-soc-field').style.display = showSoc ? '' : 'none';
   $('se-pct-field').style.display = showSoc ? '' : 'none';
+  $('se-predictive-field').style.display = action === 'charge' ? '' : 'none';
+  if (action !== 'charge') $('se-predictive').checked = false;
   if (action === 'charge') {
     $('se-soc-label').innerHTML = 'Charge to <span id="se-soc-val">' + $('se-soc').value + '%</span>';
   } else if (action === 'export') {
     $('se-soc-label').innerHTML = 'Stop discharging below <span id="se-soc-val">' + $('se-soc').value + '%</span>';
   }
   _seConfigPowerSlider(action);
+  _sePredChanged();
+}
+
+function _sePredChanged() {
+  const pred   = $('se-predictive').checked;
+  const action = $('se-action').value;
+  const showSoc = (action === 'charge' || action === 'export') && !pred;
+  $('se-soc-field').style.display = showSoc ? '' : 'none';
+  const hint = $('se-pred-hint');
+  if (!hint) return;
+  if (!pred) { hint.textContent = ''; return; }
+  const s = _loadedSettings;
+  if (!s || !s.solar_forecast_configured) {
+    hint.textContent = 'Configure Solar Forecast in Settings > Integrations first.';
+  } else if (!s.pred_battery_kwh) {
+    hint.textContent = 'Set Battery capacity in Settings > Integrations > Predictive Charge.';
+  } else if (s.pred_current_target != null && s.pred_tomorrow_kwh != null) {
+    const demandStr = s.pred_morning_demand_kwh != null
+      ? `${s.pred_morning_demand_kwh} kWh learned demand`
+      : `${s.pred_evening_reserve} kWh fallback reserve`;
+    hint.textContent = `Tonight: target ${s.pred_current_target}% (${s.pred_tomorrow_kwh} kWh forecast, ${demandStr})`;
+  } else {
+    hint.textContent = 'Waiting for forecast data -- target will be computed before the window opens.';
+  }
 }
 
 // Build the 48 half-hour options (00:00 … 23:30) into a <select>, selecting `val`.
@@ -2767,6 +2871,7 @@ function openEditor(id) {
   $('se-soc').value              = soc;
   const pct = (rl && rl.power_pct != null) ? rl.power_pct : 50;
   $('se-pct').dataset.reg = pct;   // store register value; seActionChanged converts to display
+  $('se-predictive').checked = !!(rl && rl.predictive);
   _buildDayChips(rl ? rl.days_mask : 127);
   seActionChanged();               // configures slider range + display from data-reg
   $('se-msg').textContent = '';
@@ -2784,6 +2889,7 @@ async function saveRule() {
     days_mask:  mask,
     target_soc: +$('se-soc').value,
     power_pct:  _seDisplayToReg(+$('se-pct').value, $('se-action').value),
+    predictive: $('se-predictive').checked,
     enabled:    true,
   };
   if (_editingId != null) {
@@ -2937,7 +3043,8 @@ $('pw-cancel').addEventListener('click', _closePwModal);
 $('pw-modal').addEventListener('click', e => { if (e.target === $('pw-modal')) _closePwModal(); });
 
 // ── Unsaved-changes dirty tracking ───────────────────────────────────────────
-let _settDirty   = false;
+let _settDirty      = false;
+let _loadedSettings = null;   // cached for predictive hint in rule editor
 let _tariffDirty = false;
 
 function _markSettDirty()   { _settDirty   = true; }
@@ -3455,6 +3562,31 @@ async function loadSettings() {
     $('s-sf-lookup-hint').textContent = '';
     $('s-sf-compass').value = '';
     $('s-sf-compass-hint').textContent = '';
+    $('s-pred-kwh').value        = s.pred_battery_kwh      || '';
+    $('s-pred-pessimism').value  = s.pred_pessimism_factor ?? '';
+    $('s-pred-reserve').value    = s.pred_evening_reserve  ?? '';
+    $('s-pred-minsoc').value     = s.pred_minimum_soc      ?? '';
+    _loadedSettings = s;
+    {
+      const el = $('s-pred-status');
+      el.style.color = 'var(--muted)';
+      if (!s.solar_forecast_configured) {
+        el.textContent = 'Enable Solar Forecast above to use this feature.';
+      } else if (!s.pred_battery_kwh) {
+        el.textContent = 'Set battery capacity to enable.';
+      } else if (s.pred_current_target != null && s.pred_tomorrow_kwh != null) {
+        el.textContent = `Tonight: target ${s.pred_current_target}% (tomorrow ${s.pred_tomorrow_kwh} kWh forecast)`;
+        el.style.color = 'var(--ok)';
+      } else {
+        el.textContent = 'Waiting for forecast data...';
+      }
+      const dem = $('s-pred-demand');
+      if (s.pred_morning_demand_kwh != null) {
+        dem.textContent = `Learned morning demand: ${s.pred_morning_demand_kwh} kWh (avg of highest-use mornings, last ${s.pred_demand_days} days)`;
+      } else {
+        dem.textContent = 'Morning demand: using fallback reserve -- not enough history yet.';
+      }
+    }
     $('s-qa-enabled').value  = s.quick_actions_enabled     ? 'yes' : 'no';
     $('s-qa-chg-pct').value  = s.quick_charge_power_pct    ?? 100;
     $('s-qa-dis-pct').value  = s.quick_discharge_power_pct ?? 100;
@@ -3519,7 +3651,11 @@ async function _doSaveSettings(msgEl) {
     sf_panel_tilt:   $('s-sf-tilt').value.trim(),
     sf_panel_azimuth:$('s-sf-az').value.trim(),
     sf_panel_kwp:    $('s-sf-kwp').value.trim(),
-    sf_api_key:      $('s-sf-apikey').value.trim(),
+    sf_api_key:           $('s-sf-apikey').value.trim(),
+    pred_battery_kwh:     parseFloat($('s-pred-kwh').value)        || 0,
+    pred_pessimism_factor:parseFloat($('s-pred-pessimism').value)   || 0.85,
+    pred_evening_reserve: parseFloat($('s-pred-reserve').value)     || 3.0,
+    pred_minimum_soc:     parseInt($('s-pred-minsoc').value)        || 20,
     new_password:    newPw,
     chart_colors: {
       solar:   $('s-col-solar').value,
@@ -3871,7 +4007,8 @@ function showView(v) {
   $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
-  $('hourly-panel').style.display   = v==='hourly'  ? 'flex' : 'none';
+  $('hourly-panel').style.display   = v==='hourly'   ? 'flex' : 'none';
+  $('yr-panel').style.display       = v==='yr-review'? 'flex' : 'none';
   _updateSfVisibility();
   if (live) {
     if (liveData) {
@@ -3895,7 +4032,8 @@ function showView(v) {
   } else {
     _pauseLoop();
   }
-  if (v==='history')  loadHistory();
+  if (v==='history')   loadHistory();
+  if (v==='yr-review') loadYearReview();
   if (v==='settings' || v==='settings-display' || v==='settings-integrations' ||
       v==='settings-admin' || v==='settings-inverter') loadSettings();
   if (v==='tariff')   loadTariff();
@@ -4502,6 +4640,221 @@ function _axisLabel(w) {
   if (a < 950) return Math.round(w) + '';
   return (w/1000).toFixed(1) + 'k';
 }
+
+// ── Year in Review ────────────────────────────────────────────────────────────
+
+let _yrYear = new Date().getFullYear();
+
+function _yrFmtDate(iso) {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${parseInt(d)} ${months[parseInt(m)-1]} ${y}`;
+}
+
+function _yrFmtCost(pence, sym) {
+  if (!pence || !sym) return '';
+  return sym + (pence / 100).toFixed(2);
+}
+
+function _yrCard(badge, badgeCls, valText, subText, subCls, dateText) {
+  return `<div class="yr-card">
+    <div class="yr-badge ${badgeCls}">${badge}</div>
+    <div class="yr-val">${valText}</div>
+    ${subText ? `<div class="yr-sub ${subCls||''}">${subText}</div>` : ''}
+    <div class="yr-date">${dateText}</div>
+  </div>`;
+}
+
+function _renderYearReview(d) {
+  const sym = d.currency_symbol || '£';
+  if (!d.data_days) {
+    $('yr-body').innerHTML = `<div id="yr-no-data">No data found for ${d.year}.</div>`;
+    return;
+  }
+  const sb = d.solar.best,  sw = d.solar.worst;
+  const eb = d.export.best, iw = d.import.worst;
+  const hb = d.home.best,   hw = d.home.worst;
+
+  const _svgAttrs = 'width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:4px"';
+  const _icSun   = `<svg ${_svgAttrs}><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/><line x1="4.22" y1="4.22" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.78" y2="19.78"/><line x1="4.22" y1="19.78" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.78" y2="4.22"/></svg>`;
+  const _icBolt  = `<svg ${_svgAttrs}><polyline points="13 2 13 9 19 9 11 22 11 15 5 15 13 2"/></svg>`;
+  const _icHome  = `<svg ${_svgAttrs}><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
+  const _icClock = `<svg ${_svgAttrs}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+
+  let html = `<div class="yr-stats-wrap">
+    <div class="yr-sec">
+      <div class="yr-sec-title">${_icSun}Solar generation</div>
+      <div class="yr-cards">
+        ${sb ? _yrCard('Best day','good', sb.kwh+' kWh', '', '', _yrFmtDate(sb.date)) : ''}
+        ${sw ? _yrCard('Worst day','bad',  sw.kwh+' kWh', '', '', _yrFmtDate(sw.date)) : ''}
+      </div>
+    </div>
+    <div class="yr-sec">
+      <div class="yr-sec-title">${_icBolt}Grid</div>
+      <div class="yr-cards">
+        ${eb ? _yrCard('Best export','good', eb.kwh+' kWh',
+            eb.export_income_p ? 'Income: '+_yrFmtCost(eb.export_income_p,sym) : '', '',
+            _yrFmtDate(eb.date)) : ''}
+        ${iw ? _yrCard('Worst import','bad', iw.kwh+' kWh',
+            iw.import_cost_p ? 'Cost: '+_yrFmtCost(iw.import_cost_p,sym) : '', 'cost',
+            _yrFmtDate(iw.date)) : ''}
+      </div>
+    </div>
+    <div class="yr-sec">
+      <div class="yr-sec-title">${_icHome}Home consumption</div>
+      <div class="yr-cards">
+        ${hb ? _yrCard('Most efficient','good', hb.kwh+' kWh', 'Lowest use day', '', _yrFmtDate(hb.date)) : ''}
+        ${hw ? _yrCard('Highest demand','bad',  hw.kwh+' kWh', 'Most used day',  'cost', _yrFmtDate(hw.date)) : ''}
+      </div>
+    </div>
+  </div>`;
+
+  // Hourly profile
+  if (d.hourly_profile && d.hourly_profile.length) {
+    html += `<div id="yr-hourly-wrap">
+      <div id="yr-hourly-hdr">
+        <div class="yr-sec-title" style="margin:0">${_icClock}Average daily profile</div>
+        <div id="yr-hourly-legend">
+          <span><span class="yr-leg-dot" style="background:#f59e0b"></span>Solar</span>
+          <span><span class="yr-leg-dot" style="background:#38bdf8"></span>Home</span>
+        </div>
+      </div>
+      <div id="yr-hourly-canvas-wrap"><canvas id="yr-hourly-canvas"></canvas></div>
+    </div>`;
+  }
+
+  // Carbon offset badge
+  if (d.carbon && d.carbon.co2_kg > 0) {
+    const c = d.carbon;
+    const co2 = c.co2_kg >= 1000
+      ? (c.co2_kg / 1000).toFixed(2) + ' t'
+      : Math.round(c.co2_kg) + ' kg';
+    const _leaf = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px;margin-right:8px"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10z"/><path d="M2 21c0-3 1.85-5.36 5.08-6"/></svg>`;
+    const _tree = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-4px;margin-right:4px"><path d="m17 14 3 3.3a1 1 0 0 1-.7 1.7H4.7a1 1 0 0 1-.7-1.7L7 14h-.3a1 1 0 0 1-.7-1.7L9 9h-.2A1 1 0 0 1 8 7.3L12 3l4 4.3a1 1 0 0 1-.8 1.7H15l3 3.3a1 1 0 0 1-.7 1.7H17Z"/><path d="M12 22v-3"/></svg>`;
+    const _car  = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-5px;margin-right:4px"><path d="M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2"/><circle cx="7" cy="17" r="2"/><path d="M9 17h6"/><circle cx="17" cy="17" r="2"/></svg>`;
+    html += `<div id="yr-carbon">
+      <div id="yr-carbon-hdr">${_leaf}${co2} CO&#8322; avoided this year</div>
+      <div id="yr-carbon-sub">That's like planting ${_tree}<b>${c.trees.toLocaleString()}</b> ${c.trees === 1 ? 'tree' : 'trees'} &nbsp;&middot;&nbsp; or ${_car}<b>${c.miles.toLocaleString()}</b> car ${c.miles === 1 ? 'mile' : 'miles'} not driven</div>
+    </div>`;
+  }
+
+  $('yr-body').innerHTML = html;
+  if (d.hourly_profile && d.hourly_profile.length) {
+    requestAnimationFrame(() => _drawYrChart(d.hourly_profile));
+  }
+}
+
+function _drawYrChart(profile) {
+  const canv = $('yr-hourly-canvas');
+  if (!canv) return;
+  const wrap = $('yr-hourly-canvas-wrap');
+  const W = wrap.clientWidth || 300;
+  const H = 120;
+  canv.width  = W * devicePixelRatio;
+  canv.height = H * devicePixelRatio;
+  canv.style.width  = W + 'px';
+  canv.style.height = H + 'px';
+  const ctx = canv.getContext('2d');
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+
+  const PAD_L = 36, PAD_R = 4, PAD_T = 6, PAD_B = 18;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = H - PAD_T - PAD_B;
+  const maxW = Math.max(...profile.map(r => Math.max(r.home_w||0, r.solar_w||0)), 1);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,.07)';
+  ctx.lineWidth = 1;
+  [0.25, 0.5, 0.75, 1].forEach(f => {
+    const y = PAD_T + chartH * (1 - f);
+    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+  });
+
+  // Y-axis label
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  ctx.font = `${9 * devicePixelRatio / devicePixelRatio}px sans-serif`;
+  ctx.textAlign = 'right';
+  const topLabel = maxW >= 1000 ? (maxW/1000).toFixed(1)+'k' : Math.round(maxW)+'';
+  ctx.fillText(topLabel+'W', PAD_L - 3, PAD_T + 7);
+
+  // Bars
+  const n   = 24;
+  const bW  = chartW / n;
+  const bar = bW * 0.36;
+  for (let i = 0; i < n; i++) {
+    const row = profile.find(r => r.hour === i);
+    const x   = PAD_L + i * bW;
+
+    // Solar bar (yellow, left of pair)
+    const sH = row ? (row.solar_w || 0) / maxW * chartH : 0;
+    ctx.fillStyle = 'rgba(245,158,11,.75)';
+    ctx.fillRect(x + bW*0.04, PAD_T + chartH - sH, bar, sH);
+
+    // Home bar (blue, right of pair)
+    const hH = row ? (row.home_w || 0) / maxW * chartH : 0;
+    ctx.fillStyle = 'rgba(56,189,248,.75)';
+    ctx.fillRect(x + bW*0.04 + bar + 1, PAD_T + chartH - hH, bar, hH);
+  }
+
+  // X-axis hour labels (every 3h)
+  ctx.fillStyle = 'rgba(255,255,255,.35)';
+  ctx.textAlign = 'center';
+  ctx.font = `${9 * devicePixelRatio / devicePixelRatio}px sans-serif`;
+  for (let i = 0; i <= 23; i += 3) {
+    const x = PAD_L + i * bW + bW / 2;
+    ctx.fillText(i === 0 ? '0' : i + 'h', x, H - 4);
+  }
+}
+
+async function loadYearReview() {
+  $('yr-body').innerHTML = '<div id="yr-no-data">Loading...</div>';
+  try {
+    const r = await fetch(`/api/year_review?year=${_yrYear}`, { cache: 'no-store' });
+    const d = await r.json();
+    _renderYearReview(d);
+  } catch(e) {
+    $('yr-body').innerHTML = '<div id="yr-no-data">Could not load data.</div>';
+  }
+}
+
+$('yr-back').addEventListener('click', () => showView('history'));
+
+function _wireYrTabs() {
+  $('yr-year-tabs').querySelectorAll('.yr-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _yrYear = parseInt(btn.dataset.yr);
+      $('yr-year-tabs').querySelectorAll('.yr-tab').forEach(b =>
+        b.classList.toggle('active', parseInt(b.dataset.yr) === _yrYear));
+      loadYearReview();
+    });
+  });
+}
+
+async function _buildYrTabs() {
+  const cur  = new Date().getFullYear();
+  const prev = cur - 1;
+  _yrYear = cur;
+  // Show current year tab immediately so the panel renders without waiting
+  $('yr-year-tabs').innerHTML =
+    `<button class="yr-tab active" data-yr="${cur}">${cur}</button>`;
+  _wireYrTabs();
+  // Check if previous year has any data; only add that tab if it does
+  try {
+    const r = await fetch(`/api/year_review?year=${prev}`, {cache:'no-store'});
+    const d = await r.json();
+    if (d.data_days > 0) {
+      const btn = document.createElement('button');
+      btn.className = 'yr-tab';
+      btn.dataset.yr = prev;
+      btn.textContent = prev;
+      $('yr-year-tabs').insertBefore(btn, $('yr-year-tabs').firstChild);
+      _wireYrTabs();   // re-wire now the prev tab exists
+    }
+  } catch(e) {}
+}
+
+_buildYrTabs();
 
 function drawPowerChart() {
   const canv = $('power-canvas');
