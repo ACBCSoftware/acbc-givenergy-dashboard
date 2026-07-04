@@ -506,19 +506,29 @@ GitHub is the source of truth for all tracked bugs and enhancements.
 The only exception is pre-release UAT items found by Andi before a version ships.
 Do not maintain enhancement descriptions here -- open a GitHub issue instead.
 
-### Open GitHub issues (as of v2.8, 19 Jun 2026)
+### Shipped in v2.9 (4 Jul 2026)
+
+- **#37 -- Predictive overnight charge target** -- opt-in per charge schedule; target SOC computed from tomorrow's solar forecast minus historical morning demand.
+- **#51 -- Year in Review** -- annual highlights page with best/worst days, average daily profile, and a carbon-offset badge (CO2 avoided / trees / car miles).
+- Battery BMS splice guard (learned from givenergy-modbus #256) and live charge-status indicator.
+- Control-page initial-read retry with backoff and logging (#49 mitigation).
+
+### Open GitHub issues (as of v2.9, 4 Jul 2026)
 
 | # | Title | Notes |
 |---|-------|-------|
 | [#26](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/26) | Flash-and-go Pi appliance image | Low -- larger effort |
 | [#34](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/34) | Windows Defender / SmartScreen submission | Parked -- no code-signing (decided 10 Jun 2026) |
-| [#37](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/37) | Predictive overnight charge target based on solar forecast | v2.9 headline feature |
 | [#40](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/40) | Include register number in control activity log error messages | Low effort polish |
 | [#41](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/41) | Audio cue when slot overlap validation rejects a save | Low priority |
 | [#42](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/42) | Per-slot lower SOC limit on discharge slots (single_phase_extended) | AIO tester request |
 | [#43](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/43) | Diagnostic tool: register value-search mode | Low priority tool |
 | [#46](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/46) | Further considerations (AIO tester suggestions) | Winter mode, tooltips, multi-array |
 | [#48](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/48) | Export cutoff SOC workaround | Research needed -- register map |
+| [#49](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/49) | Occasional blank Inverter Control screen | Mitigated in v2.9 (retry + logging); watching for recurrence |
+| [#52](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/52) | Max charge/discharge rate registers on AIO | AIO uses HR313/314; confirmed behaviour, offered read-only 111/112 display |
+| [#53](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/53) | Official Docker image | Enhancement request (2 users) |
+| [#54](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/54) | National Grid live data feed ticker | Enhancement request |
 
 ### Ideas -- not yet filed as GitHub issues
 
