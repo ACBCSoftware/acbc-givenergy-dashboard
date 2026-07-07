@@ -506,6 +506,13 @@ GitHub is the source of truth for all tracked bugs and enhancements.
 The only exception is pre-release UAT items found by Andi before a version ships.
 Do not maintain enhancement descriptions here -- open a GitHub issue instead.
 
+### Shipped in v3.0 (7 Jul 2026)
+
+- **#53 -- Official Docker image** (headline) -- multi-arch (amd64/arm64/arm-v7) image published to `ghcr.io/acbcsoftware/givenergy-dashboard`. `DATA_DIR` refactor separates writable state onto a `/data` volume; `/healthz` liveness endpoint; gosu entrypoint; publish workflow on `v*` tag. Full UAT on spare Pi 4 incl live inverter. Website `install-docker.html` added.
+- **#55 -- Octopus tariff base-rate fix** -- base is now the dominant flat rate (was the cheapest band); every cheaper AND pricier band becomes its own TOU window, with multi-day dedupe. Fixes standard-rate hours costed at off-peak on Flux/Cosy/Go/Intelligent Flux. Users on a fetched Octopus tariff must re-fetch. Open until Steve confirms on hardware.
+- **Integration logging** -- Debug/Info/Warning logging across all outbound integrations (tariff, weather, solar forecast, GitHub update check, postcode lookup); secrets never logged.
+- Tests added: `tests/test_tariff.py` (11), `tests/test_predictive.py` (14).
+
 ### Shipped in v2.9 (4 Jul 2026)
 
 - **#37 -- Predictive overnight charge target** -- opt-in per charge schedule; target SOC computed from tomorrow's solar forecast minus historical morning demand.

@@ -38,8 +38,10 @@ jobs:
           # metadata-action lowercases the image name, so a mixed-case owner is fine.
           images: ghcr.io/${{ github.repository_owner }}/givenergy-dashboard
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            # Our release tags are two-part (v3.0), not full semver (3.0.0), so
+            # type=semver would skip them. Extract the version from the git tag
+            # instead: v3.0 -> 3.0. Works for any future vX.Y too.
+            type=match,pattern=v(.*),group=1
             type=raw,value=latest
 
       - name: Build and push
