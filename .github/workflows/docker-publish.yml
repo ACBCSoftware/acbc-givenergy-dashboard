@@ -6,6 +6,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish_version:
+        description: "Also tag with this version (e.g. 3.0). Blank = latest only."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -43,6 +48,8 @@ jobs:
             # instead: v3.0 -> 3.0. Works for any future vX.Y too.
             type=match,pattern=v(.*),group=1
             type=raw,value=latest
+            # Manual re-publish of a specific version (workflow_dispatch input)
+            type=raw,value=${{ inputs.publish_version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.publish_version != '' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
