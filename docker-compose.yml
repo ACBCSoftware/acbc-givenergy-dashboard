@@ -1,0 +1,26 @@
+# ACBC GivEnergy Dashboard — example Docker Compose file.
+#
+# Quick start:
+#   1. Edit TZ below to your timezone.
+#   2. docker compose up -d
+#   3. Open http://<this-host>:7890
+#   4. In Settings, enter your inverter's IP address. All settings, history and
+#      logs persist in ./data (created next to this file on first run).
+services:
+  givenergy-dashboard:
+    image: ghcr.io/acbcsoftware/givenergy-dashboard:latest
+    container_name: givenergy-dashboard
+    ports:
+      - "7890:7890"
+    volumes:
+      - ./data:/data
+    environment:
+      - TZ=Europe/London
+    restart: unless-stopped
+
+    # If your Docker host's bridge network cannot reach the inverter on your LAN
+    # (uncommon, but seen on some setups), comment out the `ports:` block above
+    # and use host networking instead — the dashboard will be on the host's
+    # port 7890 directly:
+    #
+    # network_mode: host

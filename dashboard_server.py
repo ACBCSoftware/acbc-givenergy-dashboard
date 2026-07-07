@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import logging.handlers
+import os
 import re
 import secrets
 import shutil
@@ -55,9 +56,22 @@ except Exception:
 
 APP_VERSION = (Path(__file__).parent / "VERSION").read_text().strip()
 
+# ── Data directory ─────────────────────────────────────────────────────────────
+# Writable state (config, history DB, logs, backups, quick-action state) lives in
+# ACBC_DATA_DIR when set, so a Docker container can persist everything on a single
+# mounted volume while the code/static files stay read-only in the image. Unset
+# (native installs) keeps it all beside the script, exactly as before.
+_CODE_DIR = Path(__file__).parent
+_DATA_DIR = Path(os.environ.get("ACBC_DATA_DIR", "").strip() or _CODE_DIR)
+try:
+    _DATA_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    _DATA_DIR = _CODE_DIR   # target not writable — fall back to the code dir
+_CONFIG_PATH = _DATA_DIR / "config.ini"
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 _cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-_cfg.read(Path(__file__).parent / "config.ini")
+_cfg.read(_CONFIG_PATH)
 
 INVERTER_IP   = _cfg.get("inverter", "ip",            fallback="192.168.68.65")
 INVERTER_PORT = _cfg.getint("inverter", "port",        fallback=8899)
@@ -209,7 +223,7 @@ def _authorised():
         try:
             ADMIN_HASH = _hash_password(pw)
             cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-            _config_path = Path(__file__).parent / "config.ini"
+            _config_path = _CONFIG_PATH
             cfg.read(_config_path)
             if not cfg.has_section("admin"):
                 cfg.add_section("admin")
@@ -228,12 +242,16 @@ def _action_authorised():
     return (not REQUIRE_AUTH) or _authorised()
 
 # ── Tariff / cost estimation ──────────────────────────────────────────────────
+# Max stored/derived TOU windows. Raised from 3 to 8 in v3.0 (#55): the "base +
+# deviations" model can need up to ~5 windows for tariffs like Cosy, whose cheap
+# rate runs in three disjoint stretches plus a separate peak.
+_MAX_TOU_WINDOWS  = 8
 TARIFF_CURRENCY   = _cfg.get("tariff",    "currency_symbol",   fallback="£")
 TARIFF_STANDING_P = _cfg.getfloat("tariff", "standing_charge_p", fallback=0.0)
 TARIFF_EXPORT_P   = _cfg.getfloat("tariff", "export_rate_p",     fallback=0.0)
 TARIFF_IMPORT_P   = _cfg.getfloat("tariff", "import_rate_p",     fallback=0.0)
 TARIFF_TOU: list[dict] = []
-for _i in range(1, 4):
+for _i in range(1, _MAX_TOU_WINDOWS + 1):
     _tn  = _cfg.get("tariff", f"tou_{_i}_name",          fallback="")
     _ts  = _cfg.get("tariff", f"tou_{_i}_start",         fallback="")
     _te  = _cfg.get("tariff", f"tou_{_i}_end",           fallback="")
@@ -470,9 +488,10 @@ def _dominant_rate(slots: list) -> float:
     return float(max(rate_dur, key=rate_dur.get)) if rate_dur else 0.0
 
 
-def _extract_tou_windows(slots: list) -> list:
+def _extract_tou_windows(slots: list, label: str = "") -> tuple:
     """
-    Derive TOU windows from unit-rate records.
+    Derive a base flat rate and TOU windows from unit-rate records.
+    `label` (e.g. "import"/"export") only tags the DEBUG lines.
 
     Handles both wide-window tariffs (e.g. Cosy/Flux: a few multi-hour records)
     and half-hourly slot tariffs (e.g. IntelligentFlux: ~48 records/day with
@@ -480,13 +499,20 @@ def _extract_tou_windows(slots: list) -> list:
 
     Algorithm:
     1. Sort by start time and merge consecutive same-rate runs into contiguous bands.
-    2. Identify the cheapest rate as the base flat rate (set via import_p by the caller).
-    3. Return only the above-base bands as named TOU windows (up to 3).
+    2. Base flat rate = the rate covering the greatest total duration (dominant).
+    3. Every band whose rate *differs* from base — cheaper OR pricier — becomes a
+       named window, each disjoint stretch kept separately.
 
-    Returns list of {name, start, end, rate_p, export_rate_p} dicts.
+    Taking the cheapest band as base (pre-v3.0) mis-set Flux's base to its
+    off-peak rate and left standard-rate stretches costed at off-peak (#55).
+    Because standard is the fragmented, dominant rate, making it the base means
+    its scattered stretches simply fall through to the flat rate and need no
+    window at all — only the (typically contiguous) off-peak/peak deviations do.
+
+    Returns (base_rate, [{name, start, end, rate_p, export_rate_p}, ...]).
     """
     if not slots:
-        return []
+        return 0.0, []
 
     # Parse to (local_start_dt, local_end_dt, rate)
     parsed = []
@@ -504,54 +530,66 @@ def _extract_tou_windows(slots: list) -> list:
         parsed.append((dt_f + off, dt_t + off, rate))
 
     if not parsed:
-        return []
+        return 0.0, []
     parsed.sort(key=lambda x: x[0])
 
-    # Merge contiguous same-rate runs (handles half-hourly slot tariffs)
-    merged = []
+    # Merge contiguous same-rate runs (handles half-hourly slot tariffs).
+    # Keep the datetimes so we can measure each band's duration.
+    merged = []   # list of (start_dt, end_dt, rate)
     rs, re, rr = parsed[0]
     for s, e, r in parsed[1:]:
         if r == rr and s <= re:     # same rate, adjacent or overlapping
             re = max(re, e)
         else:
-            merged.append((rs.strftime("%H:%M"), re.strftime("%H:%M"), rr))
+            merged.append((rs, re, rr))
             rs, re, rr = s, e, r
-    merged.append((rs.strftime("%H:%M"), re.strftime("%H:%M"), rr))
+    merged.append((rs, re, rr))
 
-    # Base rate = cheapest band
-    base_rate = min(r for _, _, r in merged)
-
-    # Group above-base windows by their DISTINCT rate value.
-    # This ensures we always capture the highest rate band even when lower bands
-    # appear more times (e.g. Cosy has 4 windows at 26.70p and 1 at 40.06p —
-    # taking cheapest-first [:3] would drop the peak entirely).
-    def _win_duration(s, e):
-        sm = int(s[:2]) * 60 + int(s[3:])
-        em = int(e[:2]) * 60 + int(e[3:])
-        return (24 * 60 - sm + em) if em <= sm else (em - sm)
-
-    rate_buckets: dict = {}   # rate_value → list of (start, end) strings
+    # Base rate = the rate covering the greatest total duration (the flat rate).
+    dur_by_rate: dict = {}
     for s, e, r in merged:
-        if r > base_rate:
-            rate_buckets.setdefault(r, []).append((s, e))
+        dur_by_rate[r] = dur_by_rate.get(r, 0.0) + (e - s).total_seconds()
+    base_rate = max(dur_by_rate, key=dur_by_rate.get)
 
-    distinct_rates = sorted(rate_buckets)   # cheapest non-base first → Off-peak … Peak
+    _tag = f"[{label}] " if label else ""
+    if log.isEnabledFor(logging.DEBUG):
+        hours = {round(r, 4): round(sec / 3600, 2) for r, sec in dur_by_rate.items()}
+        log.debug("%sTOU extract: %d band(s), base=%.4fp (dominant by duration); "
+                  "rate->hours=%s", _tag, len(merged), base_rate, hours)
 
-    n = len(distinct_rates)
-    if n == 1:
-        name_list = ["Peak"]
-    elif n == 2:
-        name_list = ["Standard", "Peak"]
-    else:
-        name_list = ["Off-peak", "Standard", "Peak"]
+    # Name each distinct deviation rate by its relation to base. In practice the
+    # big tariffs have one cheaper rate and/or one pricier rate; extra levels get
+    # "Super off-peak"/"Super peak" so names stay unique and intuitive.
+    cheaper = sorted(r for r in dur_by_rate if r < base_rate)   # ascending (cheapest first)
+    pricier = sorted(r for r in dur_by_rate if r > base_rate)   # ascending
+    name_of: dict = {}
+    for i, r in enumerate(cheaper):
+        name_of[r] = "Super off-peak" if (len(cheaper) > 1 and i == 0) else "Off-peak"
+    for i, r in enumerate(pricier):
+        name_of[r] = "Super peak" if (len(pricier) > 1 and i == len(pricier) - 1) else "Peak"
 
-    result = []
-    for i, rate in enumerate(distinct_rates[:3]):
-        # For this rate band, pick the longest contiguous window as representative
-        best = max(rate_buckets[rate], key=lambda w: _win_duration(w[0], w[1]))
-        result.append({"name": name_list[i], "start": best[0], "end": best[1],
-                        "rate_p": rate, "export_rate_p": 0.0})
-    return result
+    # Emit one window per deviating band, in chronological order. Bands equal to
+    # base are omitted — they are covered by the flat rate. A fetch can span more
+    # than one day, so the same daily window (e.g. Go's 00:30-05:30 off-peak)
+    # recurs; dedupe by clock time + rate so it is stored once. Cap defensively.
+    windows = []
+    seen = set()
+    for s, e, r in merged:
+        if r == base_rate:
+            continue
+        start, end = s.strftime("%H:%M"), e.strftime("%H:%M")
+        key = (start, end, round(r, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        windows.append({"name": name_of[r], "start": start, "end": end,
+                        "rate_p": r, "export_rate_p": 0.0})
+    windows = windows[:_MAX_TOU_WINDOWS]
+    if log.isEnabledFor(logging.DEBUG):
+        for w in windows:
+            log.debug("%sTOU window: %-14s %s-%s  %.4fp",
+                      _tag, w["name"], w["start"], w["end"], w["rate_p"])
+    return base_rate, windows
 
 
 def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
@@ -566,7 +604,7 @@ def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
     global TARIFF_IMPORT_P, TARIFF_EXPORT_P, TARIFF_STANDING_P
     global TARIFF_TOU, _RATES_LAST_FETCHED, _tariff_dirty
     cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-    cfg.read(Path(__file__).parent / "config.ini")
+    cfg.read(_CONFIG_PATH)
     if not cfg.has_section("tariff"):
         cfg.add_section("tariff")
     if import_p is not None and float(import_p) > 0:
@@ -582,11 +620,11 @@ def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
         # Strip any window whose import rate is 0 — these are bad API data
         valid_windows = [w for w in tou_windows if float(w.get("rate_p", 0)) > 0]
         TARIFF_TOU = valid_windows
-        for i in range(1, 4):
+        for i in range(1, _MAX_TOU_WINDOWS + 1):
             for k in (f"tou_{i}_name", f"tou_{i}_start", f"tou_{i}_end",
                       f"tou_{i}_rate_p", f"tou_{i}_export_rate_p"):
                 cfg.remove_option("tariff", k)
-        for i, w in enumerate(valid_windows[:3], 1):
+        for i, w in enumerate(valid_windows[:_MAX_TOU_WINDOWS], 1):
             if w.get("name"):
                 cfg.set("tariff", f"tou_{i}_name",          str(w["name"]))
                 cfg.set("tariff", f"tou_{i}_start",         str(w["start"]))
@@ -596,7 +634,7 @@ def _save_fetched_rates(import_p=None, export_p=None, standing_p=None,
     ts_now = datetime.now().isoformat(timespec="seconds")
     _RATES_LAST_FETCHED = ts_now
     cfg.set("tariff", "rates_last_fetched", ts_now)
-    with open(Path(__file__).parent / "config.ini", "w") as f:
+    with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
     _tariff_dirty = True
 
@@ -757,6 +795,8 @@ def _fetch_static_rates(source: str) -> dict:
         sc    = _fetch_standing_charge(product, tariff)
         rates = {round(float(r["value_inc_vat"]), 2) for r in slots}
         label = source.replace('octopus_', '').replace('_', ' ').title()
+        log.debug("Fetch %s: %d unit-rate slot(s), %d distinct rate(s) %s, standing=%.2fp",
+                  source, len(slots), len(rates), sorted(rates), sc)
 
         # Resolve export rates:
         #   a) Mirror sources — export rate == import rate per window (no separate product)
@@ -779,7 +819,8 @@ def _fetch_static_rates(source: str) -> dict:
                     # not an anomalous overnight minimum
                     exp_base_rate = _dominant_rate(exp_slots)
                     if len(exp_rates_set) > 1:
-                        for w in _extract_tou_windows(exp_slots):
+                        _, exp_wins = _extract_tou_windows(exp_slots, label="export")
+                        for w in exp_wins:
                             exp_window_rates[w["start"]] = round(w["rate_p"], 4)
             except Exception as exc:
                 log.warning("Export rate fetch failed for %s: %s", source, exc)
@@ -792,8 +833,7 @@ def _fetch_static_rates(source: str) -> dict:
                                 tou_windows=[])
             msg = f"{label}: {rate:.2f}p/kWh flat"
         else:
-            base_rate = min(float(r["value_inc_vat"]) for r in slots)
-            windows   = _extract_tou_windows(slots)
+            base_rate, windows = _extract_tou_windows(slots, label="import")
             if not windows:
                 # _extract_tou_windows() found nothing (e.g. all slots have
                 # valid_to=None — open-ended flat tariff with a recent rate change).
@@ -859,13 +899,22 @@ def _do_rate_fetch() -> dict:
     try:
         src = TARIFF_SOURCE
         if src in _VARIABLE_RATE_SOURCES:
-            return _fetch_agile_rates()
-        if src == "octopus_tracker":
-            return _fetch_tracker_rates()
-        if src in ("octopus_cosy", "octopus_go", "octopus_flux",
-                   "octopus_intelligent_flux", "octopus_flexible"):
-            return _fetch_static_rates(src)
-        return {"ok": False, "msg": f"Unknown source: {src}"}
+            result = _fetch_agile_rates()
+        elif src == "octopus_tracker":
+            result = _fetch_tracker_rates()
+        elif src in ("octopus_cosy", "octopus_go", "octopus_flux",
+                     "octopus_intelligent_flux", "octopus_flexible"):
+            result = _fetch_static_rates(src)
+        else:
+            result = {"ok": False, "msg": f"Unknown source: {src}"}
+        # One INFO line per fetch records the derived base rate + windows, so a
+        # "rates look wrong after fetch" report (e.g. #55) is diagnosable from the
+        # log alone. DEBUG detail lives in the fetch/extract helpers below.
+        if result.get("ok"):
+            log.info("Tariff fetch (%s): %s", src, result.get("msg", ""))
+        else:
+            log.warning("Tariff fetch (%s) failed: %s", src, result.get("msg", ""))
+        return result
     except Exception as exc:
         msg = f"Rate fetch error: {exc}"
         log.error(msg)
@@ -931,9 +980,9 @@ def _rate_fetch_loop() -> None:
                 _do_rate_fetch()
 
 
-DB_PATH           = Path(__file__).parent / "history.db"
-_QA_STATE_PATH    = Path(__file__).parent / "quick_action_state.json"
-BACKUPS_DIR       = Path(__file__).parent / "backups"
+DB_PATH           = _DATA_DIR / "history.db"
+_QA_STATE_PATH    = _DATA_DIR / "quick_action_state.json"
+BACKUPS_DIR       = _DATA_DIR / "backups"
 PENDING_IMPORT = Path(str(DB_PATH) + ".pending")   # history.db.pending
 
 # ── Backup / restore ─────────────────────────────────────────────────────────
@@ -1021,7 +1070,7 @@ logging.basicConfig(
 log = logging.getLogger("dashboard")
 
 _log_file_handler = None
-_LOG_PATH = Path(__file__).parent / "dashboard.log"
+_LOG_PATH = _DATA_DIR / "dashboard.log"
 try:
     _log_file_handler = logging.handlers.TimedRotatingFileHandler(
         _LOG_PATH, when="midnight", backupCount=LOG_RETENTION_DAYS, encoding="utf-8"
@@ -1544,6 +1593,7 @@ def _weather_interval():
 def _fetch_weather() -> dict:
     """Fetch latest land observation from Met Office DataHub."""
     url = f"https://data.hub.api.metoffice.gov.uk/observation-land/1/{MET_GEOHASH}"
+    log.debug("Weather fetch: GET %s", url)
     req = urllib.request.Request(
         url, headers={"apikey": MET_API_KEY, "accept": "application/json"})
     with urllib.request.urlopen(req, timeout=15) as r:
@@ -1552,6 +1602,8 @@ def _fetch_weather() -> dict:
         (o for o in reversed(obs) if "temperature" in o and "weather_code" in o), None)
     if not latest:
         raise ValueError("No complete observation in response")
+    log.debug("Weather fetch: %d observation(s), using %s",
+              len(obs) if isinstance(obs, list) else 0, latest.get("datetime", ""))
     return {
         "ok":           True,
         "temp":         round(latest["temperature"], 1),
@@ -1570,12 +1622,15 @@ def _met_nearest_station(lat: float, lng: float) -> dict:
     # Met Office /nearest requires at most 2 decimal places on lat/lon
     url = (f"https://data.hub.api.metoffice.gov.uk/observation-land/1/nearest"
            f"?lat={lat:.2f}&lon={lng:.2f}")
+    log.debug("Met Office /nearest: GET %s", url)
     req = urllib.request.Request(
         url, headers={"apikey": MET_API_KEY, "accept": "application/json"})
     with urllib.request.urlopen(req, timeout=15) as r:
         results = json.loads(r.read())
     if not results:
         raise ValueError("No station found near that location")
+    log.debug("Met Office /nearest: %d result(s), nearest geohash=%s",
+              len(results), results[0].get("geohash", ""))
     return results[0]
 
 # ── Inverter data: shared field mapping ─────────────────────────────────────────
@@ -2008,7 +2063,7 @@ def _maybe_weather():
                 _weather_cached = wx
             log.info("Weather: %s°C code=%s", wx["temp"], wx["weather_code"])
         except Exception as exc:
-            log.error("Weather fetch failed: %s", exc)
+            log.warning("Weather fetch failed: %s", exc)
         finally:
             _weather_fetch_active = False
 
@@ -2031,6 +2086,8 @@ def _fetch_solar_forecast() -> dict:
     else:
         url = (f"https://api.forecast.solar/estimate"
                f"/{SF_LAT}/{SF_LON}/{SF_TILT}/{SF_AZ}/{SF_KWP}")
+    log.debug("Solar forecast fetch: GET %s",
+              url.replace(SF_API_KEY, "<key>") if SF_API_KEY else url)
     data = _http_get_json(url, timeout=15)
     if data.get("message", {}).get("code", -1) != 0:
         raise ValueError(f"Forecast.Solar error: {data.get('message')}")
@@ -2038,6 +2095,8 @@ def _fetch_solar_forecast() -> dict:
     if rl.get("remaining", 1) == 0:
         raise ValueError("Forecast.Solar rate limit reached")
     raw = data.get("result", {})
+    log.debug("Solar forecast fetch: ratelimit remaining=%s, %d result series",
+              rl.get("remaining"), len(raw) if isinstance(raw, dict) else 0)
 
     def _to_list(series, key):
         """Convert a {key_str: value} dict to a sorted [{key: ..., value: ...}]."""
@@ -2083,7 +2142,7 @@ def _maybe_solar_forecast():
             log.info("Solar forecast updated: %d day(s), %d period(s)",
                      len(days), len(result.get("watt_hours_period", [])))
         except Exception as exc:
-            log.error("Solar forecast fetch failed: %s", exc)
+            log.warning("Solar forecast fetch failed: %s", exc)
         finally:
             _sf_fetch_active = False
 
@@ -2194,11 +2253,14 @@ def _check_for_update():
             _GH_API,
             headers={"User-Agent": f"acbc-givenergy-dashboard/{APP_VERSION}",
                      "Accept": "application/vnd.github+json"})
+        log.debug("Update check: GET %s", _GH_API)
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
         latest_tag  = data.get("tag_name", "")
         latest_name = data.get("name", latest_tag)[:80]   # release title, capped
         available   = _parse_version(latest_tag) > _parse_version(APP_VERSION)
+        log.debug("Update check: latest_tag=%s name=%s available=%s",
+                  latest_tag, latest_name, available)
         _update_info = {
             "available":    available,
             "current":      APP_VERSION,
@@ -2207,8 +2269,9 @@ def _check_for_update():
             "url":          "https://software.andrewcampbell.co.uk/release-notes.html",
             "checked_at":   int(time.time()),
         }
-        if available:
-            log.warning("Update available: v%s → %s", APP_VERSION, latest_tag)
+        log.info("Update check: current v%s, latest %s (%s)",
+                 APP_VERSION, latest_tag or "?",
+                 "update available" if available else "up to date")
     except Exception as exc:
         log.warning("Update check failed: %s", exc)
     finally:
@@ -4237,7 +4300,7 @@ def save_schedule_config():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     data = (request.get_json(silent=True) or {})
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-    cfg.read(Path(__file__).parent / "config.ini")
+    cfg.read(_CONFIG_PATH)
     if not cfg.has_section("scheduler"):
         cfg.add_section("scheduler")
     if "master_enabled" in data:
@@ -4252,7 +4315,7 @@ def save_schedule_config():
         val = max(4, min(100, int(data["baseline_soc_reserve"])))
         SCHEDULER_BASELINE_SOC_RESERVE = val
         cfg.set("scheduler", "baseline_soc_reserve", str(val))
-    with open(Path(__file__).parent / "config.ini", "w") as f:
+    with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
     return jsonify({"ok":                   True,
                     "master_enabled":        SCHEDULER_ENABLED,
@@ -4601,7 +4664,7 @@ def save_settings():
         return jsonify({"ok": False, "error": "API key too long"}), 400
 
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-    cfg.read(Path(__file__).parent / "config.ini")
+    cfg.read(_CONFIG_PATH)
 
     def _set(section, key, val):
         if not cfg.has_section(section): cfg.add_section(section)
@@ -4743,7 +4806,7 @@ def save_settings():
             _log_file_handler.backupCount = LOG_RETENTION_DAYS
         _set("logging", "log_retention_days", LOG_RETENTION_DAYS)
 
-    with open(Path(__file__).parent / "config.ini", "w") as f:
+    with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
     return jsonify({"ok": True,
                     "weather_configured": bool(MET_API_KEY and MET_GEOHASH),
@@ -4789,12 +4852,12 @@ def save_tariff():
     if "octopus_postcode" in data and len(str(data["octopus_postcode"])) > 8:
         return jsonify({"ok": False, "error": "Postcode too long"}), 400
     if isinstance(data.get("tou_windows"), list):
-        for w in data["tou_windows"][:3]:
+        for w in data["tou_windows"][:_MAX_TOU_WINDOWS]:
             if len(str(w.get("name", "")).strip()) > 40:
                 return jsonify({"ok": False, "error": "TOU window name too long (max 40 characters)"}), 400
 
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
-    cfg.read(Path(__file__).parent / "config.ini")
+    cfg.read(_CONFIG_PATH)
     if not cfg.has_section("tariff"):
         cfg.add_section("tariff")
 
@@ -4828,13 +4891,13 @@ def save_tariff():
     windows = data.get("tou_windows")
     if isinstance(windows, list):
         TARIFF_TOU = []
-        for i in range(1, 4):
+        for i in range(1, _MAX_TOU_WINDOWS + 1):
             cfg.remove_option("tariff", f"tou_{i}_name")
             cfg.remove_option("tariff", f"tou_{i}_start")
             cfg.remove_option("tariff", f"tou_{i}_end")
             cfg.remove_option("tariff", f"tou_{i}_rate_p")
             cfg.remove_option("tariff", f"tou_{i}_export_rate_p")
-        for i, w in enumerate(windows[:3], 1):
+        for i, w in enumerate(windows[:_MAX_TOU_WINDOWS], 1):
             name       = str(w.get("name",   "")).strip()
             start      = str(w.get("start",  "")).strip()
             end        = str(w.get("end",    "")).strip()
@@ -4849,7 +4912,7 @@ def save_tariff():
                 cfg.set("tariff", f"tou_{i}_rate_p",         str(rate))
                 cfg.set("tariff", f"tou_{i}_export_rate_p",  str(export_rt))
 
-    with open(Path(__file__).parent / "config.ini", "w") as f:
+    with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
 
     _tariff_dirty = True   # signal poll thread to recompute today's cost totals
@@ -4929,7 +4992,7 @@ def tariff_lookup_region():
 def get_log():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    log_path = Path(__file__).parent / "dashboard.log"
+    log_path = _LOG_PATH
     if not log_path.exists():
         return jsonify({"ok": False, "error": "No log file yet"}), 404
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5051,6 +5114,7 @@ def weather_lookup_postcode():
     # Step 1: postcode → lat/lng via postcodes.io (free, no auth)
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
+        log.debug("Postcode lookup: GET %s", url)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as r:
             body = json.loads(r.read())
@@ -5092,6 +5156,7 @@ def sf_lookup_postcode():
         return jsonify({"ok": False, "error": "Invalid postcode"}), 400
     try:
         url = "https://api.postcodes.io/postcodes/" + urllib.parse.quote(raw)
+        log.debug("Postcode lookup: GET %s", url)
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as r:
             body = json.loads(r.read())
@@ -5463,6 +5528,15 @@ def api_power():
         """, (day,)).fetchall()
 
     return jsonify({"ok": True, "day": day, "points": [dict(r) for r in rows]})
+
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for Docker / orchestrators. Returns 200 whenever the web
+    app is up, regardless of inverter connectivity — inverter state is reported
+    separately by /api/data (which returns 503 when the inverter is unreachable,
+    making it unsuitable as a container health check)."""
+    return jsonify({"ok": True, "version": APP_VERSION}), 200
+
 
 @app.route("/")
 def index():

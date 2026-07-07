@@ -63,6 +63,45 @@ sudo systemctl restart givenergy-dashboard   # restart after config changes
 
 ---
 
+### Docker (any platform — Pi, Linux, NAS)
+
+The quickest cross-platform option. Multi-arch images are published for `amd64`
+(PCs/NAS), `arm64` (Pi 4/5 on a 64-bit OS) and `arm/v7` (Pi 3 / Zero 2).
+
+1. Create a `docker-compose.yml` (or use the one in this repo):
+   ```yaml
+   services:
+     givenergy-dashboard:
+       image: ghcr.io/acbcsoftware/givenergy-dashboard:latest
+       container_name: givenergy-dashboard
+       ports:
+         - "7890:7890"
+       volumes:
+         - ./data:/data
+       environment:
+         - TZ=Europe/London      # set your timezone (scheduler/tariffs use local time)
+       restart: unless-stopped
+   ```
+
+2. Start it:
+   ```bash
+   docker compose up -d
+   ```
+
+3. Open `http://<host-ip>:7890`, go to **Settings**, and enter your inverter's
+   IP address. All settings, history and logs persist in the `./data` folder
+   created next to the compose file.
+
+**Notes:**
+- The container talks to the inverter over your LAN — no device passthrough
+  needed. If your Docker host's bridge network can't reach the inverter (rare),
+  swap the `ports:` block for `network_mode: host`.
+- Set `TZ` to your timezone or the scheduler and time-of-use tariffs will be an
+  hour out during BST.
+- Logs go to both `docker logs givenergy-dashboard` and `./data/dashboard.log`.
+
+---
+
 ### Linux (Ubuntu / Debian)
 
 Same as Raspberry Pi above — `setup.sh` works on any Debian-based system.
@@ -83,7 +122,7 @@ systemd service that starts on boot.
 #### Option A — Installer (recommended)
 
 1. Install [Python 3.11+](https://python.org/downloads/) — **tick "Add Python to PATH"** during setup.
-2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v2.9.exe`**.
+2. Download and run **`ACBC-GivEnergy-Dashboard-Setup-v3.0.exe`**.
 3. The installer will:
    - Create a Python virtual environment
    - Install all required packages
@@ -95,7 +134,7 @@ systemd service that starts on boot.
 > **Windows Defender blocking the installer?** It isn't code-signed (a signing certificate is a costly yearly subscription for a free app), so Defender sometimes flags it — a **false positive**; the full source is in this repo. Two cases:
 >
 > - **Blue "Windows protected your PC" box:** click **More info** → **Run anyway**.
-> - **File vanishes / "Threat found" alert** (Defender quarantined it, no "More info" link): open **Windows Security → Virus & threat protection → Protection history**, find the quarantined `ACBC-GivEnergy-Dashboard-Setup-v2.9.exe`, click it, then **Actions → Allow** (or **Restore**). Re-download if needed and run again.
+> - **File vanishes / "Threat found" alert** (Defender quarantined it, no "More info" link): open **Windows Security → Virus & threat protection → Protection history**, find the quarantined `ACBC-GivEnergy-Dashboard-Setup-v3.0.exe`, click it, then **Actions → Allow** (or **Restore**). Re-download if needed and run again.
 >
 > Still cautious? Read [`installer.iss`](installer.iss) to see exactly what it runs, or use **Option B** below to skip the installer entirely.
 
@@ -185,6 +224,21 @@ bash update.sh
 This stops the service, **backs up** your `config.ini` and `history.db` to `/opt/givenergy-dashboard/backups/<timestamp>/`, copies only the application files (never your data), updates Python packages, and restarts. Your settings and history are kept.
 
 > Re-running `bash setup.sh` is also safe — it preserves your config and database — but `update.sh` is faster as it doesn't rebuild the virtual environment.
+
+### Docker
+
+Pull the new image and recreate the container — your `./data` folder (config,
+history, logs) is never touched:
+
+```bash
+docker compose pull
+docker compose up -d
+docker image prune -f      # optional: remove the old image
+```
+
+Database schema upgrades run automatically in place on first start, so history
+is carried forward. To roll back, pin a previous tag (e.g.
+`image: ghcr.io/acbcsoftware/givenergy-dashboard:3.0`) and `docker compose up -d`.
 
 ### What's preserved
 

@@ -1209,7 +1209,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <!-- TOU windows (hidden for Agile/Tracker/Flexible) -->
       <div class="sett-section" id="tr-tou-section">
         <div class="sett-heading">Time-of-use rates</div>
-        <div class="sett-hint">Define up to 3 time windows with separate import and export rates (e.g. peak / off-peak / overnight). The flat rates above apply outside any defined window. Supports overnight windows that cross midnight.</div>
+        <div class="sett-hint">Define up to 8 time windows with separate import and export rates (e.g. peak / off-peak / overnight). The flat rates above apply outside any defined window. Supports overnight windows that cross midnight.</div>
         <div id="tou-list"></div>
         <button class="ctrl-btn ctrl-btn-sm" id="tou-add" onclick="touAddWindow()" style="margin-top:6px">+ Add window</button>
       </div>
@@ -3118,6 +3118,7 @@ setInterval(_switchTileMode, 10000);
 
 // ── Tariff settings ───────────────────────────────────────────────────────────
 let _touCount = 0;
+const _MAX_TOU_WINDOWS = 8;   // keep in sync with dashboard_server.py (#55)
 
 // Source-aware UI show/hide
 function _updateTariffSourceUI(src) {
@@ -3251,7 +3252,7 @@ async function _loadAgileCurrentRate() {
 }
 
 function touAddWindow(w) {
-  if (_touCount >= 3) return;
+  if (_touCount >= _MAX_TOU_WINDOWS) return;
   _touCount++;
   const idx = _touCount;
   const div = document.createElement('div');
@@ -3268,7 +3269,7 @@ function touAddWindow(w) {
   `;
   div.querySelectorAll('input').forEach(el => el.addEventListener('input', _markTariffDirty));
   $('tou-list').appendChild(div);
-  $('tou-add').style.display = _touCount >= 3 ? 'none' : '';
+  $('tou-add').style.display = _touCount >= _MAX_TOU_WINDOWS ? 'none' : '';
   _markTariffDirty();
 }
 
@@ -3279,7 +3280,7 @@ function touRemoveWindow(btn) {
   $('tou-list').querySelectorAll('.tou-window').forEach((d, i) => {
     d.querySelector('.sett-heading').textContent = `Window ${i + 1}`;
   });
-  $('tou-add').style.display = _touCount >= 3 ? 'none' : '';
+  $('tou-add').style.display = _touCount >= _MAX_TOU_WINDOWS ? 'none' : '';
   _markTariffDirty();
 }
 
