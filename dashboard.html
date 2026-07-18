@@ -150,15 +150,11 @@ select optgroup{background:#172035;color:#7fa8cc}
 .yr-badge{font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
 .yr-badge.good{color:#4ade80}.yr-badge.bad{color:#f87171}
 .yr-val{font-size:1.25rem;font-weight:700;color:var(--text);line-height:1.1}
+.yr-val.is-cost{color:#f87171}.yr-val.is-income{color:#4ade80}
+#yr-proj-note{font-size:.68rem;color:var(--muted);text-align:center;padding:2px 4px}
 .yr-sub{font-size:.72rem;color:#4ade80}
 .yr-sub.cost{color:#f87171}
 .yr-date{font-size:.68rem;color:var(--muted)}
-#yr-hourly-wrap{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:10px 12px}
-#yr-hourly-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-#yr-hourly-legend{display:flex;gap:10px;font-size:.68rem;color:var(--muted)}
-.yr-leg-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:3px}
-#yr-hourly-canvas-wrap{position:relative;height:120px}
-#yr-hourly-canvas{position:absolute;inset:0;width:100%;height:100%}
 #yr-carbon{background:linear-gradient(135deg,rgba(74,222,128,.14),rgba(56,189,248,.10));
   border:1px solid rgba(74,222,128,.35);border-radius:16px;padding:22px 16px;text-align:center}
 #yr-carbon-hdr{font-size:1.45rem;font-weight:700;color:#4ade80;line-height:1.2}
@@ -1042,6 +1038,12 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Minimum charge SOC (%)</label><input id="s-pred-minsoc" type="number" min="4" max="100" placeholder="e.g. 20"></div>
         <div id="s-pred-status" style="font-size:.78rem;color:var(--muted);padding:4px 0 2px"></div>
         <div id="s-pred-demand" style="font-size:.78rem;color:var(--muted);padding:2px 0 4px"></div>
+      </div>
+      <div class="sett-section">
+        <div class="sett-heading">Year in Review Projection</div>
+        <div class="sett-hint">The Estimated Annual Cost and Solar/Battery Savings tiles on Year in Review use your real data so far this year, plus a generic seasonal curve to estimate the rest. If you know your actual annual usage (e.g. from a bill), enter it here to use that instead of the auto-estimate. Leave blank to let it auto-estimate.</div>
+        <div class="sett-row"><label>Annual consumption (kWh)</label><input id="s-yr-consumption" type="number" min="0" step="1" placeholder="auto-estimated"></div>
+        <div class="sett-row"><label>Annual solar generation (kWh)</label><input id="s-yr-solar" type="number" min="0" step="1" placeholder="auto-estimated"></div>
       </div>
       <button class="sett-save-btn" id="sett-save-integrations">Save Settings</button>
       <div id="sett-msg-integrations" class="sett-msg"></div>
@@ -3567,6 +3569,8 @@ async function loadSettings() {
     $('s-pred-pessimism').value  = s.pred_pessimism_factor ?? '';
     $('s-pred-reserve').value    = s.pred_evening_reserve  ?? '';
     $('s-pred-minsoc').value     = s.pred_minimum_soc      ?? '';
+    $('s-yr-consumption').value  = s.yr_consumption_override_kwh || '';
+    $('s-yr-solar').value        = s.yr_solar_override_kwh       || '';
     _loadedSettings = s;
     {
       const el = $('s-pred-status');
@@ -3657,6 +3661,8 @@ async function _doSaveSettings(msgEl) {
     pred_pessimism_factor:parseFloat($('s-pred-pessimism').value)   || 0.85,
     pred_evening_reserve: parseFloat($('s-pred-reserve').value)     || 3.0,
     pred_minimum_soc:     parseInt($('s-pred-minsoc').value)        || 20,
+    yr_consumption_override_kwh: parseFloat($('s-yr-consumption').value) || 0,
+    yr_solar_override_kwh:       parseFloat($('s-yr-solar').value)       || 0,
     new_password:    newPw,
     chart_colors: {
       solar:   $('s-col-solar').value,
@@ -4658,12 +4664,17 @@ function _yrFmtCost(pence, sym) {
   return sym + (pence / 100).toFixed(2);
 }
 
-function _yrCard(badge, badgeCls, valText, subText, subCls, dateText) {
+function _yrFmtSigned(pence, sym) {
+  if (pence == null) return '—';
+  return (pence < 0 ? '-' : '') + sym + Math.abs(pence / 100).toFixed(2);
+}
+
+function _yrCard(badge, badgeCls, valText, subText, subCls, dateText, valCls) {
   return `<div class="yr-card">
     <div class="yr-badge ${badgeCls}">${badge}</div>
-    <div class="yr-val">${valText}</div>
+    <div class="yr-val ${valCls||''}">${valText}</div>
     ${subText ? `<div class="yr-sub ${subCls||''}">${subText}</div>` : ''}
-    <div class="yr-date">${dateText}</div>
+    ${dateText ? `<div class="yr-date">${dateText}</div>` : ''}
   </div>`;
 }
 
@@ -4681,7 +4692,34 @@ function _renderYearReview(d) {
   const _icSun   = `<svg ${_svgAttrs}><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="23"/><line x1="1" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="23" y2="12"/><line x1="4.22" y1="4.22" x2="6.34" y2="6.34"/><line x1="17.66" y1="17.66" x2="19.78" y2="19.78"/><line x1="4.22" y1="19.78" x2="6.34" y2="17.66"/><line x1="17.66" y1="6.34" x2="19.78" y2="4.22"/></svg>`;
   const _icBolt  = `<svg ${_svgAttrs}><polyline points="13 2 13 9 19 9 11 22 11 15 5 15 13 2"/></svg>`;
   const _icHome  = `<svg ${_svgAttrs}><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>`;
-  const _icClock = `<svg ${_svgAttrs}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+  const _icCoin  = `<svg ${_svgAttrs}><circle cx="12" cy="12" r="9"/><path d="M9 15.5c0 1 1.1 1.8 3 1.8s3-.7 3-1.8c0-2.4-6-1.1-6-3.5 0-1.1 1.1-1.8 3-1.8s3 .8 3 1.8"/><line x1="12" y1="6.5" x2="12" y2="8"/><line x1="12" y1="17.3" x2="12" y2="18.5"/></svg>`;
+
+  // Estimated/final annual cost + solar-battery savings, from the backend
+  // projection (real data-so-far + a baked-in seasonal curve for the rest of
+  // the year -- see _project_year_totals in dashboard_server.py).
+  const p = d.projection || {};
+  let projHtml = '';
+  if (p.net_cost_p != null) {
+    if (!p.has_enough_data) {
+      projHtml = `<div class="yr-sec">
+        <div class="yr-sec-title">${_icCoin}Estimated Annual Electricity Cost</div>
+        <div id="yr-proj-note">Collecting data — ${p.data_days}/${p.min_data_days} days so far. Check back soon for a full-year estimate.</div>
+      </div>`;
+    } else {
+      const costCls = p.net_cost_p > 0  ? 'is-cost'   : 'is-income';
+      const savCls  = p.savings_p >= 0  ? 'is-income' : 'is-cost';
+      projHtml = `<div class="yr-sec">
+        <div class="yr-sec-title">${_icCoin}${p.is_final ? 'Final' : 'Estimated'} Annual Electricity Cost</div>
+        <div class="yr-cards">
+          ${_yrCard('Total cost', '', _yrFmtSigned(p.net_cost_p, sym), '', '', '', costCls)}
+          ${_yrCard('Solar &amp; battery savings', '', _yrFmtSigned(p.savings_p, sym), '', '', '', savCls)}
+        </div>
+        <div id="yr-proj-note">${p.is_final
+            ? 'Full year, actual data.'
+            : `Projected for ${d.year} — based on ${p.data_days} days of real data, plus a seasonal estimate for the rest of the year.`}</div>
+      </div>`;
+    }
+  }
 
   let html = `<div class="yr-stats-wrap">
     <div class="yr-sec">
@@ -4711,20 +4749,6 @@ function _renderYearReview(d) {
     </div>
   </div>`;
 
-  // Hourly profile
-  if (d.hourly_profile && d.hourly_profile.length) {
-    html += `<div id="yr-hourly-wrap">
-      <div id="yr-hourly-hdr">
-        <div class="yr-sec-title" style="margin:0">${_icClock}Average daily profile</div>
-        <div id="yr-hourly-legend">
-          <span><span class="yr-leg-dot" style="background:#f59e0b"></span>Solar</span>
-          <span><span class="yr-leg-dot" style="background:#38bdf8"></span>Home</span>
-        </div>
-      </div>
-      <div id="yr-hourly-canvas-wrap"><canvas id="yr-hourly-canvas"></canvas></div>
-    </div>`;
-  }
-
   // Carbon offset badge
   if (d.carbon && d.carbon.co2_kg > 0) {
     const c = d.carbon;
@@ -4740,72 +4764,8 @@ function _renderYearReview(d) {
     </div>`;
   }
 
+  html += projHtml;
   $('yr-body').innerHTML = html;
-  if (d.hourly_profile && d.hourly_profile.length) {
-    requestAnimationFrame(() => _drawYrChart(d.hourly_profile));
-  }
-}
-
-function _drawYrChart(profile) {
-  const canv = $('yr-hourly-canvas');
-  if (!canv) return;
-  const wrap = $('yr-hourly-canvas-wrap');
-  const W = wrap.clientWidth || 300;
-  const H = 120;
-  canv.width  = W * devicePixelRatio;
-  canv.height = H * devicePixelRatio;
-  canv.style.width  = W + 'px';
-  canv.style.height = H + 'px';
-  const ctx = canv.getContext('2d');
-  ctx.scale(devicePixelRatio, devicePixelRatio);
-
-  const PAD_L = 36, PAD_R = 4, PAD_T = 6, PAD_B = 18;
-  const chartW = W - PAD_L - PAD_R;
-  const chartH = H - PAD_T - PAD_B;
-  const maxW = Math.max(...profile.map(r => Math.max(r.home_w||0, r.solar_w||0)), 1);
-
-  // Grid lines
-  ctx.strokeStyle = 'rgba(255,255,255,.07)';
-  ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75, 1].forEach(f => {
-    const y = PAD_T + chartH * (1 - f);
-    ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
-  });
-
-  // Y-axis label
-  ctx.fillStyle = 'rgba(255,255,255,.35)';
-  ctx.font = `${9 * devicePixelRatio / devicePixelRatio}px sans-serif`;
-  ctx.textAlign = 'right';
-  const topLabel = maxW >= 1000 ? (maxW/1000).toFixed(1)+'k' : Math.round(maxW)+'';
-  ctx.fillText(topLabel+'W', PAD_L - 3, PAD_T + 7);
-
-  // Bars
-  const n   = 24;
-  const bW  = chartW / n;
-  const bar = bW * 0.36;
-  for (let i = 0; i < n; i++) {
-    const row = profile.find(r => r.hour === i);
-    const x   = PAD_L + i * bW;
-
-    // Solar bar (yellow, left of pair)
-    const sH = row ? (row.solar_w || 0) / maxW * chartH : 0;
-    ctx.fillStyle = 'rgba(245,158,11,.75)';
-    ctx.fillRect(x + bW*0.04, PAD_T + chartH - sH, bar, sH);
-
-    // Home bar (blue, right of pair)
-    const hH = row ? (row.home_w || 0) / maxW * chartH : 0;
-    ctx.fillStyle = 'rgba(56,189,248,.75)';
-    ctx.fillRect(x + bW*0.04 + bar + 1, PAD_T + chartH - hH, bar, hH);
-  }
-
-  // X-axis hour labels (every 3h)
-  ctx.fillStyle = 'rgba(255,255,255,.35)';
-  ctx.textAlign = 'center';
-  ctx.font = `${9 * devicePixelRatio / devicePixelRatio}px sans-serif`;
-  for (let i = 0; i <= 23; i += 3) {
-    const x = PAD_L + i * bW + bW / 2;
-    ctx.fillText(i === 0 ? '0' : i + 'h', x, H - 4);
-  }
 }
 
 async function loadYearReview() {

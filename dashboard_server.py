@@ -112,6 +112,9 @@ PRED_PESSIMISM       = _cfg.getfloat("predictive_charge", "pessimism_factor",   
 PRED_EVENING_RESERVE = _cfg.getfloat("predictive_charge", "evening_reserve_kwh", fallback=3.0)
 PRED_MIN_SOC         = _cfg.getint(  "predictive_charge", "minimum_soc",         fallback=20)
 
+YR_CONSUMPTION_OVERRIDE_KWH = _cfg.getfloat("year_projection", "consumption_kwh_override", fallback=0.0)
+YR_SOLAR_OVERRIDE_KWH       = _cfg.getfloat("year_projection", "solar_kwh_override",       fallback=0.0)
+
 
 def _sf_configured() -> bool:
     return all([SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP])
@@ -4625,6 +4628,8 @@ def get_settings():
         "pred_tomorrow_kwh":         _get_tomorrow_forecast_kwh(),
         "pred_morning_demand_kwh":   _compute_morning_demand_kwh(),
         "pred_demand_days":          _DEMAND_DAYS,
+        "yr_consumption_override_kwh": YR_CONSUMPTION_OVERRIDE_KWH,
+        "yr_solar_override_kwh":       YR_SOLAR_OVERRIDE_KWH,
         "log_level":          LOG_LEVEL,
         "log_retention_days": LOG_RETENTION_DAYS,
         # API keys are intentionally never returned to the browser
@@ -4654,7 +4659,8 @@ def save_settings():
             return jsonify({"ok": False, "error": "Invalid inverter IP/hostname"}), 400
     if "new_password" in data and len(str(data["new_password"])) > 128:
         return jsonify({"ok": False, "error": "Password too long (max 128 characters)"}), 400
-    if "weather_api_key" in data and len(str(data["weather_api_key"])) > 256:
+    # Met Office DataHub now issues JWT-format keys (~1600-1800+ chars), not short strings
+    if "weather_api_key" in data and len(str(data["weather_api_key"])) > 4096:
         return jsonify({"ok": False, "error": "API key too long"}), 400
     if "weather_postcode" in data and len(str(data["weather_postcode"])) > 10:
         return jsonify({"ok": False, "error": "Postcode too long"}), 400
@@ -4788,6 +4794,23 @@ def save_settings():
             if not cfg.has_section(_pred_section):
                 cfg.add_section(_pred_section)
             cfg.set(_pred_section, _pcfg, str(_pv))
+
+    # ── Year in Review projection overrides ───────────────────────────────────
+    global YR_CONSUMPTION_OVERRIDE_KWH, YR_SOLAR_OVERRIDE_KWH
+    _yr_section = "year_projection"
+    for _yk, _yattr, _ycfg in (
+            ("yr_consumption_override_kwh", "YR_CONSUMPTION_OVERRIDE_KWH", "consumption_kwh_override"),
+            ("yr_solar_override_kwh",       "YR_SOLAR_OVERRIDE_KWH",       "solar_kwh_override"),
+    ):
+        if _yk in data:
+            try:
+                _yv = max(0.0, float(data[_yk]))
+            except (ValueError, TypeError):
+                return jsonify({"ok": False, "error": f"{_yk} must be a number"}), 400
+            globals()[_yattr] = _yv
+            if not cfg.has_section(_yr_section):
+                cfg.add_section(_yr_section)
+            cfg.set(_yr_section, _ycfg, str(_yv))
 
     new_pw = (data.get("new_password") or "").strip()
     if new_pw:
@@ -5380,6 +5403,145 @@ _CO2_KG_PER_KWH  = 0.207   # UK grid average (DEFRA), kgCO2 per kWh electricity
 _CO2_KG_PER_TREE = 21.0    # CO2 a mature tree absorbs in a year, kg
 _CO2_KG_PER_MILE = 0.27    # tailpipe CO2 for an average petrol car, kg per mile
 
+# ── Annual cost/savings projection ──────────────────────────────────────────
+# Generic UK seasonal shape, used ONLY to project the part of the current year
+# that hasn't happened yet -- every day we actually have data for uses that
+# real data, never the curve. Solar follows typical UK PV climatology (broad
+# Apr-Aug peak). Consumption is a moderate winter-weighted profile for the
+# common GivEnergy retrofit household (gas heating, electric lighting/
+# appliances -- not electric heating, so the swing is real but not dramatic).
+# Both cross-checked against 12 months of real data (Andi Campbell, Jul 2026):
+# solar matched well once one anomalous cloudy July was smoothed against his
+# own June/August; consumption was intentionally NOT copied from his data,
+# since his household runs a hot tub through summer that flattens what would
+# otherwise be a sharper winter/summer swing for a typical (hot-tub-free) home.
+_YR_SOLAR_WEIGHTS_RAW       = [3.3, 4.0, 8.3, 12.5, 13.7, 13.2, 12.7, 12.3, 9.5, 5.4, 3.1, 2.1]
+_YR_CONSUMPTION_WEIGHTS_RAW = [10.0, 9.2, 8.5, 7.7, 7.2, 6.5, 6.3, 6.5, 7.2, 8.1, 9.3, 10.5]
+_YR_SOLAR_WEIGHTS       = [w / sum(_YR_SOLAR_WEIGHTS_RAW)       for w in _YR_SOLAR_WEIGHTS_RAW]
+_YR_CONSUMPTION_WEIGHTS = [w / sum(_YR_CONSUMPTION_WEIGHTS_RAW) for w in _YR_CONSUMPTION_WEIGHTS_RAW]
+_YR_MIN_DATA_DAYS = 14   # don't project off less than this -- too noisy to be worth showing
+
+
+def _days_in_month(year: int, month: int) -> int:
+    nxt = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+    return (nxt - datetime(year, month, 1)).days
+
+
+def _days_in_year(year: int) -> int:
+    return (datetime(year + 1, 1, 1) - datetime(year, 1, 1)).days
+
+
+def _weight_for_days(weights: list, day_strs: list) -> float:
+    """Sum of a monthly seasonal curve's per-day share across a specific set of
+    calendar dates (YYYY-MM-DD strings) -- NOT an elapsed-since-Jan-1 fraction.
+    A fresh install's data doesn't start on 1 Jan, so scaling by "how much of
+    the year has elapsed" silently assumes data exists for months that were
+    never recorded, understating the projection by however much of the year
+    predates the install. Summing the curve's weight only for the days we
+    actually have gets this right regardless of when the data starts, whether
+    it's contiguous, or whether there are gaps from downtime."""
+    total = 0.0
+    for d in day_strs:
+        y, m, _ = d.split("-")
+        y, m = int(y), int(m)
+        total += weights[m - 1] / _days_in_month(y, m)
+    return total
+
+
+def _avg_tou_import_rate() -> float:
+    """Time-weighted average import rate (p/kWh) across a full day, ignoring
+    when THIS household actually imports. Used as the no-battery baseline for
+    the solar/battery savings estimate -- a battery deliberately shifts
+    imports into cheap windows, so the rate actually paid would understate
+    what a no-battery household on the same tariff would really pay."""
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        with _db() as conn:
+            row = conn.execute("SELECT AVG(import_p) FROM agile_rates").fetchone()
+        return float(row[0]) if row and row[0] else TARIFF_IMPORT_P
+    if not TARIFF_TOU:
+        return TARIFF_IMPORT_P
+    covered = 0
+    weighted = 0.0
+    for w in TARIFF_TOU:
+        s = int(w["start"][:2]) * 60 + int(w["start"][3:5])
+        e = int(w["end"][:2])   * 60 + int(w["end"][3:5])
+        dur = (e - s) if s < e else (1440 - s + e)
+        if dur <= 0:
+            continue
+        weighted += dur * w["rate_p"]
+        covered  += dur
+    weighted += max(0, 1440 - covered) * TARIFF_IMPORT_P
+    return weighted / 1440.0
+
+
+def _yr_savings_p(home_kwh: float, import_cost_p: float, export_income_p: float) -> float:
+    """What you'd have paid buying all Home kWh from the grid at the no-battery
+    average rate, versus what you actually paid. Standing charge cancels out
+    of this comparison -- you'd pay it either way, solar or not."""
+    return home_kwh * _avg_tou_import_rate() - import_cost_p + export_income_p
+
+
+def _project_year_totals(year: int, daily_rows: list, total_solar: float, home_fn) -> dict:
+    """Extend actual year-to-date totals into a full-year estimate. Every day
+    that's already happened uses its real recorded data; only the remainder
+    of the current year (the part that hasn't happened yet) gets the baked-in
+    seasonal-curve projection layered on top. A completed past year is 100%
+    real data and needs no projection at all."""
+    now = datetime.now()
+    is_current_year = (year == now.year)
+    data_days  = len(daily_rows)
+    total_home = sum(home_fn(r) for r in daily_rows)
+    base = {"data_days": data_days, "min_data_days": _YR_MIN_DATA_DAYS,
+            "currency_symbol": TARIFF_CURRENCY}
+
+    if not _tariff_configured():
+        return {**base, "is_final": not is_current_year,
+                "has_enough_data": data_days >= _YR_MIN_DATA_DAYS,
+                "net_cost_p": None, "savings_p": None}
+
+    actual = _get_costs_for_period("year", str(year))
+
+    if not is_current_year:
+        import_p   = actual.get("import_cost_p",   0) or 0
+        export_p   = actual.get("export_income_p", 0) or 0
+        return {**base, "is_final": True, "has_enough_data": True,
+                "net_cost_p":       actual.get("net_cost_p"),
+                "savings_p":        round(_yr_savings_p(total_home, import_p, export_p), 2),
+                "annual_home_kwh":  round(total_home, 0),
+                "annual_solar_kwh": round(total_solar, 0)}
+
+    if data_days < _YR_MIN_DATA_DAYS:
+        return {**base, "is_final": False, "has_enough_data": False,
+                "net_cost_p": actual.get("net_cost_p"), "savings_p": None}
+
+    day_strs = [r["day"] for r in daily_rows]
+    w_solar  = max(_weight_for_days(_YR_SOLAR_WEIGHTS,       day_strs), 0.01)
+    w_cons   = max(_weight_for_days(_YR_CONSUMPTION_WEIGHTS, day_strs), 0.01)
+
+    annual_home_kwh  = YR_CONSUMPTION_OVERRIDE_KWH or (total_home  / w_cons)
+    annual_solar_kwh = YR_SOLAR_OVERRIDE_KWH       or (total_solar / w_solar)
+
+    # Scale the cost-side projection by the SAME ratio used to annualise the
+    # kWh totals above, so a manual override (e.g. real annual usage from a
+    # bill or EPC, predating the app) recalibrates cost and savings together
+    # -- not just the kWh display figures while cost silently stays on the
+    # curve-only estimate. With no override this is identical to 1/w_cons or
+    # 1/w_solar, so behaviour is unchanged unless the user has set one.
+    cons_scale  = (annual_home_kwh  / total_home)  if total_home  > 0.01 else (1.0 / w_cons)
+    solar_scale = (annual_solar_kwh / total_solar) if total_solar > 0.01 else (1.0 / w_solar)
+
+    import_p   = (actual.get("import_cost_p",   0) or 0) * cons_scale
+    export_p   = (actual.get("export_income_p", 0) or 0) * solar_scale
+    # Standing charge is a flat daily fee, not seasonal -- no curve needed,
+    # just the current rate across the full year.
+    standing_p = TARIFF_STANDING_P * _days_in_year(year)
+
+    return {**base, "is_final": False, "has_enough_data": True,
+            "net_cost_p":       round(import_p + standing_p - export_p, 2),
+            "savings_p":        round(_yr_savings_p(annual_home_kwh, import_p, export_p), 2),
+            "annual_home_kwh":  round(annual_home_kwh, 0),
+            "annual_solar_kwh": round(annual_solar_kwh, 0)}
+
 
 def _year_review_data(year: int) -> dict:
     year_str = str(year)
@@ -5405,16 +5567,6 @@ def _year_review_data(year: int) -> dict:
         cost_rows = list(conn.execute(
             "SELECT date, import_cost_p, export_income_p FROM daily_costs "
             "WHERE strftime('%Y', date) = ?",
-            (year_str,)
-        ))
-        hourly_rows = list(conn.execute(
-            "SELECT CAST(strftime('%H',ts,'unixepoch','localtime') AS INTEGER) AS hr, "
-            "       ROUND(AVG(home_w),  1) AS avg_home_w, "
-            "       ROUND(AVG(solar_w), 1) AS avg_solar_w "
-            "FROM snapshots "
-            "WHERE strftime('%Y',ts,'unixepoch','localtime') = ? "
-            "  AND home_w IS NOT NULL "
-            "GROUP BY hr ORDER BY hr",
             (year_str,)
         ))
 
@@ -5463,6 +5615,8 @@ def _year_review_data(year: int) -> dict:
     total_solar = sum((r["s"] or 0) for r in daily_rows)
     co2_kg      = total_solar * _CO2_KG_PER_KWH
 
+    projection = _project_year_totals(year, daily_rows, total_solar, _home)
+
     return {
         "year":       year,
         "data_days":  len(daily_rows),
@@ -5474,8 +5628,7 @@ def _year_review_data(year: int) -> dict:
                        "co2_kg":    round(co2_kg, 1),
                        "trees":     round(co2_kg / _CO2_KG_PER_TREE),
                        "miles":     round(co2_kg / _CO2_KG_PER_MILE)},
-        "hourly_profile": [{"hour": r["hr"], "home_w": r["avg_home_w"],
-                            "solar_w": r["avg_solar_w"]} for r in hourly_rows],
+        "projection": projection,
         "currency_symbol": TARIFF_CURRENCY,
     }
 
