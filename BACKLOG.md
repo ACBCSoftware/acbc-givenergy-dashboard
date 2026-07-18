@@ -506,6 +506,13 @@ GitHub is the source of truth for all tracked bugs and enhancements.
 The only exception is pre-release UAT items found by Andi before a version ships.
 Do not maintain enhancement descriptions here -- open a GitHub issue instead.
 
+### Shipped in v3.1 (18 Jul 2026)
+
+- **Estimated Annual Electricity Cost + Solar & battery savings** -- two new Year in Review tiles. Real year-to-date data extended into a full-year projection via a baked-in generic UK seasonal curve (solar from typical PV climatology, consumption moderately winter-weighted) for whatever hasn't happened yet. Gated behind a 14-day minimum; a completed past year uses 100% real data, no projection. Optional annual consumption/solar overrides in Settings -> Integrations -> Year in Review Projection recalibrate both the kWh totals AND the cost-side projection together (not just the display figures) for anyone with real annual data predating the app.
+- **"Average daily profile" chart removed** from Year in Review per UAT feedback -- front-end render/draw code, CSS, and the now-unused backend hourly query all deleted.
+- **#57 -- Met Office API key length fix** -- DataHub now issues long JWT-format keys (~1600-1800+ chars) instead of short strings; the too-strict 256-char validation cap raised to 4096.
+- Two real projection-math bugs caught and fixed during UAT before release: (1) elapsed-weight was computed from "days since 1 Jan" rather than the specific days actually recorded, massively under-projecting for any install whose data doesn't start on 1 Jan (i.e. every fresh install) -- fixed by summing the seasonal curve's per-day weight only across the calendar dates that actually have data; (2) manual kWh overrides only affected the displayed totals, not the cost-side projection -- fixed so the cost projection scales by the same ratio as the kWh override.
+
 ### Shipped in v3.0 (7 Jul 2026)
 
 - **#53 -- Official Docker image** (headline) -- multi-arch (amd64/arm64/arm-v7) image published to `ghcr.io/acbcsoftware/givenergy-dashboard`. `DATA_DIR` refactor separates writable state onto a `/data` volume; `/healthz` liveness endpoint; gosu entrypoint; publish workflow on `v*` tag. Full UAT on spare Pi 4 incl live inverter. Website `install-docker.html` added.
@@ -520,22 +527,25 @@ Do not maintain enhancement descriptions here -- open a GitHub issue instead.
 - Battery BMS splice guard (learned from givenergy-modbus #256) and live charge-status indicator.
 - Control-page initial-read retry with backoff and logging (#49 mitigation).
 
-### Open GitHub issues (as of v2.9, 4 Jul 2026)
+### Open GitHub issues (as of v3.1, 18 Jul 2026)
 
 | # | Title | Notes |
 |---|-------|-------|
 | [#26](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/26) | Flash-and-go Pi appliance image | Low -- larger effort |
+| [#32](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/32) | Frontend XSS hygiene: textContent + CSP | CSP header shipped v2.8; textContent migration still deferred |
 | [#34](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/34) | Windows Defender / SmartScreen submission | Parked -- no code-signing (decided 10 Jun 2026) |
+| [#37](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/37) | Predictive overnight charge target | Shipped v2.9 -- left open for real-world feedback |
 | [#40](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/40) | Include register number in control activity log error messages | Low effort polish |
 | [#41](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/41) | Audio cue when slot overlap validation rejects a save | Low priority |
 | [#42](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/42) | Per-slot lower SOC limit on discharge slots (single_phase_extended) | AIO tester request |
 | [#43](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/43) | Diagnostic tool: register value-search mode | Low priority tool |
 | [#46](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/46) | Further considerations (AIO tester suggestions) | Winter mode, tooltips, multi-array |
 | [#48](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/48) | Export cutoff SOC workaround | Research needed -- register map |
-| [#49](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/49) | Occasional blank Inverter Control screen | Mitigated in v2.9 (retry + logging); watching for recurrence |
-| [#52](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/52) | Max charge/discharge rate registers on AIO | AIO uses HR313/314; confirmed behaviour, offered read-only 111/112 display |
-| [#53](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/53) | Official Docker image | Enhancement request (2 users) |
+| [#49](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/49) | Occasional blank Inverter Control screen | Mitigated v2.9; watching for recurrence |
+| [#53](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/53) | Docker backup/restore scope + "missing days" | Docker itself shipped v3.0. Backup/restore confirmed DB-only (not config.ini) -- needs an Andi decision on scope. "Missing days" narrowed to a Docker-side import bug (15 Jul); awaiting Steve's logs to confirm root cause |
 | [#54](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/54) | National Grid live data feed ticker | Enhancement request |
+| [#56](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/56) | "No dashboard" on macOS (Tahoe/M3) | Andi replied 12 Jul asking for detail; no response yet |
+| [#57](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/57) | Met Office API key "too long" | **Fixed in v3.1** -- awaiting tester confirmation before closing |
 
 ### Ideas -- not yet filed as GitHub issues
 
