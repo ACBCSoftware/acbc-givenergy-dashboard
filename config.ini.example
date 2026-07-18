@@ -86,6 +86,17 @@ evening_reserve_kwh = 3.0
 ; Floor for the computed target -- it will never set a charge target below this %.
 minimum_soc         = 20
 
+[year_projection]
+; Optional overrides for the Year in Review "Estimated Annual Electricity
+; Cost" and "Solar & battery savings" tiles. Left blank/0, the app
+; auto-estimates your full-year totals from real data so far this year plus
+; a generic seasonal curve. If you know your real annual figures (e.g. from
+; a bill or EPC -- useful if you've only just installed the app), set them
+; here to override the auto-estimate for both the kWh totals and the cost
+; projection.
+consumption_kwh_override = 0
+solar_kwh_override       = 0
+
 [logging]
 ; Log level: warning (default) | info | debug
 ; Debug captures detailed inverter communication -- use only for fault diagnosis.
