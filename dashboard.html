@@ -1083,9 +1083,18 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         </div>
         <div class="sett-row"><label>Keep backups (days)</label><input id="s-bkkeep" type="number" min="1" max="60"></div>
         <div class="sett-row"><label>Last backup</label><span class="sett-value" id="s-bklast" style="font-size:.8rem;color:var(--muted)">—</span></div>
+        <div class="sett-row">
+          <label>Download scope</label>
+          <select id="s-bkscope" onchange="_onBkScopeChange()" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="both">Database + Settings</option>
+            <option value="db">Database only</option>
+            <option value="ini">Settings only</option>
+          </select>
+        </div>
+        <div class="sett-hint" id="s-bkscope-hint" style="display:none;color:#fbbf24">Includes your admin password and any API keys in config.ini — store this file securely.</div>
         <button class="ctrl-btn ctrl-btn-sm" onclick="downloadBackup()" style="margin-top:6px">&#11015; Download backup</button>
-        <div class="sett-hint" style="margin-top:8px">Restore replaces all current history. The dashboard must be restarted afterwards.</div>
-        <input type="file" id="s-bkfile" accept=".gz,.db" style="font-size:.8rem;color:var(--muted)">
+        <div class="sett-hint" style="margin-top:8px">Restore replaces current history and/or settings (auto-detected from the file). The dashboard must be restarted afterwards.</div>
+        <input type="file" id="s-bkfile" accept=".zip,.gz,.db" style="font-size:.8rem;color:var(--muted)">
         <button class="ctrl-btn red ctrl-btn-sm" onclick="restoreBackup()" style="margin-top:4px">&#8635; Restore from file</button>
         <div id="s-bkmsg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
       </div>
@@ -2969,17 +2978,23 @@ async function downloadLog() {
   } catch(e) { msg.style.color='var(--red)'; msg.textContent='Error: ' + e.message; }
 }
 
+function _onBkScopeChange() {
+  const scope = $('s-bkscope').value;
+  $('s-bkscope-hint').style.display = (scope === 'db') ? 'none' : '';
+}
+
 async function downloadBackup() {
   const msg = $('s-bkmsg');
+  const scope = $('s-bkscope').value;
   msg.style.color = 'var(--muted)'; msg.textContent = 'Preparing backup…';
   try {
-    const r = await fetch('/api/backup/export', { headers:{'X-Admin-Password':_adminPw} });
+    const r = await fetch('/api/backup/export?scope=' + encodeURIComponent(scope), { headers:{'X-Admin-Password':_adminPw} });
     if (r.status === 401) { msg.style.color='#f87171'; msg.textContent='Session expired'; return; }
     if (!r.ok) throw new Error('HTTP '+r.status);
     const blob = await r.blob();
     const cd = r.headers.get('Content-Disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
-    const name = m ? m[1] : 'givenergy-history.db.gz';
+    const name = m ? m[1] : 'givenergy-backup.zip';
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click();
@@ -2992,7 +3007,7 @@ async function restoreBackup() {
   const msg = $('s-bkmsg');
   const file = $('s-bkfile').files[0];
   if (!file) { msg.style.color='#f87171'; msg.textContent='Choose a backup file first'; return; }
-  _showConfirm('Restore will replace all current history with the chosen file. The dashboard must be restarted to complete the restore. Continue?', async () => {
+  _showConfirm('Restore will replace current history and/or settings with whatever the chosen file contains. The dashboard must be restarted to complete the restore. Continue?', async () => {
     msg.style.color='var(--muted)'; msg.textContent='Uploading…';
     try {
       const fd = new FormData(); fd.append('file', file);
@@ -3541,6 +3556,7 @@ async function loadSettings() {
     $('s-require-auth').value   = (s.require_auth === false) ? 'no' : 'yes';
     $('s-bkkeep').value        = s.backup_keep_days  || 7;
     $('s-bklast').textContent = s.last_backup || '—';
+    $('s-bkscope').value = 'both'; _onBkScopeChange();
     $('s-bkmsg').textContent = '';
     $('s-wxpostcode').value = s.weather_postcode    || '';
     $('s-wxhash').value     = s.weather_geohash     || '';

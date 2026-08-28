@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -986,7 +987,8 @@ def _rate_fetch_loop() -> None:
 DB_PATH           = _DATA_DIR / "history.db"
 _QA_STATE_PATH    = _DATA_DIR / "quick_action_state.json"
 BACKUPS_DIR       = _DATA_DIR / "backups"
-PENDING_IMPORT = Path(str(DB_PATH) + ".pending")   # history.db.pending
+PENDING_IMPORT        = Path(str(DB_PATH) + ".pending")       # history.db.pending
+PENDING_CONFIG_IMPORT = Path(str(_CONFIG_PATH) + ".pending")  # config.ini.pending
 
 # ── Backup / restore ─────────────────────────────────────────────────────────
 def _make_backup_gz(dest: Path):
@@ -1041,27 +1043,41 @@ def _last_backup_info():
     latest = files[-1]
     return latest.name, datetime.fromtimestamp(latest.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
-def _apply_pending_import():
-    """If a restore was staged, swap it in on startup (after backing up current)."""
-    if not PENDING_IMPORT.exists():
-        return
-    try:
-        if DB_PATH.exists():
-            BACKUPS_DIR.mkdir(exist_ok=True)
-            safe = BACKUPS_DIR / f"pre-import-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db.gz"
-            try:
-                _make_backup_gz(safe)
-            except Exception as exc:
-                log.error("Could not back up current DB before import: %s", exc)
-        # Clear stale WAL/SHM so the new file isn't mixed with old journal data
-        for ext in ("-wal", "-shm"):
-            p = Path(str(DB_PATH) + ext)
-            if p.exists():
-                p.unlink(missing_ok=True)
-        shutil.move(str(PENDING_IMPORT), str(DB_PATH))
-        log.info("Imported database applied from staged restore.")
-    except Exception as exc:
-        log.error("Failed to apply pending import: %s", exc)
+def _apply_pending_imports():
+    """If a restore was staged (database and/or config.ini), swap it in on
+    startup, after backing up whatever it's about to replace."""
+    if PENDING_IMPORT.exists():
+        try:
+            if DB_PATH.exists():
+                BACKUPS_DIR.mkdir(exist_ok=True)
+                safe = BACKUPS_DIR / f"pre-import-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db.gz"
+                try:
+                    _make_backup_gz(safe)
+                except Exception as exc:
+                    log.error("Could not back up current DB before import: %s", exc)
+            # Clear stale WAL/SHM so the new file isn't mixed with old journal data
+            for ext in ("-wal", "-shm"):
+                p = Path(str(DB_PATH) + ext)
+                if p.exists():
+                    p.unlink(missing_ok=True)
+            shutil.move(str(PENDING_IMPORT), str(DB_PATH))
+            log.info("Imported database applied from staged restore.")
+        except Exception as exc:
+            log.error("Failed to apply pending database import: %s", exc)
+
+    if PENDING_CONFIG_IMPORT.exists():
+        try:
+            if _CONFIG_PATH.exists():
+                BACKUPS_DIR.mkdir(exist_ok=True)
+                safe = BACKUPS_DIR / f"pre-import-config-{datetime.now().strftime('%Y%m%d-%H%M%S')}.ini"
+                try:
+                    shutil.copyfile(_CONFIG_PATH, safe)
+                except Exception as exc:
+                    log.error("Could not back up current config.ini before import: %s", exc)
+            shutil.move(str(PENDING_CONFIG_IMPORT), str(_CONFIG_PATH))
+            log.info("Imported config.ini applied from staged restore.")
+        except Exception as exc:
+            log.error("Failed to apply pending config.ini import: %s", exc)
 
 _LOG_LEVELS    = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
 _log_level_int = _LOG_LEVELS.get(LOG_LEVEL, logging.WARNING)
@@ -5023,31 +5039,83 @@ def get_log():
                      download_name=f"dashboard_{stamp}.log", mimetype="text/plain")
 
 
+_BACKUP_SCOPES = ("db", "ini", "both")
+
 @app.route("/api/backup/export")
 def backup_export():
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    # Consistent online backup → temp file → gzip into memory → stream as download
+    scope = request.args.get("scope", "db")
+    if scope not in _BACKUP_SCOPES:
+        return jsonify({"ok": False, "error": "Invalid scope"}), 400
     BACKUPS_DIR.mkdir(exist_ok=True)
-    tmp_path = BACKUPS_DIR / "_export.tmpdb"
-    src = sqlite3.connect(DB_PATH)
-    try:
-        bk = sqlite3.connect(str(tmp_path))
-        src.backup(bk)
-        bk.close()
-    finally:
-        src.close()
     mem = io.BytesIO()
-    with open(tmp_path, "rb") as f, gzip.open(mem, "wb") as g:
-        shutil.copyfileobj(f, g)
-    tmp_path.unlink(missing_ok=True)
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({
+            "app_version": APP_VERSION,
+            "exported":    datetime.now().isoformat(timespec="seconds"),
+            "scope":       scope,
+        }))
+        if scope in ("db", "both"):
+            # Consistent online backup via SQLite's backup API, then add to the zip
+            tmp_path = BACKUPS_DIR / "_export.tmpdb"
+            src = sqlite3.connect(DB_PATH)
+            try:
+                bk = sqlite3.connect(str(tmp_path))
+                src.backup(bk)
+                bk.close()
+            finally:
+                src.close()
+            zf.write(tmp_path, "history.db")
+            tmp_path.unlink(missing_ok=True)
+        if scope in ("ini", "both"):
+            zf.write(_CONFIG_PATH, "config.ini")
     mem.seek(0)
-    name = f"givenergy-history-{datetime.now().strftime('%Y%m%d')}.db.gz"
-    return send_file(mem, mimetype="application/gzip",
+    name = f"givenergy-backup-{scope}-{datetime.now().strftime('%Y%m%d')}.zip"
+    return send_file(mem, mimetype="application/zip",
                      as_attachment=True, download_name=name)
 
-_BACKUP_IMPORT_RAW_MAX  = 10 * 1024 * 1024   # 10 MB compressed upload limit
-_BACKUP_IMPORT_GUNZ_MAX = 100 * 1024 * 1024  # 100 MB decompressed limit (gzip-bomb guard)
+_BACKUP_IMPORT_RAW_MAX  = 20 * 1024 * 1024   # 20 MB upload limit
+_BACKUP_IMPORT_GUNZ_MAX = 100 * 1024 * 1024  # 100 MB decompressed limit (gzip/zip-bomb guard)
+
+
+def _stage_db_import(data: bytes):
+    """Validate a candidate history.db and stage it for restore. Returns an
+    error string, or None on success."""
+    BACKUPS_DIR.mkdir(exist_ok=True)
+    staging = BACKUPS_DIR / "_import_check.db"
+    try:
+        staging.write_bytes(data)
+        chk = sqlite3.connect(str(staging))
+        has = chk.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots'").fetchone()
+        chk.close()
+        if not has:
+            return "Database has no 'snapshots' table — wrong file?"
+        shutil.move(str(staging), str(PENDING_IMPORT))
+        return None
+    except Exception as exc:
+        return str(exc)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
+def _stage_config_import(data: bytes):
+    """Validate a candidate config.ini and stage it for restore. Returns an
+    error string, or None on success."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "Settings file is not valid text — wrong file?"
+    cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    try:
+        cfg.read_string(text)
+    except configparser.Error as exc:
+        return f"Settings file could not be parsed: {exc}"
+    if not cfg.sections():
+        return "Settings file has no recognisable sections — wrong file?"
+    PENDING_CONFIG_IMPORT.write_text(text)
+    return None
 
 
 @app.route("/api/backup/import", methods=["POST"])
@@ -5059,8 +5127,41 @@ def backup_import():
         return jsonify({"ok": False, "error": "No file uploaded"}), 400
     data = f.read(_BACKUP_IMPORT_RAW_MAX + 1)
     if len(data) > _BACKUP_IMPORT_RAW_MAX:
-        return jsonify({"ok": False, "error": "Upload too large (max 10 MB)"}), 413
-    # Transparently accept .gz or a raw .db
+        return jsonify({"ok": False, "error": "Upload too large (max 20 MB)"}), 413
+
+    # New zip-archive format (db and/or config.ini, any combination)
+    if data[:4] == b"PK\x03\x04":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = set(zf.namelist())
+                has_db  = "history.db"  in names
+                has_ini = "config.ini"  in names
+                if not has_db and not has_ini:
+                    return jsonify({"ok": False, "error": "Archive contains neither history.db nor config.ini"}), 400
+                if has_db:
+                    db_bytes = zf.read("history.db")
+                if has_ini:
+                    ini_bytes = zf.read("config.ini")
+        except zipfile.BadZipFile:
+            return jsonify({"ok": False, "error": "Could not read backup archive"}), 400
+        if has_db:
+            if len(db_bytes) > _BACKUP_IMPORT_GUNZ_MAX:
+                return jsonify({"ok": False, "error": "Decompressed database too large (max 100 MB)"}), 413
+            err = _stage_db_import(db_bytes)
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+        if has_ini:
+            err = _stage_config_import(ini_bytes)
+            if err:
+                PENDING_IMPORT.unlink(missing_ok=True)  # don't half-apply a rejected combined restore
+                return jsonify({"ok": False, "error": err}), 400
+        included = " + ".join(n for n, present in (("database", has_db), ("settings", has_ini)) if present)
+        msg = f"Backup uploaded ({included}) — restart the dashboard to apply it."
+        if has_ini:
+            msg += " This will restore the admin password, inverter connection and API keys from the backup."
+        return jsonify({"ok": True, "message": msg})
+
+    # Legacy format: gzip or raw history.db only (backups taken before v3.2)
     if data[:2] == b"\x1f\x8b":
         try:
             data = gzip.decompress(data)
@@ -5070,24 +5171,10 @@ def backup_import():
             return jsonify({"ok": False, "error": "Decompressed backup too large (max 100 MB)"}), 413
     if data[:16] != b"SQLite format 3\x00":
         return jsonify({"ok": False, "error": "Not a valid database file"}), 400
-    # Validate it has a snapshots table before accepting it
-    BACKUPS_DIR.mkdir(exist_ok=True)
-    staging = BACKUPS_DIR / "_import_check.db"
-    try:
-        staging.write_bytes(data)
-        chk = sqlite3.connect(str(staging))
-        has = chk.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots'").fetchone()
-        chk.close()
-        if not has:
-            staging.unlink(missing_ok=True)
-            return jsonify({"ok": False, "error": "Backup has no 'snapshots' table — wrong file?"}), 400
-        # Stage it; applied on next restart
-        shutil.move(str(staging), str(PENDING_IMPORT))
-        return jsonify({"ok": True, "message": "Backup uploaded — restart the dashboard to apply it."})
-    except Exception as exc:
-        staging.unlink(missing_ok=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+    err = _stage_db_import(data)
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    return jsonify({"ok": True, "message": "Backup uploaded — restart the dashboard to apply it."})
 
 @app.route("/api/update")
 def api_update():
@@ -5474,11 +5561,67 @@ def _avg_tou_import_rate() -> float:
     return weighted / 1440.0
 
 
+def _avg_tou_export_rate() -> float:
+    """Time-weighted average export rate (p/kWh) across a full day. Used as
+    the conservative fallback rate for solar generation not yet recorded when
+    projecting the rest of the year -- see _project_year_totals."""
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        with _db() as conn:
+            row = conn.execute("SELECT AVG(export_p) FROM agile_rates").fetchone()
+        return float(row[0]) if row and row[0] else TARIFF_EXPORT_P
+    if not TARIFF_TOU:
+        return TARIFF_EXPORT_P
+    covered = 0
+    weighted = 0.0
+    for w in TARIFF_TOU:
+        s = int(w["start"][:2]) * 60 + int(w["start"][3:5])
+        e = int(w["end"][:2])   * 60 + int(w["end"][3:5])
+        dur = (e - s) if s < e else (1440 - s + e)
+        if dur <= 0:
+            continue
+        weighted += dur * w.get("export_rate_p", TARIFF_EXPORT_P)
+        covered  += dur
+    weighted += max(0, 1440 - covered) * TARIFF_EXPORT_P
+    return weighted / 1440.0
+
+
 def _yr_savings_p(home_kwh: float, import_cost_p: float, export_income_p: float) -> float:
     """What you'd have paid buying all Home kWh from the grid at the no-battery
     average rate, versus what you actually paid. Standing charge cancels out
     of this comparison -- you'd pay it either way, solar or not."""
     return home_kwh * _avg_tou_import_rate() - import_cost_p + export_income_p
+
+
+def _remaining_import_export_kwh(year: int, day_strs: list,
+                                  annual_home_kwh: float, annual_solar_kwh: float) -> tuple:
+    """Estimate import/export kWh for the days of `year` NOT already recorded
+    (`day_strs`), by netting the seasonal curves' monthly consumption against
+    solar month by month: that month's solar first offsets that month's
+    consumption, only the shortfall becomes import, only the surplus becomes
+    export. This is deliberately simpler than modelling battery timing within
+    a day/month -- it's a coarse monthly balance, not an hour-by-hour
+    simulation -- but it captures the real seasonal asymmetry (winter's low
+    solar means most consumption becomes import; shoulder months net mostly
+    to export) using the curves already driving the annual kWh totals, with
+    no new data or per-household calibration needed."""
+    recorded_per_month = [0] * 13
+    for d in day_strs:
+        recorded_per_month[int(d[5:7])] += 1
+    import_kwh = 0.0
+    export_kwh = 0.0
+    for m in range(1, 13):
+        dim = _days_in_month(year, m)
+        remaining_days = dim - recorded_per_month[m]
+        if remaining_days <= 0:
+            continue
+        frac    = remaining_days / dim
+        cons_m  = annual_home_kwh  * _YR_CONSUMPTION_WEIGHTS[m - 1] * frac
+        solar_m = annual_solar_kwh * _YR_SOLAR_WEIGHTS[m - 1]       * frac
+        if solar_m >= cons_m:
+            export_kwh += solar_m - cons_m
+        else:
+            import_kwh += cons_m - solar_m
+    return import_kwh, export_kwh
 
 
 def _project_year_totals(year: int, daily_rows: list, total_solar: float, home_fn) -> dict:
@@ -5521,17 +5664,29 @@ def _project_year_totals(year: int, daily_rows: list, total_solar: float, home_f
     annual_home_kwh  = YR_CONSUMPTION_OVERRIDE_KWH or (total_home  / w_cons)
     annual_solar_kwh = YR_SOLAR_OVERRIDE_KWH       or (total_solar / w_solar)
 
-    # Scale the cost-side projection by the SAME ratio used to annualise the
-    # kWh totals above, so a manual override (e.g. real annual usage from a
-    # bill or EPC, predating the app) recalibrates cost and savings together
-    # -- not just the kWh display figures while cost silently stays on the
-    # curve-only estimate. With no override this is identical to 1/w_cons or
-    # 1/w_solar, so behaviour is unchanged unless the user has set one.
-    cons_scale  = (annual_home_kwh  / total_home)  if total_home  > 0.01 else (1.0 / w_cons)
-    solar_scale = (annual_solar_kwh / total_solar) if total_solar > 0.01 else (1.0 / w_solar)
+    # Cost for days we've actually recorded uses their real £ totals as-is.
+    # For whatever's LEFT of the year (days not yet recorded), don't
+    # extrapolate the recorded days' own £/kWh ratio -- that ratio reflects
+    # how much solar/battery already offset those specific days, which is a
+    # poor stand-in for a different, not-yet-recorded stretch of the year.
+    # Early in an install's life the only real data can be a lopsided slice
+    # (e.g. entirely mid-summer); extrapolating that slice's favourable ratio
+    # produced an overly optimistic full-year estimate (predicting a net
+    # EARNING) that contradicted a full multi-month tariff history. The
+    # opposite extreme -- assuming zero solar offset for anything unrecorded
+    # -- is just as wrong: it's overly pessimistic AND physically incoherent
+    # (the same unrecorded solar can't be both "doesn't reduce import" and
+    # "fully exported"). Instead, net the seasonal curves' monthly solar
+    # against monthly consumption for the remaining days (see
+    # _remaining_import_export_kwh) -- winter nets mostly to import, shoulder
+    # months mostly to export, matching the real asymmetry without needing
+    # new data. As real data comes to span a fuller year, "remaining" shrinks
+    # towards zero and this converges on the real figures regardless.
+    remaining_import_kwh, remaining_export_kwh = _remaining_import_export_kwh(
+        year, day_strs, annual_home_kwh, annual_solar_kwh)
 
-    import_p   = (actual.get("import_cost_p",   0) or 0) * cons_scale
-    export_p   = (actual.get("export_income_p", 0) or 0) * solar_scale
+    import_p = (actual.get("import_cost_p",   0) or 0) + remaining_import_kwh * _avg_tou_import_rate()
+    export_p = (actual.get("export_income_p", 0) or 0) + remaining_export_kwh * _avg_tou_export_rate()
     # Standing charge is a flat daily fee, not seasonal -- no curve needed,
     # just the current rate across the full year.
     standing_p = TARIFF_STANDING_P * _days_in_year(year)
@@ -5734,7 +5889,7 @@ def add_security_headers(response):
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    _apply_pending_import()   # swap in a staged restore before opening the DB
+    _apply_pending_imports()  # swap in a staged restore before opening the DB
     init_db()
 
     t = threading.Thread(target=_data_loop, daemon=True)
