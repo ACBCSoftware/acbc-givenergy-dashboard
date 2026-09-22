@@ -1173,6 +1173,34 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div id="s-log-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
       </div>
       <div class="sett-section">
+        <div class="sett-heading">Syslog Forwarding</div>
+        <div class="sett-hint">Send log lines to a syslog server on your network. Two streams are available and they are tagged separately, so you can filter them apart at the collector: <strong>givenergy:</strong> carries everything from the log file, and <strong>givenergy-events:</strong> carries the short Activity list &mdash; connection lost and restored, status changes, scheduler actions. Faults are sent at ERROR severity.</div>
+        <div class="sett-row"><label>Enable</label>
+          <label class="sw"><input id="s-syslog-enabled" type="checkbox"><span class="track"></span></label>
+        </div>
+        <div class="sett-row"><label>Server host</label><input id="s-syslog-host" type="text" placeholder="e.g. 192.168.1.10"></div>
+        <div class="sett-row"><label>Port</label><input id="s-syslog-port" type="number" min="1" max="65535"></div>
+        <div class="sett-row">
+          <label>Protocol</label>
+          <select id="s-syslog-protocol" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="udp">UDP (standard)</option>
+            <option value="tcp">TCP (reliable)</option>
+          </select>
+        </div>
+        <div class="sett-row">
+          <label>Send</label>
+          <select id="s-syslog-streams" style="background:rgba(0,0,0,0.35);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:.82rem;padding:8px 10px;width:58%">
+            <option value="both">Both streams</option>
+            <option value="app">Application log only</option>
+            <option value="events">Events only</option>
+          </select>
+        </div>
+        <div class="tr-fetch-row">
+          <button class="ctrl-btn ctrl-btn-sm" onclick="syslogTest()">Send test message</button>
+          <span id="s-syslog-status" class="tr-fetch-status"></span>
+        </div>
+      </div>
+      <div class="sett-section">
         <div class="sett-heading">Data</div>
         <div class="sett-row"><label>Data retention (days)</label><input id="s-retention" type="number" min="30"></div>
       </div>
@@ -1423,7 +1451,11 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <!-- System utilities -->
       <div class="ctrl-section">
         <div class="ctrl-heading">System</div>
-        <div class="sett-hint" style="margin-bottom:6px">Sync the inverter&#8217;s internal clock to the server time. Useful after a power cut — clock drift breaks scheduler rules and corrupts history timestamps.</div>
+        <div class="sett-hint" style="margin-bottom:6px">The scheduler writes charge and discharge slots as clock times, and the inverter decides whether a slot is active using its own clock. If that drifts, rules stop firing when they should.</div>
+        <div id="clock-drift-row" style="display:none;font-size:.8rem;margin-bottom:8px;padding:8px 10px;background:rgba(255,255,255,.04);border-radius:8px">
+          <span id="clock-drift-val"></span>
+          <span id="clock-drift-sub" style="display:block;font-size:.72rem;color:var(--muted);margin-top:2px"></span>
+        </div>
         <button class="ctrl-btn" onclick="syncInverterClock()">&#128336; Sync inverter clock</button>
         <div id="sync-clock-msg" style="font-size:.78rem;text-align:center;min-height:18px;margin-top:6px"></div>
       </div>
@@ -2354,6 +2386,27 @@ async function loadControlState() {
     $('cv-discharge-enabled').textContent = d.enable_discharge ? '✓ Enabled' : '✗ Disabled';
     $('cv-charge-target').textContent     = d.charge_target_soc + '%';
     $('sl-charge-target').value           = d.charge_target_soc;
+    // Inverter clock drift. Shown whenever it is known, colour-coded at the
+    // same 30s threshold the automatic correction uses, so what the user sees
+    // and what the app acts on cannot tell different stories.
+    const drift = d.clock_drift_secs;
+    const row = $('clock-drift-row');
+    if (drift == null) {
+      row.style.display = 'none';
+    } else {
+      row.style.display = '';
+      const secs = Math.abs(Math.round(drift));
+      const dir  = drift > 0 ? 'ahead of' : 'behind';
+      const ok   = secs < 30;
+      $('clock-drift-val').style.color = ok ? '#4ade80' : '#fb923c';
+      $('clock-drift-val').textContent = ok
+        ? `✓ Inverter clock is in step (${secs}s ${dir} this machine)`
+        : `⚠ Inverter clock is ${secs}s ${dir} this machine`;
+      $('clock-drift-sub').textContent = (d.inverter_clock ? `Inverter reads ${d.inverter_clock}. ` : '')
+        + (d.auto_clock_sync
+            ? 'Checked every 6 hours and corrected automatically above 30s.'
+            : 'Automatic correction is off — sync manually below.');
+    }
     $('cv-soc-reserve').textContent       = d.soc_reserve       + '%';
     $('sl-soc-reserve').value             = d.soc_reserve;
 
@@ -3810,6 +3863,16 @@ async function loadSettings() {
     $('s-qa-chg-soc').value  = s.quick_charge_target_soc   ?? 100;
     $('s-log-level').value     = s.log_level          || 'warning';
     $('s-log-retention').value = s.log_retention_days || 7;
+    $('s-syslog-enabled').checked = !!s.syslog_enabled;
+    $('s-syslog-host').value      = s.syslog_host     || '';
+    $('s-syslog-port').value      = s.syslog_port     || 514;
+    $('s-syslog-protocol').value  = s.syslog_protocol || 'udp';
+    $('s-syslog-streams').value   = s.syslog_streams  || 'both';
+    // Surface a failed collector connection here rather than leaving it buried
+    // in the log -- a syslog feed that silently stopped is worse than none.
+    const _sysStatus = $('s-syslog-status');
+    _sysStatus.textContent = s.syslog_enabled ? (s.syslog_status || '') : '';
+    _sysStatus.style.color = (s.syslog_status || '').startsWith('error') ? '#f87171' : 'var(--muted)';
     $('s-newpw').value = ''; $('s-confirmpw').value = '';
     ['sett-msg-display','sett-msg-integrations','sett-msg-admin','sett-msg-inverter']
       .forEach(id => { $(id).textContent = ''; });
@@ -3823,6 +3886,30 @@ async function loadSettings() {
       applyChartColors(s.chart_colors);
     }
   } catch(e) {}
+}
+
+// Save the syslog settings, then send one line down each active stream so the
+// user can confirm the collector is really receiving.
+async function syslogTest() {
+  const st = $('s-syslog-status');
+  st.style.color = ''; st.textContent = 'Sending…';
+  try {
+    await fetch('/api/settings', {method:'POST', headers:_settHeaders(),
+      body: JSON.stringify({
+        syslog_host:     $('s-syslog-host').value.trim(),
+        syslog_port:     parseInt($('s-syslog-port').value) || 514,
+        syslog_protocol: $('s-syslog-protocol').value,
+        syslog_streams:  $('s-syslog-streams').value,
+        syslog_enabled:  $('s-syslog-enabled').checked
+      })});
+    const r = await fetch('/api/syslog/test', {method:'POST', headers:_settHeaders()});
+    const j = await r.json();
+    st.style.color = j.ok ? '#4ade80' : '#f87171';
+    st.textContent = (j.ok ? '✓ ' : '✗ ') + (j.message || j.error || '');
+  } catch(e) {
+    st.style.color = '#f87171';
+    st.textContent = '✗ ' + e.message;
+  }
 }
 
 // Verify EcoFlow credentials without enabling anything. Saves the keys first
@@ -3938,6 +4025,11 @@ async function _doSaveSettings(msgEl) {
     quick_charge_target_soc:  parseInt($('s-qa-chg-soc').value)  || 100,
     log_level:          $('s-log-level').value,
     log_retention_days: parseInt($('s-log-retention').value) || 7,
+    syslog_enabled:     $('s-syslog-enabled').checked,
+    syslog_host:        $('s-syslog-host').value.trim(),
+    syslog_port:        parseInt($('s-syslog-port').value) || 514,
+    syslog_protocol:    $('s-syslog-protocol').value,
+    syslog_streams:     $('s-syslog-streams').value,
     sf_postcode:     $('s-sf-postcode').value.trim(),
     sf_latitude:     $('s-sf-lat').value.trim(),
     sf_longitude:    $('s-sf-lon').value.trim(),

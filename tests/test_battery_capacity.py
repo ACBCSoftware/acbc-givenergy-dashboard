@@ -30,12 +30,14 @@ def srv():
 # reported cap_design 18600 each (18600 x 2 = 372 x 100), which independently
 # confirms both the HR55 reading and cap_design's 0.01 Ah unit.
 
-def test_capacity_cache_accepts_plausible_ah(srv):
+def test_capacity_cache_accepts_plausible_ah(srv, monkeypatch):
+    monkeypatch.setattr(srv, "_inverter_profile", "single_phase_ac_coupled")
     srv._cache_battery_capacity_ah(372)
     assert srv._batt_cap_cache["ah"] == 372
 
 
-def test_capacity_cache_rejects_zero_and_absurd(srv):
+def test_capacity_cache_rejects_zero_and_absurd(srv, monkeypatch):
+    monkeypatch.setattr(srv, "_inverter_profile", "single_phase_ac_coupled")
     srv._cache_battery_capacity_ah(372)
     srv._cache_battery_capacity_ah(0)          # unconfigured inverter
     assert srv._batt_cap_cache["ah"] == 372    # good value not clobbered
@@ -59,11 +61,19 @@ def test_single_module_bank(srv, monkeypatch):
     assert srv._battery_capacity_kwh() == 9.5
 
 
-def test_capacity_none_on_profiles_without_lv_modules(srv, monkeypatch):
-    """AIO / three-phase store capacity differently. Say nothing, don't guess."""
-    monkeypatch.setattr(srv, "_batt_cap_cache", {"ts": time.time(), "ah": 372})
+def test_capacity_never_cached_on_profiles_without_lv_modules(srv, monkeypatch):
+    """AIO / three-phase store capacity differently. A value read from one must
+    never reach the cache at all.
+
+    The guard lives in _cache_battery_capacity_ah rather than the accessor so it
+    is enforced for every caller -- the control-state read caches this too, and
+    an accessor-only guard let that path slip a value through.
+    """
     for profile in ("three_phase_aio", "gateway_aio", "unknown", ""):
         monkeypatch.setattr(srv, "_inverter_profile", profile)
+        monkeypatch.setattr(srv, "_batt_cap_cache", {"ts": 0.0, "ah": None})
+        srv._cache_battery_capacity_ah(372)
+        assert srv._batt_cap_cache["ah"] is None, profile
         assert srv._battery_capacity_ah() is None
         assert srv._battery_capacity_kwh() is None
 
@@ -108,7 +118,10 @@ def test_predictive_target_uses_detected_capacity(srv, monkeypatch):
 
 
 def test_capacity_unknown_disables_predictive(srv, monkeypatch):
+    """No capacity and no override means predictive charge stays off rather than
+    guessing at a bank size."""
     monkeypatch.setattr(srv, "_inverter_profile", "three_phase_aio")
+    monkeypatch.setattr(srv, "_batt_cap_cache", {"ts": 0.0, "ah": None})
     monkeypatch.setattr(srv, "PRED_BATTERY_KWH", 0.0)
     assert srv._effective_battery_kwh() == 0.0
     assert srv._compute_predictive_target() is None

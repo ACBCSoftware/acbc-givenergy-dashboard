@@ -139,6 +139,15 @@ PLUGIN_SOLAR_DECLARED = _cfg.getboolean("plugin_solar", "declared", fallback=Fal
 # already makes. It is unrelated to the "no GivEnergy cloud account" claim.
 # Credentials come from developer-eu.ecoflow.com. `serial` is discovered on
 # first connect if left blank.
+# Inverter clock. The scheduler writes charge/discharge SLOT registers (HR 94/95,
+# HR 56/57) as wall-clock HH:MM windows, and the INVERTER decides whether "now"
+# falls inside one using its own RTC. So a drifting inverter clock silently stops
+# scheduled rules firing: the dashboard writes a perfectly good 14:30-15:00 slot
+# and the inverter simply does not believe it is 14:30 yet. Nothing in the app
+# corrected this before - sync_time only ever ran from the manual button, so the
+# clock was free to drift indefinitely between presses. Reported on #53.
+AUTO_CLOCK_SYNC    = _cfg.getboolean("inverter", "auto_clock_sync", fallback=True)
+
 ECOFLOW_ENABLED    = _cfg.getboolean("ecoflow", "enabled",    fallback=False)
 ECOFLOW_ACCESS_KEY = _cfg.get(       "ecoflow", "access_key", fallback="").strip()
 ECOFLOW_SECRET_KEY = _cfg.get(       "ecoflow", "secret_key", fallback="").strip()
@@ -190,6 +199,19 @@ ADMIN_HASH   = _cfg.get("admin", "password_hash", fallback=_DEFAULT_HASH)
 
 LOG_LEVEL          = _cfg.get("logging", "log_level",           fallback="warning").strip().lower()
 LOG_RETENTION_DAYS = _cfg.getint("logging", "log_retention_days", fallback=7)
+
+# Syslog forwarding (#58). Two distinct streams, sent under different idents so
+# they can be filtered apart at the collector:
+#   app    -> everything that goes to dashboard.log. Chatty.
+#   events -> the short list shown on the Activity screen: lost/restored
+#             connection, status changes, scheduler actions.
+# Requested with both, because having the noisy stream alongside the summary one
+# is what makes an incident possible to pin down after the fact.
+SYSLOG_ENABLED  = _cfg.getboolean("logging", "syslog_enabled",  fallback=False)
+SYSLOG_HOST     = _cfg.get(       "logging", "syslog_host",     fallback="").strip()
+SYSLOG_PORT     = _cfg.getint(    "logging", "syslog_port",     fallback=514)
+SYSLOG_PROTOCOL = _cfg.get(       "logging", "syslog_protocol", fallback="udp").strip().lower()
+SYSLOG_STREAMS  = _cfg.get(       "logging", "syslog_streams",  fallback="both").strip().lower()
 
 _SCRYPT_N, _SCRYPT_R, _SCRYPT_P = 16384, 8, 1
 
@@ -1144,6 +1166,79 @@ def _set_log_level(level_name: str) -> None:
     logging.getLogger().setLevel(lvl)
     LOG_LEVEL = level_name.lower()
 
+
+# ── Syslog forwarding (#58) ───────────────────────────────────────────────────
+# The event stream gets its own logger rather than riding on `log`, so the two
+# can carry different syslog idents and be filtered apart at the collector.
+# It does not propagate: events already reach dashboard.log through _log_event's
+# own log call, and propagating would duplicate every event in the app stream.
+event_log = logging.getLogger("dashboard.events")
+event_log.propagate = False
+event_log.setLevel(logging.INFO)
+
+_syslog_handlers: dict = {}     # "app" | "events" -> handler
+_syslog_status  = "disabled"    # surfaced in Settings so failures are visible
+
+# Activity-log kinds mapped onto syslog severities. 'fault' is a real problem
+# worth alerting on; the rest are informational.
+_EVENT_LEVELS = {"fault": logging.ERROR, "status": logging.INFO, "info": logging.INFO}
+
+
+def _syslog_teardown() -> None:
+    for name, handler in list(_syslog_handlers.items()):
+        target = logging.getLogger() if name == "app" else event_log
+        try:
+            target.removeHandler(handler)
+            handler.close()
+        except Exception:
+            pass
+        _syslog_handlers.pop(name, None)
+
+
+def _configure_syslog() -> str:
+    """(Re)build syslog handlers from the current config. Returns a status string.
+
+    Never raises: a syslog collector being down, renamed or misconfigured must
+    never stop the dashboard running. A TCP handler fails loudly at construction
+    if the host is unreachable, so that is caught here and reported in Settings
+    rather than taking the process with it."""
+    global _syslog_status
+    _syslog_teardown()
+
+    if not SYSLOG_ENABLED:
+        _syslog_status = "disabled"
+        return _syslog_status
+    if not SYSLOG_HOST:
+        _syslog_status = "error: no host set"
+        log.warning("Syslog enabled but no host configured")
+        return _syslog_status
+
+    socktype = socket.SOCK_STREAM if SYSLOG_PROTOCOL == "tcp" else socket.SOCK_DGRAM
+    wanted = {"app":    SYSLOG_STREAMS in ("app", "both"),
+              "events": SYSLOG_STREAMS in ("events", "both")}
+    made = []
+    for name, enabled in wanted.items():
+        if not enabled:
+            continue
+        try:
+            h = logging.handlers.SysLogHandler(
+                address=(SYSLOG_HOST, SYSLOG_PORT), socktype=socktype)
+            h.ident = "givenergy-events: " if name == "events" else "givenergy: "
+            h.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+            (logging.getLogger() if name == "app" else event_log).addHandler(h)
+            _syslog_handlers[name] = h
+            made.append(name)
+        except Exception as exc:
+            _syslog_status = f"error: {exc}"
+            log.warning("Syslog %s stream could not be started: %s", name, exc)
+            _syslog_teardown()
+            return _syslog_status
+
+    _syslog_status = (f"sending {'+'.join(made)} to {SYSLOG_HOST}:{SYSLOG_PORT}/{SYSLOG_PROTOCOL}"
+                      if made else "enabled but no streams selected")
+    log.info("Syslog: %s", _syslog_status)
+    return _syslog_status
+
 # ── Database ───────────────────────────────────────────────────────────────────
 def _db():
     conn = sqlite3.connect(DB_PATH)
@@ -1293,6 +1388,13 @@ def _log_event(kind, message):
             "INSERT INTO event_log (ts, kind, message) VALUES (?,?,?)",
             (int(time.time()), kind, message))
         conn.commit()
+    # Mirror onto the event stream for syslog (#58). Wrapped because a logging
+    # handler must never be able to lose an event that is already safely in the
+    # database -- the DB write above is what matters.
+    try:
+        event_log.log(_EVENT_LEVELS.get(kind, logging.INFO), "[%s] %s", kind, message)
+    except Exception:
+        pass
 
 
 def _recompute_today_cost(grid_in_today: float = 0.0, grid_out_today: float = 0.0):
@@ -3141,9 +3243,11 @@ def _read_control_state() -> dict:
         try:
             regs_0  = _hr_read(slave, 0,  60)   # HR  0-59
             regs_60 = _hr_read(slave, 60, 60)   # HR 60-119
-            # HR 55 is battery_capacity_ah and it is already in this block --
-            # cache it here so the home screen never needs its own read.
+            # HR 55 is battery_capacity_ah and HR 35-40 are the inverter clock;
+            # both are already in this block, so cache them here rather than
+            # making either feature open its own socket.
             _cache_battery_capacity_ah(regs_0[55])
+            _cache_clock_drift(regs_0[35:41])
             break
         except TimeoutError:
             if _attempt < _HR_CTRL_RETRIES:
@@ -3249,6 +3353,11 @@ def _read_control_state() -> dict:
         "battery_power_mode":   hr(_HR["BATTERY_POWER_MODE"]),
         "charge_target_soc":    charge_target,
         "soc_reserve":          hr(_HR["BATTERY_SOC_RESERVE"]),
+        # Clock drift comes free from regs_0 above. Surfaced so a user seeing a
+        # rule not fire can spot the cause in seconds rather than by accident.
+        "clock_drift_secs":     _clock_cache["drift"],
+        "inverter_clock":       _clock_cache["inverter_time"],
+        "auto_clock_sync":      AUTO_CLOCK_SYNC,
         "charge_limit":    regs_313[0] if regs_313 else hr(_HR["BATTERY_CHARGE_LIMIT"]) * 2,
         "discharge_limit": regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]) * 2,
         "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
@@ -4638,8 +4747,17 @@ _BATT_CAP_TTL   = 86400  # capacity only changes when hardware does
 
 
 def _cache_battery_capacity_ah(ah) -> None:
-    """Record a capacity reading. Called opportunistically from the control-state
-    read, which already fetches HR 0-59, so that costs no extra inverter traffic."""
+    """Record a capacity reading. Called from the inverter-facts loop and
+    opportunistically from the control-state read, which already fetches
+    HR 0-59 so that path costs no extra inverter traffic.
+
+    The profile guard lives HERE rather than in the accessor so it is enforced
+    once for every caller. AIO and three-phase units have a different battery
+    architecture and HR 55 does not carry the same meaning there, so a value read
+    from one must never reach the cache in the first place. Both callers run
+    straight after _detect_inverter(), so the profile is known at this point."""
+    if _inverter_profile not in _BMS_SOC_PROFILES:
+        return
     try:
         ah = int(ah)
     except (TypeError, ValueError):
@@ -4649,23 +4767,15 @@ def _cache_battery_capacity_ah(ah) -> None:
 
 
 def _battery_capacity_ah() -> "int | None":
-    """Bank capacity in Ah, read from HR 55 and cached for a day.
+    """Cached bank capacity in Ah, or None if not yet known.
 
-    Returns None on profiles without LV battery modules -- the AIO and
-    three-phase units have a different battery architecture and HR 55 does not
-    carry the same meaning there, so guessing would be worse than saying nothing.
+    Pure cache read -- deliberately does no I/O, because /api/data calls this on
+    every poll. _inverter_facts_loop owns refreshing it.
+
+    Stays None on profiles without LV battery modules: the AIO and three-phase
+    units have a different battery architecture and HR 55 does not carry the same
+    meaning there, so guessing would be worse than saying nothing.
     """
-    if _inverter_profile not in _BMS_SOC_PROFILES:
-        return None
-    if _batt_cap_cache["ah"] is not None and \
-            (time.time() - _batt_cap_cache["ts"]) < _BATT_CAP_TTL:
-        return _batt_cap_cache["ah"]
-    slave = _inverter_slave or 0x11
-    try:
-        regs = _hr_read(slave, 0, 60)
-        _cache_battery_capacity_ah(regs[55])
-    except Exception as exc:
-        log.debug("Battery capacity read failed: %s", exc)
     return _batt_cap_cache["ah"]
 
 
@@ -4689,26 +4799,151 @@ def _effective_battery_kwh() -> float:
     return _battery_capacity_kwh() or 0.0
 
 
-def _battery_capacity_startup_check():
-    """Read capacity once the inverter has been detected, and say something if a
-    hand-entered override disagrees with the hardware.
+def _report_capacity_mismatch(detected: float) -> None:
+    """Say something when a hand-entered override disagrees with the hardware.
 
     Deliberately does NOT overwrite the user's setting -- it may be intentional.
-    It just refuses to let a stale one stay invisible."""
-    for _ in range(120):                  # wait up to 60s for detection
-        if _inverter_profile and _inverter_profile != "unknown":
-            break
-        time.sleep(0.5)
-    detected = _battery_capacity_kwh()
-    if detected is None:
-        return
-    log.info("Battery capacity detected: %.1f kWh (%d Ah)", detected, _battery_capacity_ah())
+    It just refuses to let a stale one stay invisible, because a figure left over
+    from before a battery was added makes _compute_predictive_target divide by
+    half the real bank and set the overnight target too low."""
     if PRED_BATTERY_KWH > 0 and abs(PRED_BATTERY_KWH - detected) / detected > 0.1:
         msg = (f"Battery capacity setting ({PRED_BATTERY_KWH:g} kWh) does not match the "
                f"detected {detected:g} kWh - predictive charge is using your setting. "
                f"Clear it in Settings to follow the hardware.")
         log.warning(msg)
         _log_event("info", msg)
+
+
+# ── Inverter clock drift ──────────────────────────────────────────────────────
+# HR 35-40 = year (offset from 2000), month, day, hour, minute, second. Same
+# registers sync_time writes. Confirmed by reading real hardware 22 Sep 2026:
+# [26, 9, 22, 11, 50, 26] decoded to 2026-09-22 11:50:26, 51 seconds behind the
+# dashboard on a system that had been manually synced within the last few weeks.
+#
+# Correct above 30s: the scheduler works on a 30-minute grid, so a minute of
+# drift delays a slot noticeably and several minutes can miss it entirely.
+_CLOCK_CORRECT_SECS  = 30
+_CLOCK_CHECK_SECS    = 6 * 3600   # opens a second socket, so be sparing
+_clock_cache = {"ts": 0.0, "drift": None, "inverter_time": None}
+
+
+def _decode_inverter_clock(regs) -> "datetime | None":
+    """Decode HR 35-40 into a datetime. Pure, so it is testable without hardware.
+
+    Returns None rather than raising on nonsense: these registers read as zeros
+    or garbage on some firmware before the clock has ever been set, and a wild
+    value must never be mistaken for a real drift and 'corrected' against."""
+    try:
+        y, mo, d, h, mi, s = (int(v) for v in regs[:6])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if not (0 <= y <= 99):
+        return None
+    try:
+        return datetime(2000 + y, mo, d, h, mi, s)
+    except ValueError:          # month 0, day 31 in a 30-day month, etc.
+        return None
+
+
+def _clock_drift_from(regs) -> "float | None":
+    """Seconds the inverter is ahead (+) or behind (-) the dashboard."""
+    inv = _decode_inverter_clock(regs)
+    if inv is None:
+        return None
+    return (inv - datetime.now()).total_seconds()
+
+
+def _cache_clock_drift(regs) -> None:
+    """Record a drift reading. Called from the control-state read, which already
+    fetches HR 0-59, so that path costs no extra inverter traffic."""
+    inv = _decode_inverter_clock(regs)
+    if inv is None:
+        return
+    _clock_cache.update({"ts": time.time(),
+                         "drift": (inv - datetime.now()).total_seconds(),
+                         "inverter_time": inv.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def _sync_inverter_clock(slave) -> None:
+    """Write the dashboard's time into HR 35-40. Raises on failure."""
+    now = datetime.now()
+    for offset, value in enumerate((now.year - 2000, now.month, now.day,
+                                    now.hour, now.minute, now.second)):
+        _hr_write(slave, 35 + offset, value)
+
+
+_FACTS_RETRY_SECS = 1800   # inverter not identified yet - try again before long
+
+
+def _inverter_facts_loop():
+    """Periodic read of the two slow-moving facts the inverter holds: its clock
+    (HR 35-40) and the battery bank capacity (HR 55). One read covers both.
+
+    Uses _detect_inverter() rather than reading the _inverter_profile global.
+    That global is only set opportunistically in listen mode -- when a frame
+    with base=0 and count>=22 happens to pass on the wire -- so gating
+    background work on it means the work may simply never run. It cost both of
+    these features a silent no-op on one restart, which is exactly the failure
+    mode worth designing out: every branch below logs why it did nothing.
+
+    The clock correction is additionally guarded on the dashboard's OWN clock
+    being plausible. It writes our time INTO the hardware, where the GivEnergy
+    app and any cloud scheduling also see it, so on a Pi with no RTC that has
+    booted to 1970 before NTP settles, doing nothing is far better.
+    """
+    time.sleep(120)         # let startup, detection and the first poll settle
+    announced_capacity = False
+    while True:
+        wait = _CLOCK_CHECK_SECS
+        try:
+            slave, profile, model = _detect_inverter()
+            if profile == "unknown":
+                log.info("Inverter facts: model not identified yet - retrying in %dm",
+                         _FACTS_RETRY_SECS // 60)
+                wait = _FACTS_RETRY_SECS
+            else:
+                # HR 35-55 in one read: 35-40 is the clock, 55 is battery
+                # capacity. 21 registers, under the 22 proven safe on Gen1.
+                regs = _hr_read(slave, 35, 21)
+
+                # ── Battery capacity ──────────────────────────────────────
+                if profile in _BMS_SOC_PROFILES:
+                    _cache_battery_capacity_ah(regs[20])
+                    kwh = _battery_capacity_kwh()
+                    if kwh and not announced_capacity:
+                        log.info("Battery capacity detected: %.1f kWh (%d Ah)",
+                                 kwh, _battery_capacity_ah())
+                        _report_capacity_mismatch(kwh)
+                        announced_capacity = True
+                    elif not kwh:
+                        log.info("Battery capacity: HR55 reads %s - not usable", regs[20])
+                else:
+                    log.debug("Battery capacity not read on profile %s", profile)
+
+                # ── Clock ─────────────────────────────────────────────────
+                _cache_clock_drift(regs[0:6])
+                drift = _clock_cache["drift"]
+                if drift is None:
+                    log.info("Inverter clock unreadable (HR35-40 = %s)", list(regs[0:6]))
+                elif not AUTO_CLOCK_SYNC:
+                    log.info("Inverter clock drift %.0fs - auto-sync is off", drift)
+                elif datetime.now().year < 2026:
+                    log.warning("Clock sync skipped: dashboard clock looks wrong (%s)",
+                                datetime.now().isoformat(timespec="seconds"))
+                elif abs(drift) >= _CLOCK_CORRECT_SECS:
+                    _sync_inverter_clock(slave)
+                    msg = (f"Inverter clock was {abs(drift):.0f}s "
+                           f"{'ahead' if drift > 0 else 'behind'} - corrected automatically")
+                    log.warning(msg)
+                    _log_event("info", msg)
+                    _log_control("sync_time", {"auto": True}, True, msg)
+                    _clock_cache.update({"ts": time.time(), "drift": 0.0})
+                else:
+                    log.info("Inverter clock drift %.0fs - within tolerance", drift)
+        except Exception as exc:
+            log.warning("Inverter facts check failed: %s", exc)
+            wait = _FACTS_RETRY_SECS
+        time.sleep(wait)
 
 
 @app.route("/api/battery")
@@ -4797,6 +5032,15 @@ def get_settings():
         "yr_solar_override_kwh":       YR_SOLAR_OVERRIDE_KWH,
         "log_level":          LOG_LEVEL,
         "log_retention_days": LOG_RETENTION_DAYS,
+        "syslog_enabled":     SYSLOG_ENABLED,
+        "syslog_host":        SYSLOG_HOST,
+        "syslog_port":        SYSLOG_PORT,
+        "syslog_protocol":    SYSLOG_PROTOCOL,
+        "syslog_streams":     SYSLOG_STREAMS,
+        "syslog_status":      _syslog_status,
+        "auto_clock_sync":    AUTO_CLOCK_SYNC,
+        "clock_drift_secs":   _clock_cache["drift"],
+        "inverter_clock":     _clock_cache["inverter_time"],
         "ecoflow_enabled":    ECOFLOW_ENABLED,
         "ecoflow_serial":     ECOFLOW_SERIAL,
         "ecoflow_configured": bool(ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY),
@@ -4816,6 +5060,8 @@ def save_settings():
     global REQUIRE_AUTH
     global LOG_LEVEL, LOG_RETENTION_DAYS
     global ECOFLOW_ENABLED, ECOFLOW_ACCESS_KEY, ECOFLOW_SECRET_KEY, ECOFLOW_SERIAL
+    global AUTO_CLOCK_SYNC
+    global SYSLOG_ENABLED, SYSLOG_HOST, SYSLOG_PORT, SYSLOG_PROTOCOL, SYSLOG_STREAMS
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4999,6 +5245,37 @@ def save_settings():
             _log_file_handler.backupCount = LOG_RETENTION_DAYS
         _set("logging", "log_retention_days", LOG_RETENTION_DAYS)
 
+    if "auto_clock_sync" in data:
+        AUTO_CLOCK_SYNC = bool(data["auto_clock_sync"])
+        _set("inverter", "auto_clock_sync", "yes" if AUTO_CLOCK_SYNC else "no")
+
+    # ── Syslog (#58) ────────────────────────────────────────────────────────
+    _syslog_touched = False
+    if "syslog_host" in data:
+        host = str(data["syslog_host"]).strip()
+        if host and (len(host) > 253 or not re.match(r'^[a-zA-Z0-9._:\[\]-]+$', host)):
+            return jsonify({"ok": False, "error": "Invalid syslog host"}), 400
+        SYSLOG_HOST = host
+        _set("logging", "syslog_host", SYSLOG_HOST); _syslog_touched = True
+    if "syslog_port" in data:
+        SYSLOG_PORT = max(1, min(65535, int(data["syslog_port"])))
+        _set("logging", "syslog_port", SYSLOG_PORT); _syslog_touched = True
+    if "syslog_protocol" in data:
+        SYSLOG_PROTOCOL = "tcp" if str(data["syslog_protocol"]).lower() == "tcp" else "udp"
+        _set("logging", "syslog_protocol", SYSLOG_PROTOCOL); _syslog_touched = True
+    if "syslog_streams" in data:
+        val = str(data["syslog_streams"]).lower()
+        SYSLOG_STREAMS = val if val in ("app", "events", "both") else "both"
+        _set("logging", "syslog_streams", SYSLOG_STREAMS); _syslog_touched = True
+    if "syslog_enabled" in data:
+        want = bool(data["syslog_enabled"])
+        if want and not SYSLOG_HOST:
+            return jsonify({"ok": False, "error": "Enter a syslog host first"}), 400
+        SYSLOG_ENABLED = want
+        _set("logging", "syslog_enabled", "yes" if want else "no"); _syslog_touched = True
+    if _syslog_touched:
+        _configure_syslog()
+
     # ── EcoFlow STREAM ──────────────────────────────────────────────────────
     # Keys are write-only from the browser's point of view, same as the Met
     # Office and Forecast.Solar keys: an empty string means "leave as-is", so a
@@ -5031,6 +5308,31 @@ def save_settings():
     return jsonify({"ok": True,
                     "weather_configured": bool(MET_API_KEY and MET_GEOHASH),
                     "solar_forecast_configured": _sf_configured()})
+
+
+@app.route("/api/syslog/test", methods=["POST"])
+def api_syslog_test():
+    """Send one line down each configured stream so the user can confirm the
+    collector is actually receiving, rather than discovering weeks later that it
+    never was. UDP syslog is fire-and-forget, so 'sent' is genuinely all we can
+    promise -- the message says so rather than implying delivery."""
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    if not SYSLOG_ENABLED or not _syslog_handlers:
+        return jsonify({"ok": False, "error": f"Syslog is not active ({_syslog_status})"}), 400
+    stamp = datetime.now().strftime("%H:%M:%S")
+    sent = []
+    if "app" in _syslog_handlers:
+        log.warning("Syslog test message from the GivEnergy dashboard at %s", stamp)
+        sent.append("app")
+    if "events" in _syslog_handlers:
+        _log_event("info", f"Syslog test message at {stamp}")
+        sent.append("events")
+    proto = SYSLOG_PROTOCOL.upper()
+    note = (" UDP is fire-and-forget, so check your collector to confirm it arrived."
+            if SYSLOG_PROTOCOL == "udp" else "")
+    return jsonify({"ok": True,
+                    "message": f"Sent on {' + '.join(sent)} via {proto}.{note}"})
 
 
 @app.route("/api/ecoflow/test", methods=["POST"])
@@ -6681,6 +6983,7 @@ def add_security_headers(response):
 if __name__ == "__main__":
     _apply_pending_imports()  # swap in a staged restore before opening the DB
     init_db()
+    _configure_syslog()       # before the threads start, so startup is forwarded too
 
     t = threading.Thread(target=_data_loop, daemon=True)
     t.start()
@@ -6699,9 +7002,10 @@ if __name__ == "__main__":
     # EcoFlow STREAM MQTT subscriber — inert until the integration is enabled.
     threading.Thread(target=_ef_loop, daemon=True).start()
 
-    # Battery capacity: detect once after the inverter settles, and flag a stale
-    # hand-entered override rather than letting it quietly skew predictive charge.
-    threading.Thread(target=_battery_capacity_startup_check, daemon=True).start()
+    # Inverter facts: battery bank capacity, and clock drift. Scheduled slots are
+    # enforced against the inverter's own RTC, so drift silently stops rules
+    # firing (#53); a stale capacity quietly skews predictive charge.
+    threading.Thread(target=_inverter_facts_loop, daemon=True).start()
 
     # Delayed first update check — runs 30s after startup so the inverter
     # connection settles before we make an outbound request.

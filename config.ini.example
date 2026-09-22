@@ -18,6 +18,15 @@ power_units     = percent
 max_charge_w    = 2600
 max_discharge_w = 2600
 
+; Keep the inverter's internal clock in step with this machine.
+; This matters more than it looks. The scheduler writes charge/discharge SLOTS
+; as wall-clock HH:MM windows, and the INVERTER decides whether "now" is inside
+; one using its own clock. If that clock drifts, a perfectly good 14:30-15:00
+; slot simply does not start when it should - the rule appears to do nothing.
+; Checked every 6 hours and corrected when more than 30 seconds out.
+; Only turn this off if something else already sets the inverter's clock.
+auto_clock_sync = yes
+
 [server]
 ; How often to poll the inverter in seconds (minimum 5)
 poll_interval        = 10
@@ -148,6 +157,22 @@ serial     =
 log_level          = warning
 ; How many days of log files to keep (daily rotation, 1-30)
 log_retention_days = 7
+
+; Forward log lines to a syslog server on your network.
+; Two separate streams are available, sent under different idents so you can
+; filter them apart at the collector:
+;   app    -> "givenergy:"        everything that goes to dashboard.log. Chatty.
+;   events -> "givenergy-events:" the short Activity list - connection lost and
+;             restored, status changes, scheduler actions. Faults are sent at
+;             ERROR severity, everything else at INFO.
+; streams: app | events | both
+; protocol: udp (standard, fire-and-forget) | tcp (reliable, needs the collector
+;           to be listening on TCP - the dashboard will report an error if not)
+syslog_enabled  = no
+syslog_host     =
+syslog_port     = 514
+syslog_protocol = udp
+syslog_streams  = both
 
 [admin]
 ; SHA-256 hash of the settings-page password.
