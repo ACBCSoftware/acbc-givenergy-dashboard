@@ -8,6 +8,7 @@ import asyncio
 import configparser
 import gzip
 import hashlib
+import hmac
 import io
 import json
 import logging
@@ -18,6 +19,8 @@ import secrets
 import shutil
 import socket
 import sqlite3
+import ssl
+import struct
 import threading
 import time
 import urllib.parse
@@ -115,6 +118,31 @@ PRED_MIN_SOC         = _cfg.getint(  "predictive_charge", "minimum_soc",        
 
 YR_CONSUMPTION_OVERRIDE_KWH = _cfg.getfloat("year_projection", "consumption_kwh_override", fallback=0.0)
 YR_SOLAR_OVERRIDE_KWH       = _cfg.getfloat("year_projection", "solar_kwh_override",       fallback=0.0)
+
+# Plug-in ("balcony") solar detection. UK legalised plug-in solar on 27 Aug 2026:
+# an <=800VA micro-inverter plugged straight into a socket circuit, with no CT
+# clamp and no metering. It sits downstream of the inverter's grid CT, so the
+# inverter cannot see it at all -- its generation simply shows up as the house
+# drawing less from the grid. Every figure derived from house load therefore
+# reads low. Costs stay correct (grid import/export are still measured), but
+# consumption, solar totals and self-sufficiency do not.
+# notified = user has been told / has dismissed the hint; declared = user has
+# confirmed they really do have one, which suppresses the hint permanently.
+PLUGIN_SOLAR_NOTIFIED = _cfg.getboolean("plugin_solar", "notified", fallback=False)
+PLUGIN_SOLAR_DECLARED = _cfg.getboolean("plugin_solar", "declared", fallback=False)
+
+# EcoFlow STREAM integration -- MEASURED plug-in solar, as opposed to the
+# heuristic detection above. When enabled, the AC watts the STREAM feeds into
+# the house are read from EcoFlow's cloud and added back on to house load and
+# solar for display. This is CLOUD-BACKED: it needs an outbound connection to
+# EcoFlow, exactly like the Octopus / Met Office / Forecast.Solar calls the app
+# already makes. It is unrelated to the "no GivEnergy cloud account" claim.
+# Credentials come from developer-eu.ecoflow.com. `serial` is discovered on
+# first connect if left blank.
+ECOFLOW_ENABLED    = _cfg.getboolean("ecoflow", "enabled",    fallback=False)
+ECOFLOW_ACCESS_KEY = _cfg.get(       "ecoflow", "access_key", fallback="").strip()
+ECOFLOW_SECRET_KEY = _cfg.get(       "ecoflow", "secret_key", fallback="").strip()
+ECOFLOW_SERIAL     = _cfg.get(       "ecoflow", "serial",     fallback="").strip()
 
 
 def _sf_configured() -> bool:
@@ -1191,6 +1219,13 @@ def init_db():
             conn.execute("ALTER TABLE snapshots ADD COLUMN t_battery  REAL")
         if "t_heatsink" not in cols:
             conn.execute("ALTER TABLE snapshots ADD COLUMN t_heatsink REAL")
+        # Migration: plug-in (EcoFlow STREAM) AC watts into the house.
+        # Stored RAW and SEPARATELY -- solar_w and home_w keep the inverter's own
+        # figures untouched, and the correction is applied at display time. A
+        # cloud outage then leaves visible NULLs instead of silently writing gaps
+        # that would look like genuine low-consumption periods.
+        if "plugin_w" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN plugin_w REAL")
         sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
         if "power_pct" not in sched_cols:
             conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
@@ -1226,8 +1261,8 @@ def _log_snapshot(data):
             (ts, solar_w, home_w, battery_w, battery_charging, battery_discharging,
              grid_w, grid_importing, grid_exporting, soc,
              solar_today, grid_in_today, grid_out_today, bat_chg_today, bat_dis_today,
-             t_battery, t_heatsink)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             t_battery, t_heatsink, plugin_w)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             int(data["ts"]),
             data["solar_w"],   data["home_w"],
@@ -1237,6 +1272,9 @@ def _log_snapshot(data):
             data["solar_today"], data["grid_in_today"], data["grid_out_today"],
             data["bat_chg_today"], data["bat_dis_today"],
             data.get("t_battery"), data.get("t_heatsink"),
+            # Read at write time so both the poll and listen paths capture it
+            # without either needing to know the EcoFlow exists.
+            _ef_power_w(),
         ))
         conn.commit()
 
@@ -2236,7 +2274,8 @@ def _compute_predictive_target() -> "int | None":
     """Compute the overnight charge SOC target from tomorrow's solar forecast
     and historical morning demand.  Returns None if forecast or battery capacity
     is not configured, so callers fall back to the rule's fixed target_soc."""
-    if PRED_BATTERY_KWH <= 0:
+    capacity = _effective_battery_kwh()
+    if capacity <= 0:
         return None
     kwh = _get_tomorrow_forecast_kwh()
     if kwh is None:
@@ -2245,7 +2284,7 @@ def _compute_predictive_target() -> "int | None":
     if morning_demand is None:
         morning_demand = PRED_EVENING_RESERVE   # fallback until enough history
     usable = kwh * PRED_PESSIMISM - morning_demand
-    raw    = 100.0 * (1.0 - usable / PRED_BATTERY_KWH)
+    raw    = 100.0 * (1.0 - usable / capacity)
     return int(max(PRED_MIN_SOC, min(100, round(raw))))
 
 
@@ -3102,6 +3141,9 @@ def _read_control_state() -> dict:
         try:
             regs_0  = _hr_read(slave, 0,  60)   # HR  0-59
             regs_60 = _hr_read(slave, 60, 60)   # HR 60-119
+            # HR 55 is battery_capacity_ah and it is already in this block --
+            # cache it here so the home screen never needs its own read.
+            _cache_battery_capacity_ah(regs_0[55])
             break
         except TimeoutError:
             if _attempt < _HR_CTRL_RETRIES:
@@ -4171,6 +4213,18 @@ def api_data():
     # Running backend version — drives the footer so it can never lag the deployed code.
     data["app_version"] = APP_VERSION
     data["solar_forecast_configured"] = _sf_configured()
+    # EcoFlow plug-in solar. solar_w / home_w stay RAW (the inverter's own
+    # figures); the frontend adds plugin_w on for display so the two can also be
+    # shown broken out. One source of truth, corrected in one place.
+    if ECOFLOW_ENABLED:
+        data["ecoflow"]        = _ef_snapshot()
+        data["plugin_w"]       = data["ecoflow"]["power_w"]
+        data["plugin_today"]   = round(_plugin_kwh_today(), 2)
+    data["ecoflow_enabled"] = ECOFLOW_ENABLED
+    # Battery bank capacity for the home-screen battery line. Cached, so this
+    # costs nothing per request.
+    data["battery_capacity_kwh"] = _battery_capacity_kwh()
+    data["battery_capacity_ah"]  = _battery_capacity_ah()
     # Lets the frontend skip the password modal for control panels when the
     # local-only convenience mode is on.
     data["require_auth"] = REQUIRE_AUTH
@@ -4565,6 +4619,98 @@ def _bms_soc_fallback_value() -> "int | None":
     return est
 
 
+# ── Battery capacity detection ────────────────────────────────────────────────
+# HR 55 (battery_capacity_ah) is the inverter's own figure for the whole bank.
+# Confirmed on real hardware 21 Sep 2026 against a completely independent source:
+# a 2-module bank reported HR55 = 372, and the two BMS modules reported
+# cap_design = 18600 each. 18600 x 2 = 37200 = 372 x 100, which also pins
+# cap_design's previously-unvalidated unit at 0.01 Ah.
+#
+# Why this is detected rather than typed in: capacity is a fact about the
+# hardware, not a preference. Andi added a second battery and the hand-entered
+# predictive-charge figure silently stayed at one module's worth, which makes
+# _compute_predictive_target divide by half the real bank and set the overnight
+# target too low. Exactly the kind of quiet under-charge that never gets noticed.
+_BATT_NOMINAL_V = 51.2   # 16S LiFePO4 (16 x 3.2 V). All GivEnergy LV modules
+                         # (2.6 / 5.2 / 8.2 / 9.5 kWh) use this pack layout.
+_batt_cap_cache = {"ts": 0.0, "ah": None}
+_BATT_CAP_TTL   = 86400  # capacity only changes when hardware does
+
+
+def _cache_battery_capacity_ah(ah) -> None:
+    """Record a capacity reading. Called opportunistically from the control-state
+    read, which already fetches HR 0-59, so that costs no extra inverter traffic."""
+    try:
+        ah = int(ah)
+    except (TypeError, ValueError):
+        return
+    if 0 < ah <= 10000:          # sanity band; 0 or absurd means "not configured"
+        _batt_cap_cache.update({"ts": time.time(), "ah": ah})
+
+
+def _battery_capacity_ah() -> "int | None":
+    """Bank capacity in Ah, read from HR 55 and cached for a day.
+
+    Returns None on profiles without LV battery modules -- the AIO and
+    three-phase units have a different battery architecture and HR 55 does not
+    carry the same meaning there, so guessing would be worse than saying nothing.
+    """
+    if _inverter_profile not in _BMS_SOC_PROFILES:
+        return None
+    if _batt_cap_cache["ah"] is not None and \
+            (time.time() - _batt_cap_cache["ts"]) < _BATT_CAP_TTL:
+        return _batt_cap_cache["ah"]
+    slave = _inverter_slave or 0x11
+    try:
+        regs = _hr_read(slave, 0, 60)
+        _cache_battery_capacity_ah(regs[55])
+    except Exception as exc:
+        log.debug("Battery capacity read failed: %s", exc)
+    return _batt_cap_cache["ah"]
+
+
+def _battery_capacity_kwh() -> "float | None":
+    """Bank capacity in kWh, or None when it cannot be determined."""
+    ah = _battery_capacity_ah()
+    if not ah:
+        return None
+    return round(ah * _BATT_NOMINAL_V / 1000.0, 1)
+
+
+def _effective_battery_kwh() -> float:
+    """Capacity used by predictive charge.
+
+    The configured value is an OVERRIDE: 0 (the default) means 'follow the
+    hardware'. A user who deliberately wants a conservative usable figure can
+    still set one, but nobody has to remember to update it after adding a
+    battery."""
+    if PRED_BATTERY_KWH > 0:
+        return PRED_BATTERY_KWH
+    return _battery_capacity_kwh() or 0.0
+
+
+def _battery_capacity_startup_check():
+    """Read capacity once the inverter has been detected, and say something if a
+    hand-entered override disagrees with the hardware.
+
+    Deliberately does NOT overwrite the user's setting -- it may be intentional.
+    It just refuses to let a stale one stay invisible."""
+    for _ in range(120):                  # wait up to 60s for detection
+        if _inverter_profile and _inverter_profile != "unknown":
+            break
+        time.sleep(0.5)
+    detected = _battery_capacity_kwh()
+    if detected is None:
+        return
+    log.info("Battery capacity detected: %.1f kWh (%d Ah)", detected, _battery_capacity_ah())
+    if PRED_BATTERY_KWH > 0 and abs(PRED_BATTERY_KWH - detected) / detected > 0.1:
+        msg = (f"Battery capacity setting ({PRED_BATTERY_KWH:g} kWh) does not match the "
+               f"detected {detected:g} kWh - predictive charge is using your setting. "
+               f"Clear it in Settings to follow the hardware.")
+        log.warning(msg)
+        _log_event("info", msg)
+
+
 @app.route("/api/battery")
 def api_battery():
     """On-demand BMS read from battery module(s).  Not polled or stored.
@@ -4637,6 +4783,9 @@ def get_settings():
         "sf_panel_kwp":              SF_KWP,
         "solar_forecast_configured": _sf_configured(),
         "pred_battery_kwh":          PRED_BATTERY_KWH,
+        "pred_battery_kwh_detected": _battery_capacity_kwh(),
+        "pred_battery_kwh_effective": _effective_battery_kwh(),
+        "battery_capacity_ah":       _battery_capacity_ah(),
         "pred_pessimism_factor":     PRED_PESSIMISM,
         "pred_evening_reserve":      PRED_EVENING_RESERVE,
         "pred_minimum_soc":          PRED_MIN_SOC,
@@ -4648,6 +4797,10 @@ def get_settings():
         "yr_solar_override_kwh":       YR_SOLAR_OVERRIDE_KWH,
         "log_level":          LOG_LEVEL,
         "log_retention_days": LOG_RETENTION_DAYS,
+        "ecoflow_enabled":    ECOFLOW_ENABLED,
+        "ecoflow_serial":     ECOFLOW_SERIAL,
+        "ecoflow_configured": bool(ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY),
+        "ecoflow_status":     _ef_status,
         # API keys are intentionally never returned to the browser
     })
 
@@ -4662,6 +4815,7 @@ def save_settings():
     global SF_LAT, SF_LON, SF_TILT, SF_AZ, SF_KWP, SF_API_KEY, SF_POSTCODE, _last_sf_ts
     global REQUIRE_AUTH
     global LOG_LEVEL, LOG_RETENTION_DAYS
+    global ECOFLOW_ENABLED, ECOFLOW_ACCESS_KEY, ECOFLOW_SECRET_KEY, ECOFLOW_SERIAL
 
     if not _authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
@@ -4845,11 +4999,65 @@ def save_settings():
             _log_file_handler.backupCount = LOG_RETENTION_DAYS
         _set("logging", "log_retention_days", LOG_RETENTION_DAYS)
 
+    # ── EcoFlow STREAM ──────────────────────────────────────────────────────
+    # Keys are write-only from the browser's point of view, same as the Met
+    # Office and Forecast.Solar keys: an empty string means "leave as-is", so a
+    # user can toggle the integration without re-typing their credentials.
+    if "ecoflow_access_key" in data:
+        key = str(data["ecoflow_access_key"]).strip()
+        if key:
+            ECOFLOW_ACCESS_KEY = key
+            _set("ecoflow", "access_key", key)
+    if "ecoflow_secret_key" in data:
+        key = str(data["ecoflow_secret_key"]).strip()
+        if key:
+            ECOFLOW_SECRET_KEY = key
+            _set("ecoflow", "secret_key", key)
+    if "ecoflow_serial" in data:
+        ECOFLOW_SERIAL = str(data["ecoflow_serial"]).strip()[:64]
+        _set("ecoflow", "serial", ECOFLOW_SERIAL)
+    if "ecoflow_enabled" in data:
+        want = bool(data["ecoflow_enabled"])
+        if want and not (ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY):
+            return jsonify({"ok": False,
+                            "error": "Enter your EcoFlow access key and secret key first"}), 400
+        if want != ECOFLOW_ENABLED:
+            _log_event("info", f"EcoFlow integration {'enabled' if want else 'disabled'}")
+        ECOFLOW_ENABLED = want
+        _set("ecoflow", "enabled", "yes" if want else "no")
+
     with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
     return jsonify({"ok": True,
                     "weather_configured": bool(MET_API_KEY and MET_GEOHASH),
                     "solar_forecast_configured": _sf_configured()})
+
+
+@app.route("/api/ecoflow/test", methods=["POST"])
+def api_ecoflow_test():
+    """Verify credentials and report what the account holds, without enabling
+    anything. Read-only: device list only, never a write."""
+    if not _authorised():
+        return jsonify({"ok": False, "error": "Unauthorised"}), 401
+    if not (ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY):
+        return jsonify({"ok": False, "error": "Access key and secret key are required"}), 400
+    try:
+        devices = _ef_get(_EF_LIST_PATH).get("data") or []
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 502
+    if not devices:
+        return jsonify({"ok": False, "error": "No devices found on this EcoFlow account"}), 404
+    return jsonify({"ok": True, "devices": [
+        {"sn": d.get("sn"), "name": d.get("deviceName") or "(unnamed)",
+         "online": d.get("online") in (1, True)} for d in devices]})
+
+
+@app.route("/api/ecoflow")
+def api_ecoflow():
+    """Live EcoFlow state for the solar breakdown panel."""
+    snap = _ef_snapshot()
+    snap["today_kwh"] = round(_plugin_kwh_today(), 2)
+    return jsonify(snap)
 
 
 @app.route("/api/tariff", methods=["GET"])
@@ -5184,6 +5392,40 @@ def api_update():
         return jsonify({"available": False, "current": APP_VERSION, "checking": True})
     return jsonify(_update_info)
 
+@app.route("/api/plugin_solar")
+def api_plugin_solar():
+    """Whether to show the one-time 'unmetered generation detected' hint."""
+    return jsonify(_plugin_solar_hint())
+
+
+@app.route("/api/plugin_solar/ack", methods=["POST"])
+def api_plugin_solar_ack():
+    """Dismiss the hint. `declared: true` means the user confirmed they do have
+    plug-in solar, which is worth persisting separately from a plain dismissal:
+    it tells us (and any future feature) that this system's house-load figures
+    are known to exclude some generation."""
+    global PLUGIN_SOLAR_NOTIFIED, PLUGIN_SOLAR_DECLARED
+    data = request.get_json(silent=True) or {}
+    PLUGIN_SOLAR_NOTIFIED = True
+    if data.get("declared"):
+        PLUGIN_SOLAR_DECLARED = True
+    try:
+        cfg = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+        cfg.read(_CONFIG_PATH)
+        if not cfg.has_section("plugin_solar"):
+            cfg.add_section("plugin_solar")
+        cfg.set("plugin_solar", "notified", "yes")
+        cfg.set("plugin_solar", "declared", "yes" if PLUGIN_SOLAR_DECLARED else "no")
+        with open(_CONFIG_PATH, "w") as f:
+            cfg.write(f)
+    except Exception as exc:
+        log.warning("Could not persist plug-in solar acknowledgement: %s", exc)
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    _log_event("info", "Plug-in solar hint acknowledged"
+                       + (" (user confirmed they have one)" if PLUGIN_SOLAR_DECLARED else ""))
+    return jsonify({"ok": True, "declared": PLUGIN_SOLAR_DECLARED})
+
+
 @app.route("/api/weather")
 def api_weather():
     with _lock:
@@ -5308,19 +5550,35 @@ def api_history():
         )
     """
 
-    daily_cte = f"WITH daily AS ({last_per_day})"
+    # `p` is the plug-in (EcoFlow) energy for the day, 0 before it was installed.
+    # It is kept as its own column all the way through so the UI can show the
+    # split, while solar/home totals below add it in -- the inverter genuinely
+    # cannot see this generation, so leaving it out understates both.
+    #
+    # LEFT JOIN, deliberately, NOT a correlated subquery. Measured on the real
+    # 800k-row production database: a correlated subquery re-runs plugin_daily
+    # per row and took the year view from 1.4s to 30.7s. The join materialises it
+    # once and costs 0.24s over the pre-plug-in baseline.
+    daily_cte = f"""WITH {_PLUGIN_DAILY_CTE},
+        base AS ({last_per_day}),
+        daily AS (
+            SELECT base.*, COALESCE(pd.plugin_kwh, 0) AS p
+            FROM base LEFT JOIN plugin_daily pd ON pd.day = base.day
+        )"""
 
     if period == "week":
         # Monday of the week: subtract (weekday+6)%7 days so Mon=0 offset
         monday_expr = "date(day, '-' || CAST((strftime('%w', day) + 6) % 7 AS INTEGER) || ' days')"
         sql = daily_cte + f"""
             SELECT {monday_expr}     AS period,
-                ROUND(SUM(s),   2) AS solar_kwh,
+                ROUND(SUM(s) + SUM(p), 2) AS solar_kwh,
+                ROUND(SUM(s),   2) AS inverter_solar_kwh,
+                ROUND(SUM(p),   2) AS plugin_kwh,
                 ROUND(SUM(gi),  2) AS grid_in_kwh,
                 ROUND(SUM(go_), 2) AS grid_out_kwh,
                 ROUND(SUM(bc),  2) AS bat_chg_kwh,
                 ROUND(SUM(bd),  2) AS bat_dis_kwh,
-                ROUND(MAX(0, SUM(s) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
+                ROUND(MAX(0, SUM(s) + SUM(p) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
             FROM daily
             GROUP BY {monday_expr}
             ORDER BY 1 DESC
@@ -5328,26 +5586,31 @@ def api_history():
         """
     elif period == "day":
         sql = f"""
+            {daily_cte}
             SELECT day AS period,
-                ROUND(s,   2) AS solar_kwh,
+                ROUND(s + p, 2) AS solar_kwh,
+                ROUND(s,   2) AS inverter_solar_kwh,
+                ROUND(p,   2) AS plugin_kwh,
                 ROUND(gi,  2) AS grid_in_kwh,
                 ROUND(go_, 2) AS grid_out_kwh,
                 ROUND(bc,  2) AS bat_chg_kwh,
                 ROUND(bd,  2) AS bat_dis_kwh,
-                ROUND(MAX(0, s + gi + bd - go_ - bc), 2) AS home_kwh
-            FROM ({last_per_day})
+                ROUND(MAX(0, s + p + gi + bd - go_ - bc), 2) AS home_kwh
+            FROM daily
             ORDER BY day DESC
             LIMIT 1 OFFSET {offset}
         """
     elif period == "month":
         sql = daily_cte + f"""
             SELECT strftime('%Y-%m', day)   AS period,
-                ROUND(SUM(s),   2) AS solar_kwh,
+                ROUND(SUM(s) + SUM(p), 2) AS solar_kwh,
+                ROUND(SUM(s),   2) AS inverter_solar_kwh,
+                ROUND(SUM(p),   2) AS plugin_kwh,
                 ROUND(SUM(gi),  2) AS grid_in_kwh,
                 ROUND(SUM(go_), 2) AS grid_out_kwh,
                 ROUND(SUM(bc),  2) AS bat_chg_kwh,
                 ROUND(SUM(bd),  2) AS bat_dis_kwh,
-                ROUND(MAX(0, SUM(s) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
+                ROUND(MAX(0, SUM(s) + SUM(p) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
             FROM daily
             GROUP BY strftime('%Y-%m', day)
             ORDER BY 1 DESC
@@ -5356,12 +5619,14 @@ def api_history():
     else:  # year
         sql = daily_cte + f"""
             SELECT strftime('%Y', day)      AS period,
-                ROUND(SUM(s),   2) AS solar_kwh,
+                ROUND(SUM(s) + SUM(p), 2) AS solar_kwh,
+                ROUND(SUM(s),   2) AS inverter_solar_kwh,
+                ROUND(SUM(p),   2) AS plugin_kwh,
                 ROUND(SUM(gi),  2) AS grid_in_kwh,
                 ROUND(SUM(go_), 2) AS grid_out_kwh,
                 ROUND(SUM(bc),  2) AS bat_chg_kwh,
                 ROUND(SUM(bd),  2) AS bat_dis_kwh,
-                ROUND(MAX(0, SUM(s) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
+                ROUND(MAX(0, SUM(s) + SUM(p) + SUM(gi) + SUM(bd) - SUM(go_) - SUM(bc)), 2) AS home_kwh
             FROM daily
             GROUP BY strftime('%Y', day)
             ORDER BY 1 DESC
@@ -5507,6 +5772,513 @@ _YR_CONSUMPTION_WEIGHTS_RAW = [10.0, 9.2, 8.5, 7.7, 7.2, 6.5, 6.3, 6.5, 7.2, 8.1
 _YR_SOLAR_WEIGHTS       = [w / sum(_YR_SOLAR_WEIGHTS_RAW)       for w in _YR_SOLAR_WEIGHTS_RAW]
 _YR_CONSUMPTION_WEIGHTS = [w / sum(_YR_CONSUMPTION_WEIGHTS_RAW) for w in _YR_CONSUMPTION_WEIGHTS_RAW]
 _YR_MIN_DATA_DAYS = 14   # don't project off less than this -- too noisy to be worth showing
+
+
+# ── Plug-in solar detection ──────────────────────────────────────────────────
+# Derived house load = solar + grid(+import/-export) + battery(+discharge/-charge).
+# On a correctly-metered house that can never be negative: the inverter's own
+# books always balance. If it IS persistently negative, something is generating
+# on the house circuits that the inverter cannot see -- almost always a plug-in
+# solar kit (UK-legal since 27 Aug 2026, <=800VA, socket-connected, no CT).
+#
+# Thresholds below are set from 30 days of real data on a system with NO plug-in
+# solar (Andi's, Aug 2026). Two findings drove the design:
+#   1. INSTANTANEOUS samples are useless -- 2% of them come out negative (worst
+#      -2991W) purely from the solar/grid/battery registers not being sampled in
+#      lockstep during transients (cloud edges, battery mode switches).
+#   2. Bucketing into 15 minutes and taking the MEDIAN cancels that completely:
+#      over the same 30 days the lowest bucket was +177W, nowhere near zero.
+# Median, not mean, on purpose. A mean is only safe when buckets hold enough
+# samples to dilute an outlier -- true at the default 10s poll (~90/bucket) but
+# not at poll_interval=120s (~7/bucket), where one -3000W transient drags the
+# mean below the threshold on its own. The median does not care how few samples
+# there are, so the detector stays honest across every supported poll interval.
+# Then require a sustained pattern across several days. A -100W threshold sits
+# ~280W below the observed floor, so a false positive needs a fault, not just a
+# quiet house.
+_PLUGIN_BUCKET_SECS    = 900    # 15 minutes
+_PLUGIN_MIN_SAMPLES    = 5      # ignore thin buckets (restarts, poll gaps)
+_PLUGIN_THRESHOLD_W    = -100   # bucket mean below this = unexplained generation
+_PLUGIN_MIN_BUCKETS    = 6      # ~1.5 h total across the window
+_PLUGIN_MIN_DAYS       = 3      # ...spread over at least this many days
+_PLUGIN_WINDOW_DAYS    = 14
+_PLUGIN_TTL            = 6 * 3600   # re-check a few times a day, not per request
+_plugin_cache: tuple = (None, 0.0)
+
+
+def _detect_plugin_solar() -> dict:
+    """Look for generation on the house circuits that the inverter can't see.
+
+    Returns {"detected": bool, ...evidence}. Never raises -- detection is a
+    nice-to-have, so any failure degrades to "not detected"."""
+    global _plugin_cache
+    cached, fetched = _plugin_cache
+    if cached is not None and (time.time() - fetched) < _PLUGIN_TTL:
+        return cached
+
+    result = {"detected": False, "buckets": 0, "days": 0, "lowest_w": None}
+    try:
+        cutoff = int(time.time()) - _PLUGIN_WINDOW_DAYS * 86400
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT ts, solar_w, battery_w, battery_charging, battery_discharging, "
+                "       grid_w, grid_importing, grid_exporting "
+                "FROM snapshots WHERE ts > ? ORDER BY ts", (cutoff,)).fetchall()
+
+        buckets: dict = {}
+        for r in rows:
+            grid = (r["grid_w"] or 0) * (1 if r["grid_importing"] else -1 if r["grid_exporting"] else 0)
+            batt = (r["battery_w"] or 0) * (1 if r["battery_discharging"] else -1 if r["battery_charging"] else 0)
+            derived = (r["solar_w"] or 0) + grid + batt
+            buckets.setdefault(r["ts"] // _PLUGIN_BUCKET_SECS, []).append(derived)
+
+        flagged_days = set()
+        flagged = 0
+        lowest = None
+        for slot, vals in buckets.items():
+            if len(vals) < _PLUGIN_MIN_SAMPLES:
+                continue
+            vals.sort()
+            mid = len(vals) // 2
+            median = vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
+            if lowest is None or median < lowest:
+                lowest = median
+            if median < _PLUGIN_THRESHOLD_W:
+                flagged += 1
+                flagged_days.add(datetime.fromtimestamp(slot * _PLUGIN_BUCKET_SECS).date())
+
+        result = {
+            "detected": flagged >= _PLUGIN_MIN_BUCKETS and len(flagged_days) >= _PLUGIN_MIN_DAYS,
+            "buckets":  flagged,
+            "days":     len(flagged_days),
+            "lowest_w": round(lowest) if lowest is not None else None,
+        }
+        if result["detected"]:
+            log.info("Plug-in solar signature detected: %d buckets over %d days, lowest %sW",
+                     flagged, len(flagged_days), result["lowest_w"])
+    except Exception as exc:
+        log.debug("Plug-in solar detection skipped: %s", exc)
+
+    _plugin_cache = (result, time.time())
+    return result
+
+
+def _plugin_solar_hint() -> dict:
+    """What the front end needs: whether to show the one-time hint at all."""
+    # If the EcoFlow integration is on we are MEASURING the plug-in solar, so
+    # asking the user whether they have any would be absurd.
+    if ECOFLOW_ENABLED or PLUGIN_SOLAR_DECLARED or PLUGIN_SOLAR_NOTIFIED:
+        return {"show": False, "declared": PLUGIN_SOLAR_DECLARED or ECOFLOW_ENABLED}
+    d = _detect_plugin_solar()
+    return {"show": bool(d["detected"]), "declared": False,
+            "lowest_w": d.get("lowest_w"), "days": d.get("days")}
+
+
+# ── EcoFlow STREAM integration ───────────────────────────────────────────────
+# Reads the AC watts an EcoFlow STREAM plug-in solar system feeds into the
+# house, so house load and solar totals can be corrected for generation the
+# GivEnergy inverter physically cannot see (the STREAM sits downstream of the
+# grid CT).
+#
+# Findings from probing real hardware (BK01 serial, Sep 2026) -- several of
+# these contradict EcoFlow's own published docs, so do not "fix" them back:
+#
+#  1. SIGNATURE EXCLUDES THE QUERY PARAMS. The docs say params are sorted and
+#     prepended before accessKey/nonce/timestamp. Doing that returns 8521
+#     "signature is wrong" on every endpoint. Signing only accessKey, nonce and
+#     timestamp works. This is not a false positive: a bogus serial returns
+#     8512 "no permission", so the server does read and authorise the serial.
+#  2. HTTP /device/quota/all RETURNS NOTHING for this hardware -- code 0 with no
+#     `data` key at all, even using the confirmed main-device serial. MQTT is
+#     the only route that yields live figures.
+#  3. THE FIELD IS `gridConnectionPower`, in REAL WATTS as a float. It is NOT
+#     `invOutputWatts` (that is the older PowerStream) and it is NOT in
+#     deci-watts (that is also the older PowerStream).
+#  4. POSITIVE MEANS FEEDING THE HOUSE. The docs state the opposite ("input
+#     power is positive, feed-in power is negative"). Measured against the
+#     device's own PV input: powGetPv 21.826 + powGetPv2 21.073 = 42.90 W in,
+#     gridConnectionPower = +42.9 W out. Getting this backwards would double
+#     the error instead of removing it, so it is checked, not assumed.
+#     A negative value has never been observed; we clamp those to zero for the
+#     correction and log them, rather than guessing what they mean.
+#  5. MESSAGES ARE DELTAS, NOT SNAPSHOTS. The device reports its own cadence:
+#     incremental every 2 s, full state every 120 s. Each message carries only
+#     what changed, so state must be merged and carried forward.
+#  6. THE DEVICE GOES OFFLINE OVERNIGHT and does not return until the panels
+#     make roughly 11 W. That is normal, not a fault -- it must never be
+#     reported as an error, and it is why unknown is stored as NULL.
+_EF_BASE          = "https://api-e.ecoflow.com"
+_EF_LIST_PATH     = "/iot-open/sign/device/list"
+_EF_CERT_PATH     = "/iot-open/sign/certification"
+_EF_FIELD_AC      = "gridConnectionPower"   # AC watts into the house (+ve)
+_EF_FIELD_PV1     = "powGetPv"
+_EF_FIELD_PV2     = "powGetPv2"
+# SILENCE IS NOT STALENESS. This is a delta protocol: the device only sends a
+# field when it CHANGES, so no news really does mean no change. Measured on real
+# hardware 21 Sep 2026 -- with output steady, more than 170 s passed with no
+# message at all while the device was demonstrably online and generating 167 W.
+# An earlier version keyed validity off "when did gridConnectionPower last
+# arrive", which made a perfectly healthy device read as offline for 40% of
+# samples, once for 50 minutes straight.
+#
+# Validity is therefore: the MQTT link is up, the device has not declared itself
+# offline, and we have received a value. The last value is carried forward,
+# because that IS the current value until the device says otherwise.
+#
+# _EF_SILENCE_SECS is only a backstop for a device that vanishes WITHOUT sending
+# status=0 (e.g. loses wifi mid-afternoon). It must stay comfortably above the
+# device's own full-upload period (runtimePropertyFullUploadPeriod = 300 s) so
+# that steady output never trips it.
+_EF_SILENCE_SECS  = 900     # no quota traffic at all for this long => unknown
+_EF_KEEPALIVE     = 60      # MQTT keepalive; we PINGREQ at half this
+_EF_LINK_DEAD     = 150     # no packet at all (PINGRESP included) => reconnect
+_EF_MAX_BACKOFF   = 300
+
+_ef_lock          = threading.Lock()
+_ef_state: dict   = {}       # merged quota fields, newest value wins
+_ef_last_ac       = 0.0      # last time the AC power value itself arrived
+_ef_last_msg      = 0.0      # last quota message of ANY kind (device is talking)
+_ef_online        = False    # device's own /status topic
+_ef_status        = "disabled"   # disabled|connecting|online|offline|error: …
+_ef_serial        = ""       # resolved serial (configured or discovered)
+
+
+def _ef_sign_headers():
+    """Signed headers for the EcoFlow REST API.
+
+    Deliberately signs ONLY accessKey/nonce/timestamp -- see finding 1 above.
+    Query parameters are sent but NOT signed."""
+    nonce = str(secrets.randbelow(900000) + 100000)
+    ts    = str(int(time.time() * 1000))
+    plain = f"accessKey={ECOFLOW_ACCESS_KEY}&nonce={nonce}&timestamp={ts}"
+    sign  = hmac.new(ECOFLOW_SECRET_KEY.encode(), plain.encode(), hashlib.sha256).hexdigest()
+    return {"accessKey": ECOFLOW_ACCESS_KEY, "nonce": nonce, "timestamp": ts,
+            "sign": sign, "Content-Type": "application/json"}
+
+
+def _ef_get(path, params=None):
+    """GET an EcoFlow REST endpoint. Raises on transport or API-level error."""
+    if not ECOFLOW_ACCESS_KEY or not ECOFLOW_SECRET_KEY:
+        raise RuntimeError("EcoFlow access key / secret key not set")
+    url = _EF_BASE + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    req = urllib.request.Request(url, headers=_ef_sign_headers(), method="GET")
+    with urllib.request.urlopen(req, timeout=20) as r:
+        body = json.loads(r.read().decode())
+    # EcoFlow signals logical errors in the body, not the HTTP status.
+    if str(body.get("code")) not in ("0", "None"):
+        raise RuntimeError(f"EcoFlow API {body.get('code')}: {body.get('message')}")
+    return body
+
+
+def _ef_discover_serial() -> str:
+    """Return the configured serial, or the first device on the account."""
+    if ECOFLOW_SERIAL:
+        return ECOFLOW_SERIAL
+    devices = _ef_get(_EF_LIST_PATH).get("data") or []
+    if not devices:
+        raise RuntimeError("No devices on this EcoFlow account")
+    sn = devices[0].get("sn", "")
+    if not sn:
+        raise RuntimeError("EcoFlow device list returned no serial")
+    log.info("EcoFlow: discovered device %s (%s)", sn, devices[0].get("deviceName") or "unnamed")
+    return sn
+
+
+# ── Minimal MQTT 3.1.1 subscriber (stdlib only) ──────────────────────────────
+# Deliberately hand-rolled rather than adding paho-mqtt: the app ships with a
+# very small dependency list (and the Docker image ships without the modbus
+# library at all), and a read-only subscriber needs only CONNECT, SUBSCRIBE,
+# PINGREQ and PUBLISH parsing. Same reasoning as the hand-rolled Modbus frames.
+
+def _mqtt_rl_encode(n: int) -> bytes:
+    """MQTT 'remaining length' variable byte integer."""
+    out = b""
+    while True:
+        digit = n % 128
+        n //= 128
+        out += bytes([digit | (0x80 if n else 0)])
+        if not n:
+            return out
+
+
+def _mqtt_str(value) -> bytes:
+    """MQTT length-prefixed UTF-8 string."""
+    raw = value.encode() if isinstance(value, str) else value
+    return struct.pack(">H", len(raw)) + raw
+
+
+def _mqtt_read_packet(sock):
+    """Read one MQTT packet. Returns (packet_type_byte, body) or (None, None)."""
+    head = sock.recv(1)
+    if not head:
+        return None, None
+    mult, length = 1, 0
+    while True:
+        b = sock.recv(1)
+        if not b:
+            return None, None
+        length += (b[0] & 127) * mult
+        if not (b[0] & 0x80):
+            break
+        mult *= 128
+        if mult > 128 ** 4:
+            raise RuntimeError("malformed MQTT remaining length")
+    body = b""
+    while len(body) < length:
+        chunk = sock.recv(length - len(body))
+        if not chunk:
+            raise RuntimeError("MQTT connection closed mid-packet")
+        body += chunk
+    return head[0], body
+
+
+def _ef_apply_quota(payload: dict):
+    """Merge one delta message into the running state (finding 5).
+
+    Any quota message proves the device is talking, so it refreshes the liveness
+    clock. The AC-value clock is tracked separately for display only -- it must
+    NOT gate validity, because a steady output legitimately produces no updates
+    for minutes at a time."""
+    global _ef_last_ac, _ef_last_msg
+    with _ef_lock:
+        _ef_state.update(payload)
+        _ef_last_msg = time.time()
+        if _EF_FIELD_AC in payload:
+            _ef_last_ac = _ef_last_msg
+
+
+def _ef_mqtt_session():
+    """One connect-subscribe-read cycle. Returns when the connection drops."""
+    global _ef_online, _ef_status, _ef_serial, _ef_last_ac, _ef_last_msg
+
+    _ef_serial = _ef_discover_serial()
+    cert = _ef_get(_EF_CERT_PATH).get("data") or {}
+    account = cert.get("certificateAccount")
+    password = cert.get("certificatePassword")
+    host, port = cert.get("url"), int(cert.get("port") or 8883)
+    if not all([account, password, host]):
+        raise RuntimeError("EcoFlow certification response incomplete")
+
+    ctx = ssl.create_default_context()
+    raw = socket.create_connection((host, port), timeout=20)
+    sock = ctx.wrap_socket(raw, server_hostname=host)
+    try:
+        client_id = "acbc_" + secrets.token_hex(8)
+        var_header = _mqtt_str("MQTT") + bytes([0x04, 0xC2]) + struct.pack(">H", _EF_KEEPALIVE)
+        payload = _mqtt_str(client_id) + _mqtt_str(account) + _mqtt_str(password)
+        sock.sendall(bytes([0x10]) + _mqtt_rl_encode(len(var_header + payload)) + var_header + payload)
+
+        ptype, body = _mqtt_read_packet(sock)
+        if ptype != 0x20 or len(body) < 2 or body[1] != 0:
+            raise RuntimeError(f"MQTT CONNACK refused (type={ptype}, body={body!r})")
+
+        topic_quota  = f"/open/{account}/{_ef_serial}/quota"
+        topic_status = f"/open/{account}/{_ef_serial}/status"
+        sub = (struct.pack(">H", 1)
+               + _mqtt_str(topic_quota)  + bytes([0])
+               + _mqtt_str(topic_status) + bytes([0]))
+        sock.sendall(bytes([0x82]) + _mqtt_rl_encode(len(sub)) + sub)
+        ptype, body = _mqtt_read_packet(sock)
+        if ptype != 0x90:
+            raise RuntimeError("MQTT SUBACK not received")
+
+        _ef_status = "connected"
+        log.info("EcoFlow: subscribed to %s", _ef_serial)
+
+        sock.settimeout(10)
+        last_ping = last_packet = time.time()
+        while ECOFLOW_ENABLED:
+            # Keepalive. The device is silent for hours overnight (finding 6) and
+            # for minutes at a time whenever output is steady, so without this the
+            # broker would drop us.
+            if time.time() - last_ping > _EF_KEEPALIVE / 2:
+                sock.sendall(bytes([0xC0, 0x00]))
+                last_ping = time.time()
+            # A wedged connection does not always close the socket. PINGRESP is
+            # the only proof the broker is still there, so an unanswered ping
+            # window means reconnect rather than sit here believing we are fine.
+            if time.time() - last_packet > _EF_LINK_DEAD:
+                raise RuntimeError("MQTT link silent (no PINGRESP) - reconnecting")
+            try:
+                ptype, body = _mqtt_read_packet(sock)
+            except socket.timeout:
+                continue
+            if ptype is None:
+                raise RuntimeError("MQTT connection closed by broker")
+            last_packet = time.time()
+            if (ptype & 0xF0) != 0x30:
+                continue                      # PINGRESP / SUBACK / anything else
+            tlen  = struct.unpack(">H", body[:2])[0]
+            topic = body[2:2 + tlen].decode(errors="replace")
+            try:
+                msg = json.loads(body[2 + tlen:].decode())
+            except Exception:
+                continue
+            if topic.endswith("/status"):
+                online = bool((msg.get("params") or {}).get("status"))
+                if online != _ef_online:
+                    log.info("EcoFlow: device reported %s",
+                             "online" if online else "offline (normal overnight)")
+                _ef_online = online
+                if not online:
+                    # The device has explicitly said it is gone (overnight, or
+                    # lost wifi). Drop the clocks so the last daytime figure is
+                    # not carried forward into the dark.
+                    _ef_last_msg = 0.0
+                    _ef_last_ac  = 0.0
+            elif isinstance(msg, dict):
+                _ef_apply_quota(msg)
+                _ef_online = True
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _ef_loop():
+    """Supervisor: keeps an MQTT session alive while the integration is on."""
+    global _ef_status, _ef_online
+    backoff = 5
+    while True:
+        if not ECOFLOW_ENABLED:
+            _ef_status = "disabled"
+            time.sleep(10)
+            continue
+        try:
+            _ef_status = "connecting"
+            _ef_mqtt_session()
+            backoff = 5                       # clean exit (integration switched off)
+        except Exception as exc:
+            _ef_online = False
+            _ef_status = f"error: {exc}"
+            log.warning("EcoFlow: %s (retry in %ds)", exc, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, _EF_MAX_BACKOFF)
+
+
+def _ef_power_w():
+    """AC watts the STREAM is feeding into the house right now.
+
+    Returns None when the figure is unknown -- integration off, never connected,
+    device offline, or the reading has gone stale. None is deliberately NOT zero:
+    'we do not know' and 'it is generating nothing' are different claims, and
+    only None is honest when the device has dropped off in daylight. Overnight
+    the two happen to coincide, which is why NULL costs us nothing there."""
+    if not ECOFLOW_ENABLED:
+        return None
+    with _ef_lock:
+        value = _ef_state.get(_EF_FIELD_AC)
+        # Liveness, not freshness-of-this-field. See the _EF_SILENCE_SECS note.
+        alive = _ef_last_msg and (time.time() - _ef_last_msg) < _EF_SILENCE_SECS
+    if value is None or not alive or not _ef_online:
+        return None
+    try:
+        watts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if watts < 0:
+        # Never seen in testing (finding 4). Log it rather than silently
+        # subtracting from house load on a guess about what it means.
+        log.info("EcoFlow: negative %s (%.1f W) -- treating as zero", _EF_FIELD_AC, watts)
+        return 0.0
+    return watts
+
+
+def _ef_snapshot() -> dict:
+    """Everything the UI needs about the EcoFlow, in one place."""
+    watts = _ef_power_w()
+    with _ef_lock:
+        pv1 = _ef_state.get(_EF_FIELD_PV1)
+        pv2 = _ef_state.get(_EF_FIELD_PV2)
+        now = time.time()
+        ac_age  = int(now - _ef_last_ac)  if _ef_last_ac  else None
+        msg_age = int(now - _ef_last_msg) if _ef_last_msg else None
+    return {
+        "enabled":    ECOFLOW_ENABLED,
+        "configured": bool(ECOFLOW_ACCESS_KEY and ECOFLOW_SECRET_KEY),
+        "online":     bool(_ef_online),
+        "status":     _ef_status,
+        "serial":     _ef_serial,
+        "power_w":    round(watts) if watts is not None else None,
+        "pv1_w":      round(float(pv1), 1) if isinstance(pv1, (int, float)) else None,
+        "pv2_w":      round(float(pv2), 1) if isinstance(pv2, (int, float)) else None,
+        # Two separate clocks, and the distinction matters: value_age can be
+        # minutes old on a perfectly healthy device that simply has nothing new
+        # to report. Only msg_age says anything about liveness.
+        "value_age_secs": ac_age,
+        "msg_age_secs":   msg_age,
+        "age_secs":       ac_age,   # retained for the existing UI field
+    }
+
+
+_EF_KWH_MAX_GAP = 120     # seconds; ignore longer gaps rather than inflating them
+_ef_kwh_cache: dict = {}  # day -> (kwh, fetched_at)
+_EF_KWH_TTL     = 60
+
+
+def _plugin_kwh_for_day(day: str) -> float:
+    """Integrate the recorded plugin_w column over one local calendar day.
+
+    Derived from stored samples rather than a running accumulator so it is
+    self-healing: a restart, a backfill or a corrected row all just work.
+    NULL rows (device offline) contribute nothing, which is right -- overnight
+    the true output really is zero."""
+    cached = _ef_kwh_cache.get(day)
+    if cached and (time.time() - cached[1]) < _EF_KWH_TTL:
+        return cached[0]
+    total = 0.0
+    try:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT ts, plugin_w FROM snapshots "
+                "WHERE date(ts,'unixepoch','localtime') = ? AND plugin_w IS NOT NULL "
+                "ORDER BY ts", (day,)).fetchall()
+        prev_ts = None
+        for r in rows:
+            if prev_ts is not None:
+                gap = r["ts"] - prev_ts
+                if 0 < gap <= _EF_KWH_MAX_GAP:
+                    total += (r["plugin_w"] or 0) * gap / 3600.0 / 1000.0
+            prev_ts = r["ts"]
+    except Exception as exc:
+        log.debug("Plug-in kWh for %s failed: %s", day, exc)
+        return 0.0
+    _ef_kwh_cache[day] = (total, time.time())
+    return total
+
+
+def _plugin_kwh_today() -> float:
+    return _plugin_kwh_for_day(datetime.now().strftime("%Y-%m-%d"))
+
+
+# Per-day plug-in energy, integrated in SQL so history and Year in Review can
+# join it without a query per day. Same rule as _plugin_kwh_for_day: power x
+# elapsed time between consecutive samples, ignoring gaps longer than
+# _EF_KWH_MAX_GAP so a restart or an overnight NULL run cannot invent energy.
+#
+# LAG runs across the whole ordered set before the day grouping, so the first
+# sample of each day takes its gap from the previous day's last sample. That gap
+# is the overnight shutdown, which is far longer than the cap and therefore
+# discarded -- the filter is self-correcting rather than needing a special case.
+#
+# Days before the EcoFlow was installed have no plugin_w rows at all, so they
+# contribute 0 and historical totals are completely unchanged. That is what makes
+# it safe to apply this to Year in Review as well.
+_PLUGIN_DAILY_CTE = f"""
+    plugin_daily AS (
+        SELECT day, ROUND(SUM(w * gap) / 3600000.0, 3) AS plugin_kwh
+        FROM (
+            SELECT date(ts,'unixepoch','localtime') AS day,
+                   plugin_w AS w,
+                   ts - LAG(ts) OVER (ORDER BY ts) AS gap
+            FROM snapshots
+            WHERE plugin_w IS NOT NULL
+        )
+        WHERE gap > 0 AND gap <= {_EF_KWH_MAX_GAP}
+        GROUP BY day
+    )
+"""
 
 
 def _days_in_month(year: int, month: int) -> int:
@@ -5707,16 +6479,27 @@ def _year_review_data(year: int) -> dict:
         # may use today's partial (still-accumulating) totals: "record high"
         # tiles count today, "lowest day" tiles exclude it so a part-day doesn't
         # masquerade as the minimum.
+        # `p` is plug-in (EcoFlow) energy for the day. Days before it was
+        # installed have no plugin_w rows, so they contribute 0 and every past
+        # year is bit-for-bit unchanged -- which is what makes this safe to apply
+        # here rather than only going forward.
+        # LEFT JOIN rather than a correlated subquery -- see the note in
+        # api_history; the subquery form cost 30s on the production database.
         daily_rows = list(conn.execute(
-            "SELECT date(ts,'unixepoch','localtime') AS day, "
-            "       solar_today AS s, grid_in_today AS gi, grid_out_today AS go_, "
-            "       bat_chg_today AS bc, bat_dis_today AS bd "
-            "FROM snapshots "
-            "WHERE ts IN ("
-            "    SELECT MAX(ts) FROM snapshots "
-            "    GROUP BY date(ts,'unixepoch','localtime')"
-            ") AND strftime('%Y', date(ts,'unixepoch','localtime')) = ? "
-            "ORDER BY day",
+            f"WITH {_PLUGIN_DAILY_CTE}, "
+            "base AS ("
+            "  SELECT date(ts,'unixepoch','localtime') AS day, "
+            "         solar_today AS s, grid_in_today AS gi, grid_out_today AS go_, "
+            "         bat_chg_today AS bc, bat_dis_today AS bd "
+            "  FROM snapshots "
+            "  WHERE ts IN ("
+            "      SELECT MAX(ts) FROM snapshots "
+            "      GROUP BY date(ts,'unixepoch','localtime')"
+            "  ) AND strftime('%Y', date(ts,'unixepoch','localtime')) = ?"
+            ") "
+            "SELECT base.*, COALESCE(pd.plugin_kwh, 0) AS p "
+            "FROM base LEFT JOIN plugin_daily pd ON pd.day = base.day "
+            "ORDER BY base.day",
             (year_str,)
         ))
         cost_rows = list(conn.execute(
@@ -5738,7 +6521,8 @@ def _year_review_data(year: int) -> dict:
     def _home(r):
         s  = r["s"]  or 0; gi = r["gi"] or 0; go = r["go_"] or 0
         bc = r["bc"] or 0; bd = r["bd"] or 0
-        return max(0.0, s + gi + bd - go - bc)
+        p  = r["p"]  or 0          # plug-in solar the inverter cannot see
+        return max(0.0, s + p + gi + bd - go - bc)
 
     def _pick(pairs, top):
         if not pairs:
@@ -5758,8 +6542,12 @@ def _year_review_data(year: int) -> dict:
     _all  = _rows(True)
     _past = _rows(False)
 
-    solar_best  = [(r["day"], r["s"]  ) for r in _all  if (r["s"]  or 0) > 0.1]
-    solar_worst = [(r["day"], r["s"]  ) for r in _past if (r["s"]  or 0) > 0.1]
+    # Best/worst solar days and the annual total count ALL generation, plug-in
+    # included -- a day is not a worse solar day because some of the sun landed
+    # on panels the inverter cannot meter.
+    def _solar(r): return (r["s"] or 0) + (r["p"] or 0)
+    solar_best  = [(r["day"], _solar(r)) for r in _all  if _solar(r) > 0.1]
+    solar_worst = [(r["day"], _solar(r)) for r in _past if _solar(r) > 0.1]
     import_days = [(r["day"], r["gi"] ) for r in _all  if (r["gi"] or 0) > 0.1]
     export_days = [(r["day"], r["go_"]) for r in _all  if (r["go_"]or 0) > 0.1]
     home_high   = [(r["day"], _home(r)) for r in _all  if _home(r)      > 0.1]
@@ -5767,7 +6555,7 @@ def _year_review_data(year: int) -> dict:
 
     # Carbon offset: total solar generated this year (today included) displaces
     # grid electricity, giving CO2 avoided and its tree / car-mile equivalents.
-    total_solar = sum((r["s"] or 0) for r in daily_rows)
+    total_solar = sum(_solar(r) for r in daily_rows)
     co2_kg      = total_solar * _CO2_KG_PER_KWH
 
     projection = _project_year_totals(year, daily_rows, total_solar, _home)
@@ -5828,14 +6616,16 @@ def api_power():
                 ROUND(AVG(CASE WHEN grid_importing = 1
                                THEN -CAST(grid_w AS REAL)
                                ELSE  CAST(grid_w AS REAL) END))        AS grid_w,
-                ROUND(AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END)) AS soc
+                ROUND(AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END)) AS soc,
+                ROUND(AVG(plugin_w))                                    AS plugin_w
             FROM snapshots
             WHERE date(ts, 'unixepoch', 'localtime') = ?
             GROUP BY ts / 60
             ORDER BY t
         """, (day,)).fetchall()
 
-    return jsonify({"ok": True, "day": day, "points": [dict(r) for r in rows]})
+    return jsonify({"ok": True, "day": day, "points": [dict(r) for r in rows],
+                    "plugin_kwh": round(_plugin_kwh_for_day(day), 2)})
 
 @app.route("/healthz")
 def healthz():
@@ -5905,6 +6695,13 @@ if __name__ == "__main__":
 
     # Auto-tariff rate fetcher — startup check + daily 16:30 / 20:00 cron.
     threading.Thread(target=_rate_fetch_loop, daemon=True).start()
+
+    # EcoFlow STREAM MQTT subscriber — inert until the integration is enabled.
+    threading.Thread(target=_ef_loop, daemon=True).start()
+
+    # Battery capacity: detect once after the inverter settles, and flag a stale
+    # hand-entered override rather than letting it quietly skew predictive charge.
+    threading.Thread(target=_battery_capacity_startup_check, daemon=True).start()
 
     # Delayed first update check — runs 30s after startup so the inverter
     # connection settles before we make an outbound request.

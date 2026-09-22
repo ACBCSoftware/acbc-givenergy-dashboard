@@ -73,6 +73,20 @@ html,body{
 #update-bar a:hover{text-decoration:underline}
 #update-dismiss{margin-left:auto;background:none;border:none;color:#fff;font-size:1rem;cursor:pointer;opacity:.7;padding:0 2px}
 
+#plugin-bar{
+  display:none;flex-shrink:0;
+  background:#0369a1;color:#fff;
+  font-size:.78rem;padding:7px 12px;
+  align-items:center;gap:8px;
+}
+#plugin-bar a{color:#bae6fd;font-weight:600;text-decoration:underline;cursor:pointer}
+#plugin-yes{
+  margin-left:auto;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.35);
+  border-radius:6px;color:#fff;font-size:.72rem;cursor:pointer;padding:3px 8px;white-space:nowrap;
+}
+#plugin-yes:hover{background:rgba(255,255,255,.25)}
+#plugin-dismiss{background:none;border:none;color:#fff;font-size:1rem;cursor:pointer;opacity:.7;padding:0 2px}
+
 /* ── Settings panel ───────────────────────────── */
 #settings-panel{display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #sett-top-row{
@@ -540,6 +554,31 @@ input.tr-region-input{flex:0 0 44px;max-width:44px;text-align:center;text-transf
 #batt-modal{display:none;position:fixed;inset:0;z-index:200;
   background:rgba(6,13,28,.88);align-items:center;justify-content:center}
 #batt-modal.open{display:flex}
+#solar-modal{display:none;position:fixed;inset:0;z-index:200;
+  background:rgba(6,13,28,.88);align-items:center;justify-content:center}
+#solar-modal.open{display:flex}
+#sbd-box{background:var(--bg-top);border:1px solid var(--border);border-radius:18px;
+  width:min(420px,95vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
+#sbd-header{display:flex;align-items:center;padding:16px 18px 12px;
+  border-bottom:1px solid var(--border);flex-shrink:0}
+#sbd-header-title{flex:1;font-size:.9rem;font-weight:700;color:var(--text)}
+#sbd-close{background:none;border:none;color:var(--muted);font-size:1.2rem;
+  cursor:pointer;padding:0 2px;line-height:1}
+#sbd-body{overflow-y:auto;padding:14px 16px 18px;flex:1}
+.sbd-row{display:flex;align-items:baseline;justify-content:space-between;
+  padding:11px 12px;background:rgba(255,255,255,.04);border-radius:10px;margin-bottom:8px}
+.sbd-row.total{background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.4)}
+.sbd-name{font-size:.82rem;color:var(--text)}
+.sbd-sub{display:block;font-size:.7rem;color:var(--muted);margin-top:2px}
+.sbd-val{font-size:.95rem;font-weight:700;color:#f59e0b;white-space:nowrap}
+.sbd-val.muted{color:var(--muted);font-weight:600}
+.sbd-note{font-size:.72rem;color:var(--muted);line-height:1.5;margin-top:10px}
+/* .node sets pointer-events:none so the nodes never block the flow canvas.
+   The solar ring is the one exception when the EcoFlow integration is on, so
+   it has to opt back IN explicitly -- without this the ring can only be clicked
+   from script, never by a real pointer or touch.
+   touch-action keeps the PWA from adding the double-tap-to-zoom delay. */
+.node-ring.clickable{cursor:pointer;pointer-events:auto;touch-action:manipulation}
 #bdd-box{background:var(--bg-top);border:1px solid var(--border);border-radius:18px;
   width:min(420px,95vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden}
 #bdd-header{display:flex;align-items:center;padding:16px 18px 12px;
@@ -702,6 +741,14 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     &mdash; <span id="update-name" style="opacity:.85"></span>
     <a id="update-link" href="#" target="_blank" rel="noopener">Release notes &#8599;</a>
     <button id="update-dismiss" title="Dismiss">&#10005;</button>
+  </div>
+
+  <!-- Plug-in solar hint (hidden unless unmetered generation is detected) -->
+  <div id="plugin-bar">
+    <span>&#9728; Your readings suggest solar the inverter can't see - plug-in panels?
+      <a href="#" id="plugin-learn">What this means</a></span>
+    <button id="plugin-yes" title="Yes, I have plug-in solar">Yes, I have</button>
+    <button id="plugin-dismiss" title="Dismiss">&#10005;</button>
   </div>
 
   <!-- Header -->
@@ -870,6 +917,17 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     </div>
   </div>
 
+  <!-- Solar breakdown modal — only reachable when the EcoFlow integration is on -->
+  <div id="solar-modal">
+    <div id="sbd-box">
+      <div id="sbd-header">
+        <span id="sbd-header-title">&#9728; Solar Breakdown</span>
+        <button id="sbd-close">&#10005;</button>
+      </div>
+      <div id="sbd-body"><div class="bdd-spinner">Loading&hellip;</div></div>
+    </div>
+  </div>
+
   <!-- Control confirmation modal -->
   <div id="ctrl-confirm">
     <div id="cc-box">
@@ -1030,7 +1088,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <div class="sett-section">
         <div class="sett-heading">Predictive Charge</div>
         <div class="sett-hint">Uses tomorrow's solar forecast and your historical morning consumption to set the overnight charge target automatically. Enable on a charge rule via the "Use predictive target" toggle. Requires Solar Forecast to be configured above.</div>
-        <div class="sett-row"><label>Battery capacity (kWh)</label><input id="s-pred-kwh" type="number" min="0.1" step="0.1" placeholder="e.g. 9.5"></div>
+        <div class="sett-row"><label>Battery capacity (kWh)</label><input id="s-pred-kwh" type="number" min="0" step="0.1" placeholder="auto"></div>
+        <div class="sett-hint" id="s-pred-kwh-hint" style="margin-top:2px">Leave blank to read the capacity from your inverter. Only set a value to override it.</div>
         <div class="sett-row"><label>Pessimism factor</label><input id="s-pred-pessimism" type="number" min="0.1" max="1.0" step="0.01" placeholder="e.g. 0.85"></div>
         <div class="sett-hint" style="opacity:.7">Scales the forecast down -- Forecast.Solar tends to over-predict. 0.85 = use 85% of forecast kWh.</div>
         <div class="sett-row"><label>Fallback morning reserve (kWh)</label><input id="s-pred-reserve" type="number" min="0" step="0.1" placeholder="e.g. 3.0"></div>
@@ -1147,6 +1206,23 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <div class="sett-row"><label>Batteries</label><input id="s-batt" type="number" min="0" max="10"></div>
         <div class="sett-row"><label>Poll interval (sec)</label><input id="s-poll" type="number" min="5" max="300"></div>
       </div>
+
+      <div class="sett-section">
+        <div class="sett-heading">Plug-in Solar (EcoFlow STREAM)</div>
+        <div class="sett-hint">A plug-in solar system feeds in downstream of the inverter's grid CT, so the inverter cannot see it &mdash; its generation just makes the house look like it is using less. Turn this on to read the real figure from EcoFlow and add it back on to Home and Solar.</div>
+        <div class="sett-hint" style="margin-top:6px">This uses EcoFlow's cloud, so it needs an internet connection. Get an Access Key and Secret Key from <span style="color:var(--text)">developer-eu.ecoflow.com</span> using the same account your STREAM is registered to.</div>
+        <div class="sett-row"><label>Enable</label>
+          <label class="sw"><input id="s-ef-enabled" type="checkbox"><span class="track"></span></label>
+        </div>
+        <div class="sett-row"><label>Access key</label><input id="s-ef-ak" type="password" autocomplete="off" placeholder="leave blank to keep existing"></div>
+        <div class="sett-row"><label>Secret key</label><input id="s-ef-sk" type="password" autocomplete="off" placeholder="leave blank to keep existing"></div>
+        <div class="sett-row"><label>Device serial</label><input id="s-ef-sn" type="text" autocomplete="off" placeholder="blank = auto-detect"></div>
+        <div class="tr-fetch-row">
+          <button class="ctrl-btn ctrl-btn-sm" id="s-ef-test" onclick="ecoflowTest()">Test connection</button>
+          <span id="s-ef-status" class="tr-fetch-status"></span>
+        </div>
+      </div>
+
       <button class="sett-save-btn" id="sett-save-inverter">Save Settings</button>
       <div id="sett-msg-inverter" class="sett-msg"></div>
     </div>
@@ -1543,6 +1619,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <div id="power-series-row">
         <button class="sbtn active" data-ps="solar_w"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
         <button class="sbtn active" data-ps="home_w"><span class="sdot" style="background:#38bdf8"></span>Home</button>
+        <button class="sbtn active" data-ps="plugin_w" id="sbtn-plugin" style="display:none"><span class="sdot" style="background:#a3e635"></span>Plug-in</button>
         <button class="sbtn active" data-ps="battery_w"><span class="sdot" style="background:#c084fc"></span>Battery</button>
         <button class="sbtn active" data-ps="grid_w"><span class="sdot" style="background:#f87171"></span>Grid</button>
         <button class="sbtn active" id="power-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
@@ -1681,12 +1758,26 @@ function setRingSize(id, px) {
   el.style.width = el.style.height = s;
 }
 
+// ── Plug-in (EcoFlow) solar helpers ─────────────────────────────────────────
+let _efEnabled = false;
+
+// Watts the plug-in system is feeding in right now, or 0 when unknown.
+// null (offline / stale / integration off) deliberately becomes 0 HERE, at the
+// display edge, rather than being stored as 0 -- the database keeps NULL so a
+// cloud outage stays visible instead of looking like genuine zero generation.
+function _efPlugin(d) {
+  if (!d || !d.ecoflow_enabled) return 0;
+  const w = d.plugin_w;
+  return (w === null || w === undefined) ? 0 : w;
+}
+
 // ── Flow routing ────────────────────────────────────────────────────────────
 function getFlows(d) {
   if (!d) return [];
   const flows = [];
-  const solar = d.solar_w || 0;
-  const home  = d.home_w  || 0;
+  const plugin = _efPlugin(d);
+  const solar = (d.solar_w || 0) + plugin;
+  const home  = (d.home_w  || 0) + plugin;
   const batW  = d.battery_w || 0;
   const gridW = d.grid_w || 0;
 
@@ -1857,17 +1948,33 @@ function applyData(d) {
     _updateSfVisibility();
   }
 
-  const solarOn = d.solar_w   > 20;
+  // Plug-in (EcoFlow) solar. The inverter physically cannot see it, so its
+  // output is missing from BOTH solar and house load. Add it back for display
+  // only -- d.solar_w / d.home_w stay as the inverter reported them, and the
+  // database keeps them raw with plugin_w in its own column.
+  const plugin = _efPlugin(d);
+  const solarTotal = (d.solar_w || 0) + plugin;
+  const homeTotal  = (d.home_w  || 0) + plugin;
+  if (!!d.ecoflow_enabled !== _efEnabled) {
+    _efEnabled = !!d.ecoflow_enabled;
+    // Only offer the breakdown when there is actually something to break down.
+    $('r-solar').classList.toggle('clickable', _efEnabled);
+    $('r-solar').title = _efEnabled ? 'Tap for solar breakdown' : '';
+    const pb = $('sbtn-plugin');
+    if (pb) pb.style.display = _efEnabled ? '' : 'none';
+  }
+
+  const solarOn = solarTotal  > 20;
   const batOn   = d.battery_w > 20;
   const gridOn  = d.grid_w    > 20;
 
   // Solar
   styleRing('r-solar', '#f59e0b', solarOn);
-  $('v-solar').textContent = fmtW(d.solar_w);
+  $('v-solar').textContent = fmtW(solarTotal);
 
   // Home
   styleRing('r-home', '#67e8f9', true);
-  $('v-home').textContent = fmtW(d.home_w);
+  $('v-home').textContent = fmtW(homeTotal);
 
   // Battery
   // charge_status IR14: 0=idle 2=charging 3=finishing 5=discharging; null on gateway path
@@ -1910,7 +2017,21 @@ function applyData(d) {
                  : 'Idle';
   const temp = d.t_battery  != null ? ` · ${d.t_battery.toFixed(0)}°C`  : '';
   const inv  = d.t_heatsink != null ? ` · Inv ${d.t_heatsink.toFixed(0)}°C` : '';
-  $('bat-detail').textContent = `${batState}${temp}${inv}`;
+  // Stored energy against bank capacity leads the line, e.g. "5.7 kWh of 19 kWh".
+  // Derived from the same `soc` the bar and percentage use, so the three can
+  // never disagree with each other. Omitted entirely when capacity is unknown
+  // (AIO and three-phase units store it differently) rather than showing a guess;
+  // falls back to capacity alone if SOC is missing.
+  // `soc` above defaults to 0 when missing, so test d.soc rather than soc --
+  // otherwise an unknown SOC would read as a confident "0.0 kWh of 19 kWh".
+  const capKwh = d.battery_capacity_kwh;
+  let cap = '';
+  if (capKwh != null) {
+    cap = (d.soc != null && d.soc >= 0 && d.soc <= 100)
+        ? `${(capKwh * d.soc / 100).toFixed(1)} kWh of ${capKwh} kWh · `
+        : `${capKwh} kWh · `;
+  }
+  $('bat-detail').textContent = `${cap}${batState}${temp}${inv}`;
 
   // Tiles — store data and (re)render with current rotation mode
   _tileLiveData = d;
@@ -2148,6 +2269,47 @@ $('update-dismiss').addEventListener('click', () => {
 // Check on load, then every hour in case the server fetches a new result
 checkForUpdate();
 setInterval(checkForUpdate, 3600000);
+
+// ── Plug-in solar hint ────────────────────────────────────────────────────────
+// Shown once if the readings imply generation on the house circuits that the
+// inverter can't measure (a plug-in / "balcony" kit). Purely informational:
+// costs stay correct, but house consumption and solar totals read low.
+async function checkPluginSolar() {
+  try {
+    const r = await fetch('/api/plugin_solar', { cache: 'no-store' });
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.show) $('plugin-bar').style.display = 'flex';
+  } catch(e) {}
+}
+
+async function _ackPluginSolar(declared) {
+  $('plugin-bar').style.display = 'none';
+  try {
+    await fetch('/api/plugin_solar/ack', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ declared: !!declared })
+    });
+  } catch(e) {}
+}
+
+$('plugin-dismiss').addEventListener('click', () => _ackPluginSolar(false));
+$('plugin-yes').addEventListener('click',     () => _ackPluginSolar(true));
+$('plugin-learn').addEventListener('click', (e) => {
+  e.preventDefault();
+  _showAlert(
+    "Plug-in solar panels feed straight into a socket, so they sit beyond the " +
+    "inverter's sensor and it has no way to measure them. " +
+    "Your import, export and cost figures are all still correct. What reads low " +
+    "is your house consumption and your solar totals, because the panels quietly " +
+    "cover some of your usage before the inverter ever sees it. " +
+    "Nothing is broken and there is nothing to fix - it is just worth knowing so " +
+    "the numbers make sense."
+  );
+});
+
+checkPluginSolar();
 
 // ── Inverter Control ─────────────────────────────────────────────────────────
 function _ctrlHeaders() {
@@ -2647,6 +2809,12 @@ $('batt-modal').addEventListener('click', e => {
 });
 $('bat-section').addEventListener('click', openBattModal);
 
+$('sbd-close').addEventListener('click', () => $('solar-modal').classList.remove('open'));
+$('solar-modal').addEventListener('click', e => {
+  if (e.target === $('solar-modal')) $('solar-modal').classList.remove('open');
+});
+$('r-solar').addEventListener('click', openSolarBreakdown);
+
 // ── Activity log ──────────────────────────────────────────────────────────────
 const LOG_ICON = { command:'⚙️', error:'⚠️', fault:'🔴', status:'🔵', info:'ℹ️' };
 
@@ -3105,7 +3273,11 @@ function _renderTiles() {
   if (!_tileLiveData) return;
   const d = _tileLiveData;
   const costOk = d.import_cost_p != null && d.currency_symbol;
-  $('t-solar').textContent = fmtKwh(d.solar_today);
+  // Solar today includes the plug-in system. The inverter cannot meter it, so
+  // leaving it out understates the day's generation by exactly what the STREAM
+  // produced. plugin_today is absent when the integration is off, so this is a
+  // no-op for everyone else.
+  $('t-solar').textContent = fmtKwh((d.solar_today || 0) + (d.plugin_today || 0));
   if (_tileMode === 'cost' && costOk) {
     const sym = d.currency_symbol;
     const totalImport = d.import_cost_p + (d.standing_charge_p || 0);
@@ -3571,6 +3743,13 @@ async function loadSettings() {
     } else {
       $('s-wxhash-hint').style.display = 'none';
     }
+    $('s-ef-enabled').checked = !!s.ecoflow_enabled;
+    $('s-ef-sn').value        = s.ecoflow_serial || '';
+    $('s-ef-ak').value = ''; $('s-ef-sk').value = '';
+    const _efSet = s.ecoflow_configured ? 'Key is set — paste new key to change' : 'Paste key';
+    $('s-ef-ak').placeholder = _efSet;
+    $('s-ef-sk').placeholder = _efSet;
+    $('s-ef-status').textContent = s.ecoflow_enabled ? (s.ecoflow_status || '') : '';
     $('s-sf-postcode').value = s.sf_postcode || '';
     $('s-sf-lat').value = s.sf_latitude      || '';
     $('s-sf-lon').value = s.sf_longitude     || '';
@@ -3582,6 +3761,23 @@ async function loadSettings() {
     $('s-sf-compass').value = '';
     $('s-sf-compass-hint').textContent = '';
     $('s-pred-kwh').value        = s.pred_battery_kwh      || '';
+    // Show what the inverter reports, and say plainly when a manual override
+    // disagrees with it -- a stale figure here silently skews predictive charge.
+    const _det = s.pred_battery_kwh_detected;
+    const _hint = $('s-pred-kwh-hint');
+    if (_det == null) {
+      _hint.textContent = 'Your inverter does not report a battery capacity, so enter it here.';
+      _hint.style.color = '';
+    } else if (!s.pred_battery_kwh) {
+      _hint.textContent = `Using ${_det} kWh, detected from your inverter${s.battery_capacity_ah ? ' (' + s.battery_capacity_ah + ' Ah)' : ''}.`;
+      _hint.style.color = '';
+    } else if (Math.abs(s.pred_battery_kwh - _det) / _det > 0.1) {
+      _hint.textContent = `Your inverter reports ${_det} kWh. Clear this field to use that instead.`;
+      _hint.style.color = '#fb923c';
+    } else {
+      _hint.textContent = `Matches the ${_det} kWh detected from your inverter. Clear to follow it automatically.`;
+      _hint.style.color = '';
+    }
     $('s-pred-pessimism').value  = s.pred_pessimism_factor ?? '';
     $('s-pred-reserve').value    = s.pred_evening_reserve  ?? '';
     $('s-pred-minsoc').value     = s.pred_minimum_soc      ?? '';
@@ -3629,6 +3825,82 @@ async function loadSettings() {
   } catch(e) {}
 }
 
+// Verify EcoFlow credentials without enabling anything. Saves the keys first
+// so the user does not have to save-then-test as two separate steps.
+async function ecoflowTest() {
+  const st = $('s-ef-status');
+  st.style.color = ''; st.textContent = 'Checking…';
+  try {
+    const ak = $('s-ef-ak').value.trim(), sk = $('s-ef-sk').value.trim();
+    if (ak || sk) {
+      await fetch('/api/settings', {method:'POST', headers:_settHeaders(),
+        body: JSON.stringify({ecoflow_access_key: ak, ecoflow_secret_key: sk})});
+      $('s-ef-ak').value = ''; $('s-ef-sk').value = '';
+    }
+    const r = await fetch('/api/ecoflow/test', {method:'POST', headers:_settHeaders()});
+    const j = await r.json();
+    if (!j.ok) { st.style.color = '#f87171'; st.textContent = j.error || 'Failed'; return; }
+    const d = j.devices[0];
+    st.style.color = '#4ade80';
+    st.textContent = `✓ ${d.name} (${d.sn}) — ${d.online ? 'online' : 'offline'}`;
+    if (!$('s-ef-sn').value.trim()) $('s-ef-sn').value = d.sn;
+  } catch(e) {
+    st.style.color = '#f87171';
+    st.textContent = 'Could not reach EcoFlow';
+  }
+}
+
+// ── Solar breakdown ─────────────────────────────────────────────────────────
+// Reachable only when the EcoFlow integration is on. Shows the inverter's own
+// array and the plug-in system separately, because once they are added together
+// on the home screen there is otherwise no way to tell them apart.
+async function openSolarBreakdown() {
+  if (!_efEnabled) return;
+  $('solar-modal').classList.add('open');
+  const body = $('sbd-body');
+  body.innerHTML = '<div class="bdd-spinner">Loading…</div>';
+  try {
+    const [dR, eR] = await Promise.all([
+      fetch('/api/data',    {cache:'no-store'}),
+      fetch('/api/ecoflow', {cache:'no-store'})
+    ]);
+    const d = await dR.json(), e = await eR.json();
+    const inv    = d.solar_w || 0;
+    const plugin = (e.power_w === null || e.power_w === undefined) ? null : e.power_w;
+    const total  = inv + (plugin || 0);
+    // "Offline" and "no reading yet" are different states and must not be
+    // conflated -- a device that is online but has simply not changed its
+    // output for a few minutes is neither.
+    const offline = !e.online;
+    const noValue = plugin === null;
+    const pluginLabel = offline ? 'Offline' : noValue ? 'Waiting…' : fmtW(plugin);
+    body.innerHTML = `
+      <div class="sbd-row">
+        <span class="sbd-name">Inverter array
+          <span class="sbd-sub">Measured by the GivEnergy</span></span>
+        <span class="sbd-val">${fmtW(inv)}</span>
+      </div>
+      <div class="sbd-row">
+        <span class="sbd-name">Plug-in solar
+          <span class="sbd-sub">EcoFlow STREAM${e.serial ? ' · ' + e.serial : ''}</span></span>
+        <span class="sbd-val${(offline || noValue) ? ' muted' : ''}">${pluginLabel}</span>
+      </div>
+      <div class="sbd-row total">
+        <span class="sbd-name">Total generating now</span>
+        <span class="sbd-val">${fmtW(total)}</span>
+      </div>
+      <div class="sbd-row">
+        <span class="sbd-name">Plug-in solar today
+          <span class="sbd-sub">Energy fed into the house</span></span>
+        <span class="sbd-val">${(e.today_kwh ?? 0).toFixed(2)} kWh</span>
+      </div>
+      ${offline ? '<div class="sbd-note">The STREAM powers down overnight and comes back once the panels make around 11&nbsp;W, so "Offline" in the dark is normal. While it is offline nothing is added to Home or Solar.</div>' : ''}
+      <div class="sbd-note">The inverter cannot see the plug-in system &mdash; it feeds in past the grid CT. Home and Solar on the main screen include it; graphs show it as a separate series.</div>`;
+  } catch(err) {
+    body.innerHTML = '<div class="sbd-note">Could not load solar breakdown.</div>';
+  }
+}
+
 async function _doSaveSettings(msgEl) {
   const newPw  = $('s-newpw').value.trim();
   const confPw = $('s-confirmpw').value.trim();
@@ -3673,6 +3945,10 @@ async function _doSaveSettings(msgEl) {
     sf_panel_azimuth:$('s-sf-az').value.trim(),
     sf_panel_kwp:    $('s-sf-kwp').value.trim(),
     sf_api_key:           $('s-sf-apikey').value.trim(),
+    ecoflow_enabled:      $('s-ef-enabled').checked,
+    ecoflow_access_key:   $('s-ef-ak').value.trim(),
+    ecoflow_secret_key:   $('s-ef-sk').value.trim(),
+    ecoflow_serial:       $('s-ef-sn').value.trim(),
     pred_battery_kwh:     parseFloat($('s-pred-kwh').value)        || 0,
     pred_pessimism_factor:parseFloat($('s-pred-pessimism').value)   || 0.85,
     pred_evening_reserve: parseFloat($('s-pred-reserve').value)     || 3.0,
@@ -4573,7 +4849,7 @@ const _PPL = 36, _PPR = 34, _PPT = 10, _PPB = 22;  // chart margin constants (sh
 let powerMode    = false;
 let powerData    = [];
 let _powerDay    = '';
-let powerActive  = new Set(['solar_w','home_w','battery_w','grid_w']);
+let powerActive  = new Set(['solar_w','home_w','battery_w','grid_w','plugin_w']);
 let powerShowSoc = true;
 let _powerCross  = null;    // CSS px from canvas left for crosshair
 let _powerView   = { t0: 0, t1: 86400 };  // visible time window (seconds from midnight)
@@ -4583,6 +4859,11 @@ let _lastTapTime = 0;       // for double-tap detection
 const POWER_SERIES = [
   { key:'solar_w',   colorPos:'#f59e0b', colorNeg:null,      posLbl:null,          negLbl:null       },
   { key:'home_w',    colorPos:'#38bdf8', colorNeg:null,      posLbl:null,          negLbl:null       },
+  // Plug-in solar is charted as its OWN series rather than folded into solar_w:
+  // it is a separate measurement from a separate device, and gaps in it (the
+  // STREAM is offline every night) must stay visible rather than reading as
+  // zero generation from the main array.
+  { key:'plugin_w',  colorPos:'#a3e635', colorNeg:null,      posLbl:null,          negLbl:null       },
   { key:'battery_w', colorPos:'#c084fc', colorNeg:'#818cf8', posLbl:'Discharging', negLbl:'Charging' },
   { key:'grid_w',    colorPos:'#f87171', colorNeg:'#f87171', posLbl:'Export',      negLbl:'Import'   },
 ];
@@ -5043,6 +5324,7 @@ function drawPowerChart() {
       if (!powerActive.has(s.key)) return;
       const v = d[s.key] || 0;
       let label = s.key === 'solar_w'   ? 'Solar'
+                : s.key === 'plugin_w'  ? 'Plug-in'
                 : s.key === 'home_w'    ? 'Home'
                 : s.key === 'battery_w' ? (v<0 ? 'Charging' : v>0 ? 'Discharging' : 'Battery')
                 :                         (v<0 ? 'Importing' : v>0 ? 'Exporting' : 'Grid');

@@ -77,7 +77,12 @@ standing_charge_p = 0
 ; minus your typical morning demand, so you don't import a fuller charge than
 ; the day needs. Requires the solar forecast (see the dashboard's Solar Forecast
 ; setup) and your usable battery capacity below.
-; battery_kwh must be set for the feature to work -- 0 leaves it disabled.
+; battery_kwh is an OVERRIDE. Leave it at 0 and the capacity is read from the
+; inverter (HR 55, battery_capacity_ah) and converted at 51.2 V nominal, so it
+; follows the hardware -- add a battery and it updates itself. Only set a value
+; if you want a different figure, e.g. a conservative usable capacity.
+; If your inverter does not report a capacity (AIO and three-phase units store
+; it differently), set it here or predictive charge stays disabled.
 battery_kwh         = 0
 ; Fraction of the forecast to trust (0-1). Lower = more cautious, charges more.
 pessimism_factor    = 0.85
@@ -96,6 +101,46 @@ minimum_soc         = 20
 ; projection.
 consumption_kwh_override = 0
 solar_kwh_override       = 0
+
+[plugin_solar]
+; Plug-in ("balcony") solar. UK-legal since 27 Aug 2026: an inverter of up to
+; 800VA plugged straight into a socket circuit, with no CT clamp and no meter.
+; It sits beyond this inverter's sensor, so its generation cannot be measured --
+; it simply makes the house appear to draw less. Import, export and all cost
+; figures stay correct; house consumption and solar totals read low.
+; The dashboard watches for the signature and shows a one-time hint.
+; notified = the hint has been shown and dismissed (set automatically)
+; declared = you have confirmed you really do have plug-in solar; suppresses
+;            the hint for good. Safe to set by hand if you already know.
+notified = no
+declared = no
+
+[ecoflow]
+; EcoFlow STREAM integration -- MEASURES plug-in solar instead of guessing.
+; When enabled, the AC watts your STREAM feeds into the house are read from
+; EcoFlow's cloud and added back on to Home and Solar on the dashboard. The
+; inverter's own readings are never altered: the plug-in figure is stored in
+; its own database column and the correction is applied at display time.
+;
+; This is CLOUD-BACKED. It needs an outbound internet connection to EcoFlow,
+; in the same way the Octopus, Met Office and Forecast.Solar features do. It has
+; nothing to do with the GivEnergy cloud -- your inverter is still read locally.
+;
+; Get an Access Key and Secret Key from developer-eu.ecoflow.com, signing in
+; with the same EcoFlow account your STREAM is registered to. Approval can take
+; a few days.
+;
+; NOTE: these keys are stored in this file in plain text, and this file can be
+; included in a backup (Settings only / Database + Settings). Treat a backup
+; containing settings as sensitive, exactly as you would for the admin password
+; hash and your weather API key.
+;
+; serial: leave blank to use the first device on the account. Set it explicitly
+;         if you have more than one EcoFlow device.
+enabled    = no
+access_key =
+secret_key =
+serial     =
 
 [logging]
 ; Log level: warning (default) | info | debug
