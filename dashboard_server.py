@@ -1620,6 +1620,59 @@ def _batch_compute_and_store_costs(dates: list):
             log.warning("Failed to store batch daily costs: %s", exc)
 
 
+# ── Cost back-fill worker ─────────────────────────────────────────────────────
+# Computing a day's time-of-use costs needs every snapshot in that day, so a
+# bulk back-fill of imported history is genuinely expensive - ~18s for a year on
+# a 2.2M-row database. That cannot sit inside a page load, but it also must not
+# silently hand back incomplete figures, which is how the "first view shows £0"
+# bug behaved. So: small gaps are computed inline (normal running, unchanged),
+# bulk gaps go to this worker, and callers can see that figures are still
+# settling via _costs_pending().
+_COST_INLINE_MAX_DAYS = 3      # above this, hand it to the worker
+_COST_CHUNK_DAYS      = 14     # per batch, so the DB is released regularly
+_cost_queue: set      = set()
+_cost_queue_lock      = threading.Lock()
+_cost_worker_started  = False
+
+
+def _queue_cost_backfill(days) -> None:
+    with _cost_queue_lock:
+        _cost_queue.update(days)
+
+
+def _costs_pending() -> int:
+    """How many days are still waiting to be costed. 0 means the figures are
+    complete, which is what the UI needs to know before presenting them."""
+    with _cost_queue_lock:
+        return len(_cost_queue)
+
+
+def _cost_backfill_loop():
+    """Drain the queue in chunks. Deliberately unhurried: this is catching up on
+    history nobody is waiting on, and it must not compete with the live poll."""
+    time.sleep(20)
+    while True:
+        with _cost_queue_lock:
+            batch = sorted(_cost_queue)[:_COST_CHUNK_DAYS]
+        if not batch:
+            time.sleep(10)
+            continue
+        try:
+            _batch_compute_and_store_costs(batch)
+        except Exception as exc:
+            log.warning("Cost back-fill failed for %s..%s: %s", batch[0], batch[-1], exc)
+        # Drop them either way: a day that cannot be computed would otherwise
+        # spin here for ever, which is the failure this whole area already had.
+        with _cost_queue_lock:
+            _cost_queue.difference_update(batch)
+            left = len(_cost_queue)
+        if left:
+            log.info("Cost back-fill: %d day(s) remaining", left)
+        else:
+            log.info("Cost back-fill complete")
+        time.sleep(1)
+
+
 def _ensure_daily_costs(dates: list):
     """Check daily_costs for missing past dates and compute them in batch."""
     if not dates or not _tariff_configured():
@@ -1649,8 +1702,19 @@ def _ensure_daily_costs(dates: list):
     except Exception:
         have_data = set(missing)      # degrade to the old behaviour, not to silence
     missing = [d for d in missing if d in have_data]
-    if missing:
+    if not missing:
+        return
+
+    # A handful of days is fast and stays INLINE, so normal running is unchanged:
+    # costs accrue a day at a time and the answer is always complete and correct.
+    # A bulk back-fill is different - the time-of-use calculation needs every
+    # snapshot in the range, so a year of imported history took ~18s. Blocking a
+    # page load for that is not acceptable, so it is handed to the background
+    # worker and the caller is told the figures are still incomplete.
+    if len(missing) <= _COST_INLINE_MAX_DAYS:
         _batch_compute_and_store_costs(missing)
+        return
+    _queue_cost_backfill(missing)
 
 
 def _get_costs_for_period(period_type: str, period_key: str) -> dict:
@@ -6032,6 +6096,12 @@ def api_history():
             c = _get_costs_for_period(period, pkey)
             if c:
                 c["currency_symbol"] = TARIFF_CURRENCY
+                # Only time-of-use costs come from the per-day cache, so only
+                # they can be mid-back-fill. Flat rate is derived from the kWh
+                # columns and is always complete.
+                pending = _costs_pending()
+                if pending:
+                    c["pending_days"] = pending
                 row["cost"] = c
 
     return jsonify(result)
@@ -7048,7 +7118,14 @@ def api_year_review():
     except Exception as exc:
         log.warning("Year review query failed: %s", exc)
         return jsonify({"ok": False, "error": str(exc)}), 500
-    _yr_cache[year] = (data, time.time())
+    # Do not cache a part-computed answer for 24 hours - a year viewed while its
+    # costs are still back-filling would stay wrong until the TTL expired.
+    pending = _costs_pending()
+    if pending:
+        data = dict(data)
+        data["costs_pending_days"] = pending
+    else:
+        _yr_cache[year] = (data, time.time())
     return jsonify(data)
 
 
@@ -7161,6 +7238,9 @@ if __name__ == "__main__":
 
     # EcoFlow STREAM MQTT subscriber — inert until the integration is enabled.
     threading.Thread(target=_ef_loop, daemon=True).start()
+
+    # Cost back-fill worker — idle unless imported history needs costing.
+    threading.Thread(target=_cost_backfill_loop, daemon=True).start()
 
     # Inverter facts: battery bank capacity, and clock drift. Scheduled slots are
     # enforced against the inverter's own RTC, so drift silently stops rules

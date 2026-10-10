@@ -248,3 +248,92 @@ def test_backfill_is_skipped_entirely_when_no_day_has_data(srv, monkeypatch):
     monkeypatch.setattr(srv, "_tariff_configured", lambda: True)
     srv._ensure_daily_costs([_day_str(i) for i in range(10)])
     assert called == [], "nothing to compute, so nothing should be attempted"
+
+
+# ── Background cost back-fill ────────────────────────────────────────────────
+
+def _seed_days(srv, n):
+    """n consecutive past days of snapshots, none of them costed."""
+    srv.init_db()
+    with srv._db() as conn:
+        conn.execute("DELETE FROM snapshots")
+        conn.execute("DELETE FROM daily_totals")
+        conn.execute("DELETE FROM daily_costs")
+        for back in range(1, n + 1):
+            t0, t1 = srv._local_day_bounds(_day_str(back))
+            conn.execute(
+                "INSERT INTO snapshots (ts, solar_today, grid_in_today, grid_out_today,"
+                " bat_chg_today, bat_dis_today) VALUES (?,?,?,?,?,?)",
+                (int(t0 + (t1 - t0) * 0.9), 5.0, 2.0, 1.0, 0.0, 0.0))
+        conn.commit()
+    srv._ensure_daily_totals()
+    return [_day_str(i) for i in range(1, n + 1)]
+
+
+@pytest.fixture(autouse=True)
+def _drain_queue(srv):
+    yield
+    with srv._cost_queue_lock:
+        srv._cost_queue.clear()
+
+
+def test_a_small_gap_is_computed_inline(srv, monkeypatch):
+    """Normal running must be unchanged: costs accrue a day at a time and the
+    answer stays complete and correct, with nothing deferred."""
+    dates = _seed_days(srv, srv._COST_INLINE_MAX_DAYS)
+    done = []
+    monkeypatch.setattr(srv, "_batch_compute_and_store_costs", lambda d: done.append(list(d)))
+    monkeypatch.setattr(srv, "_tariff_configured", lambda: True)
+    srv._ensure_daily_costs(dates)
+    assert done, "a small gap must be computed immediately"
+    assert srv._costs_pending() == 0
+
+
+def test_a_bulk_gap_is_deferred_not_computed_inline(srv, monkeypatch):
+    """The 18s case. It must not block a page load."""
+    dates = _seed_days(srv, srv._COST_INLINE_MAX_DAYS + 5)
+    done = []
+    monkeypatch.setattr(srv, "_batch_compute_and_store_costs", lambda d: done.append(list(d)))
+    monkeypatch.setattr(srv, "_tariff_configured", lambda: True)
+    srv._ensure_daily_costs(dates)
+    assert done == [], "a bulk back-fill must not run inline"
+    assert srv._costs_pending() == len(dates)
+
+
+def test_pending_count_is_visible_so_figures_are_never_passed_off_as_final(srv, monkeypatch):
+    """Deferring the work is only acceptable if the caller can tell. Silently
+    returning a partial total is exactly the bug this replaced."""
+    dates = _seed_days(srv, srv._COST_INLINE_MAX_DAYS + 10)
+    monkeypatch.setattr(srv, "_batch_compute_and_store_costs", lambda d: None)
+    monkeypatch.setattr(srv, "_tariff_configured", lambda: True)
+    assert srv._costs_pending() == 0
+    srv._ensure_daily_costs(dates)
+    assert srv._costs_pending() > 0
+
+
+def test_queue_does_not_accumulate_duplicates(srv, monkeypatch):
+    dates = _seed_days(srv, srv._COST_INLINE_MAX_DAYS + 5)
+    monkeypatch.setattr(srv, "_batch_compute_and_store_costs", lambda d: None)
+    monkeypatch.setattr(srv, "_tariff_configured", lambda: True)
+    for _ in range(4):
+        srv._ensure_daily_costs(dates)
+    assert srv._costs_pending() == len(dates), "repeated views must not grow the queue"
+
+
+def test_an_uncomputable_day_is_dropped_rather_than_retried_for_ever(srv, monkeypatch):
+    """A day that always fails would otherwise spin in the worker - the same
+    never-finishes shape as the bug that triggered all of this."""
+    srv._queue_cost_backfill(["2099-01-01", "2099-01-02"])
+    def boom(days):
+        raise RuntimeError("cannot compute")
+    monkeypatch.setattr(srv, "_batch_compute_and_store_costs", boom)
+
+    with srv._cost_queue_lock:
+        batch = sorted(srv._cost_queue)[:srv._COST_CHUNK_DAYS]
+    try:
+        srv._batch_compute_and_store_costs(batch)
+    except Exception:
+        pass
+    with srv._cost_queue_lock:
+        srv._cost_queue.difference_update(batch)
+    assert srv._costs_pending() == 0

@@ -461,6 +461,12 @@ select optgroup{background:#172035;color:#7fa8cc}
   flex-shrink:0;display:flex;gap:5px;overflow-x:auto;
   padding:4px 12px 2px;
 }
+/* Shown while imported history is still being costed in the background. The
+   figures on screen are real but incomplete, and saying so is the whole point -
+   silently presenting a partial total as final is the bug this replaced. */
+.cost-pending{font-size:.72rem;color:#fb923c;line-height:1.45;
+  padding:6px 8px;margin-bottom:6px;border-radius:7px;
+  background:rgba(251,146,60,.1);border:1px solid rgba(251,146,60,.35)}
 #hist-cost-card{
   flex-shrink:0;padding:0 12px calc(10px + env(safe-area-inset-bottom,0px));
 }
@@ -4733,8 +4739,9 @@ function updateCostCard(cost) {
     <div class="cost-card">
       <div class="cost-card-hdr">
         <span class="cost-card-title">Estimated costs</span>
-        <span class="cost-card-est">estimated — based on current tariff rates</span>
+        <span class="cost-card-est">estimated &mdash; based on current tariff rates</span>
       </div>
+      ${cost.pending_days ? `<div class="cost-pending">Still working out costs for ${cost.pending_days} earlier day${cost.pending_days === 1 ? '' : 's'}. These figures will rise as that finishes.</div>` : ''}
       <div class="cost-row">
         <span class="cost-lbl">Import Cost</span>
         <span class="cost-val is-cost">${fmtP(cost.import_cost_p)}</span>
