@@ -40,7 +40,9 @@ NAMED_HRS = {
     114: "battery_discharge_min_power_reserve",
     116: "charge_target_soc          (%)",
     117: "charge_soc_stop_2          (%)",
+    118: "discharge_soc_stop_2       (%)  [#48 SUSPECT]",
     119: "charge_soc_stop_1          (%)",
+    120: "discharge_soc_stop_1       (%)  [#48 PRIME SUSPECT]",
     175: "enable_battery_on_pv_or_grid  [HYPOTHESIS: 1 = allow grid charging]",
     199: "enable_standard_self_consumption_logic  [HYPOTHESIS: 0 = force charge from grid]",
     200: "cmd_bms_flash_update",
@@ -58,6 +60,11 @@ READ_BLOCKS = [
     (94,  12),   # 94-105  (charge slot 1, enable_charge)
     (110,  7),   # 110-116 (soc_reserve, charge_limit, discharge_limit, charge_target_soc)
     (117,  3),   # 117-119 (soc_stop targets)
+    (120,  1),   # 120     (discharge_soc_stop_1, #48) - MUST be its own read:
+                 #          a 117-120 block times out on the GIV-AC3.0 dongle,
+                 #          which is picky about block boundaries. Confirmed by
+                 #          _hr_read(120,1) succeeding where (110,11) and (117,4)
+                 #          both failed.
     (175,  1),   # 175     (enable_battery_on_pv_or_grid)
     (187, 14),   # 187-200 (enable_standard_self_consumption_logic at 199)
     (313,  2),   # 313-314
@@ -168,7 +175,8 @@ def print_snapshot(regs: dict, label: str = ""):
             display = fmt_bool(val)
         else:
             display = str(val)
-        marker = "  ***" if reg in (175, 199, 20, 27) else ""
+        marker = ("  <<< #48" if reg in (110, 114, 118, 120)
+                  else "  ***" if reg in (175, 199, 20, 27) else "")
         print(f"  HR{reg:3d}  {display:<30s}  {name}{marker}")
     # errors
     for k, v in regs.items():
@@ -180,6 +188,7 @@ def print_snapshot(regs: dict, label: str = ""):
 def main():
     print(f"HR Monitor — inverter {INV_IP}:{INV_PORT}  slave 0x{SLAVE:02X}")
     print("Key registers to watch: HR20, HR27, HR94/95, HR96, HR175, HR199")
+    print("#48 (export cutoff vs discharge floor): HR110, HR114, HR118, HR120")
     print()
 
     if SNAPSHOT:
