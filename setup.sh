@@ -55,6 +55,15 @@ _TMP_KEEP="$(mktemp -d)"
 
 sudo cp -r ./* "$INSTALL_DIR/"
 
+# dashboard.html ships inside app/ so it is not sitting at the top level of the
+# unzipped folder looking clickable - opening it directly gives a file:// page
+# that renders but cannot reach the server. The recursive copy above lands it at
+# app/dashboard.html, so flatten it: the server serves it from its own directory.
+if [ -d "$INSTALL_DIR/app" ]; then
+    sudo cp "$INSTALL_DIR/app/." "$INSTALL_DIR/" -r
+    sudo rm -rf "$INSTALL_DIR/app"
+fi
+
 # Restore preserved files (overwrites anything the copy may have brought in)
 [ -f "$_TMP_KEEP/config.ini" ] && sudo cp "$_TMP_KEEP/config.ini" "$INSTALL_DIR/config.ini"
 [ -f "$_TMP_KEEP/history.db" ] && sudo cp "$_TMP_KEEP/history.db" "$INSTALL_DIR/history.db"

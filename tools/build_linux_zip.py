@@ -17,10 +17,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT  = os.path.join(REPO, "website", "downloads", "givenergy-dashboard.zip")
 
 # Regular files (rw-r--r--)
+# dashboard.html lives in app/, not at the top level - see the note in
+# build_mac_zip.py. setup.sh flattens it back out on install.
+APP_SUBDIR = "app"
 PLAIN = [
     "VERSION",
     "dashboard_server.py",
-    "dashboard.html",
     "manifest.json",
     "sw.js",
     "config.ini.example",
@@ -35,10 +37,10 @@ SCRIPTS = [
 ]
 
 
-def add_plain(zf, name):
+def add_plain(zf, name, arcname=None):
     with open(os.path.join(REPO, name), "rb") as f:
         data = f.read()
-    zi = zipfile.ZipInfo(name.replace("\\", "/"))
+    zi = zipfile.ZipInfo((arcname or name).replace("\\", "/"))
     zi.compress_type = zipfile.ZIP_DEFLATED
     zi.external_attr = (0o100644 << 16)   # regular file, rw-r--r--
     zi.create_system = 3                  # Unix
@@ -72,6 +74,7 @@ def main():
             add_plain(zf, n)
         for n in SCRIPTS:
             add_script(zf, n)
+        add_plain(zf, "dashboard.html", arcname=f"{APP_SUBDIR}/dashboard.html")
         add_dir(zf, "icons/weather")
     print(f"Built {OUT}")
     with zipfile.ZipFile(OUT) as zf:

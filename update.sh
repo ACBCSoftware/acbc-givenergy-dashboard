@@ -58,8 +58,13 @@ APP_FILES="VERSION dashboard_server.py dashboard.html manifest.json sw.js \
            README.md setup.sh update.sh installer.iss config.ini.example"
 
 info "Updating application files..."
+# dashboard.html ships inside app/ in the download so it is not clickable in the
+# unzipped folder. Accept either location, so this works whether the update is
+# run from a new download or an older one.
 for f in $APP_FILES; do
-    [ -f "$f" ] && sudo cp "$f" "$INSTALL_DIR/"
+    if   [ -f "$f" ];     then sudo cp "$f"     "$INSTALL_DIR/"
+    elif [ -f "app/$f" ]; then sudo cp "app/$f" "$INSTALL_DIR/"
+    fi
 done
 # Weather icons directory (added v2.8)
 if [ -d "icons/weather" ]; then

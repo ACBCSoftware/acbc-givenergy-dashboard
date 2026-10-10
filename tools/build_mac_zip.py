@@ -14,10 +14,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT  = os.path.join(REPO, "website", "downloads", "givenergy-dashboard-mac.zip")
 
 # (filename, is_executable_command)
+# dashboard.html is NOT at the top level on purpose. It is the one file in the
+# folder that looks clickable, and double-clicking it opens a file:// URL where
+# the page renders perfectly and only the API calls fail - which a Mac user
+# reported as a password problem. The top level now holds only the .command
+# files and the readme. The installer flattens app/ back out, because the server
+# serves dashboard.html from its own directory.
+APP_SUBDIR = "app"
 PLAIN = [
     "VERSION",
     "dashboard_server.py",
-    "dashboard.html",
     "manifest.json",
     "sw.js",
     "generate_icons.py",
@@ -31,10 +37,10 @@ COMMANDS = [
 ]
 
 
-def add_plain(zf, name):
+def add_plain(zf, name, arcname=None):
     with open(os.path.join(REPO, name), "rb") as f:
         data = f.read()
-    zi = zipfile.ZipInfo(name)
+    zi = zipfile.ZipInfo(arcname or name)
     zi.compress_type = zipfile.ZIP_DEFLATED
     zi.external_attr = (0o100644 << 16)   # regular file, rw-r--r--
     zi.create_system = 3                  # Unix
@@ -70,6 +76,7 @@ def main():
             add_plain(zf, n)
         for n in COMMANDS:
             add_command(zf, n)
+        add_plain(zf, "dashboard.html", arcname=f"{APP_SUBDIR}/dashboard.html")
         add_dir(zf, "icons/weather")
     # Verify
     print(f"Built {OUT}")

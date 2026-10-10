@@ -57,9 +57,15 @@ _TMP_KEEP="$(mktemp -d)"
 [ -f "$INSTALL_DIR/config.ini" ] && cp "$INSTALL_DIR/config.ini" "$_TMP_KEEP/"
 [ -f "$INSTALL_DIR/history.db" ] && cp "$INSTALL_DIR/history.db" "$_TMP_KEEP/"
 
-# Copy app files from the source folder (exclude the installer scripts themselves)
+# Copy app files from the source folder (exclude the installer scripts themselves).
+# dashboard.html ships inside app/ so it is not sitting at the top level looking
+# clickable, but the server serves it from its own directory - so it is flattened
+# back out here. Either location is accepted, so an older unzipped folder still
+# installs correctly.
 for f in dashboard_server.py dashboard.html manifest.json sw.js generate_icons.py config.ini.example; do
-    [ -f "$SRC_DIR/$f" ] && cp "$SRC_DIR/$f" "$INSTALL_DIR/"
+    if   [ -f "$SRC_DIR/app/$f" ]; then cp "$SRC_DIR/app/$f" "$INSTALL_DIR/"
+    elif [ -f "$SRC_DIR/$f" ];     then cp "$SRC_DIR/$f"     "$INSTALL_DIR/"
+    fi
 done
 
 [ -f "$_TMP_KEEP/config.ini" ] && cp "$_TMP_KEEP/config.ini" "$INSTALL_DIR/config.ini"
