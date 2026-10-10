@@ -1321,6 +1321,13 @@ def init_db():
         # that would look like genuine low-consumption periods.
         if "plugin_w" not in cols:
             conn.execute("ALTER TABLE snapshots ADD COLUMN plugin_w REAL")
+        # Migration: grid voltage and frequency (#59). NULL on rows recorded
+        # before this shipped, and on gateway profiles whose page does not carry
+        # them, so charts must tolerate gaps rather than assume a value.
+        if "grid_v" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN grid_v REAL")
+        if "grid_hz" not in cols:
+            conn.execute("ALTER TABLE snapshots ADD COLUMN grid_hz REAL")
         sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
         if "power_pct" not in sched_cols:
             conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
@@ -1356,8 +1363,8 @@ def _log_snapshot(data):
             (ts, solar_w, home_w, battery_w, battery_charging, battery_discharging,
              grid_w, grid_importing, grid_exporting, soc,
              solar_today, grid_in_today, grid_out_today, bat_chg_today, bat_dis_today,
-             t_battery, t_heatsink, plugin_w)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             t_battery, t_heatsink, plugin_w, grid_v, grid_hz)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             int(data["ts"]),
             data["solar_w"],   data["home_w"],
@@ -1370,6 +1377,7 @@ def _log_snapshot(data):
             # Read at write time so both the poll and listen paths capture it
             # without either needing to know the EcoFlow exists.
             _ef_power_w(),
+            data.get("grid_v"), data.get("grid_hz"),
         ))
         conn.commit()
 
@@ -1793,6 +1801,26 @@ def _met_nearest_station(lat: float, lng: float) -> dict:
     return results[0]
 
 # ── Inverter data: shared field mapping ─────────────────────────────────────────
+# Grid AC scaling (#59). GivEnergy reports these as scaled integers, and the
+# register map gives only the real-world range (v_ac1 0-500 V, f_ac1 40-70 Hz)
+# rather than the divisor. Rather than trusting a guess, _scaled() applies the
+# divisor and then SANITY-CHECKS the result against the physically possible
+# range: a UK supply is ~230-250 V at ~50 Hz, and nothing outside the band below
+# is a real reading. Out-of-range returns None, so a wrong scale shows up as a
+# missing value rather than a plausible-looking lie on a chart.
+_V_AC_DIVISOR = 10.0     # 2403 -> 240.3 V
+_F_AC_DIVISOR = 100.0    # 5001 -> 50.01 Hz
+
+
+def _scaled(raw, divisor, lo, hi):
+    """Scale a raw register and return it only if physically plausible."""
+    try:
+        val = int(raw) / divisor
+    except (TypeError, ValueError):
+        return None
+    return round(val, 2) if lo <= val <= hi else None
+
+
 def _build_from_input_page(g) -> dict:
     """Build the live data dict from input registers 0–59, where `g(n)` returns
     the raw value of register n. This same mapping serves BOTH the active-poll
@@ -1823,6 +1851,14 @@ def _build_from_input_page(g) -> dict:
         "grid_out_today": g(25) / 10,                 # E_GRID_OUT_DAY
         "bat_chg_today":  g(36) / 10,                 # E_BATTERY_CHARGE_DAY
         "bat_dis_today":  g(37) / 10,                 # E_BATTERY_DISCHARGE_DAY
+        # Grid voltage and frequency (#59). These arrive in the same page as
+        # everything else and were simply being discarded. Worth more than
+        # curiosity value: an inverter must derate and eventually stop exporting
+        # when terminal voltage climbs too high, so a voltage trace is what
+        # explains an export that quietly tailed off on a sunny afternoon.
+        # Scales confirmed against real hardware - see _grid_ac_scale notes.
+        "grid_v":     _scaled(g(5),  _V_AC_DIVISOR,  10.0, 400.0),   # IR5  V_AC1
+        "grid_hz":    _scaled(g(13), _F_AC_DIVISOR,  40.0,  70.0),   # IR13 F_AC1
         "status":     str(g(0)),                      # INVERTER_STATUS
     }
 
@@ -6919,7 +6955,9 @@ def api_power():
                                THEN -CAST(grid_w AS REAL)
                                ELSE  CAST(grid_w AS REAL) END))        AS grid_w,
                 ROUND(AVG(CASE WHEN soc BETWEEN 0 AND 100 THEN soc END)) AS soc,
-                ROUND(AVG(plugin_w))                                    AS plugin_w
+                ROUND(AVG(plugin_w))                                    AS plugin_w,
+                ROUND(AVG(grid_v),  1)                                  AS grid_v,
+                ROUND(AVG(grid_hz), 2)                                  AS grid_hz
             FROM snapshots
             WHERE date(ts, 'unixepoch', 'localtime') = ?
             GROUP BY ts / 60

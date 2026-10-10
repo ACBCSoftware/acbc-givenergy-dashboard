@@ -1669,6 +1669,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <button class="sbtn active" data-ps="battery_w"><span class="sdot" style="background:#c084fc"></span>Battery</button>
         <button class="sbtn active" data-ps="grid_w"><span class="sdot" style="background:#f87171"></span>Grid</button>
         <button class="sbtn active" id="power-soc-btn"><span class="sdot" style="background:#fbbf24"></span>Battery %</button>
+        <button class="sbtn" id="power-grid-btn"><span class="sdot" style="background:#22d3ee"></span>Grid V/Hz</button>
       </div>
       <div id="hourly-series-row">
         <button class="sbtn active" data-hs="solar_kwh"><span class="sdot" style="background:#f59e0b"></span>Solar</button>
@@ -5009,6 +5010,16 @@ let powerData    = [];
 let _powerDay    = '';
 let powerActive  = new Set(['solar_w','home_w','battery_w','grid_w','plugin_w']);
 let powerShowSoc = true;
+// Grid voltage/frequency share the right-hand axis with battery %, so they are
+// mutually exclusive - two different units on one axis would be unreadable.
+// Bands are the plotting range, not a limit on the data: UK nominal is 230 V
+// +10%/-6% (216.2-253.0) and 50 Hz +/-1%, so these comfortably contain normal
+// operation while leaving an excursion visibly near the edge.
+let powerShowGrid = false;
+const GRID_V_LO = 210, GRID_V_HI = 260;
+const GRID_HZ_LO = 49.0, GRID_HZ_HI = 51.0;
+const GRID_V_COLOR  = '#22d3ee';
+const GRID_HZ_COLOR = '#f0abfc';
 let _powerCross  = null;    // CSS px from canvas left for crosshair
 let _powerView   = { t0: 0, t1: 86400 };  // visible time window (seconds from midnight)
 let _touchPinch  = null;    // two-finger pinch state
@@ -5405,10 +5416,33 @@ function drawPowerChart() {
   c.font = fs+'px sans-serif';
   for (let pct = 0; pct <= 100; pct += 25) {
     const y = PT + plotH - (pct/100) * plotH;
-    c.fillStyle = powerShowSoc ? 'rgba(150,180,220,0.75)' : 'rgba(150,180,220,0.3)';
-    c.fillText(pct+'%', PL+plotW+4, y);
+    if (powerShowGrid) {
+      // Axis is volts while the grid series are shown; Hz rides the same axis
+      // on its own band and is read from the tooltip rather than the scale.
+      c.fillStyle = GRID_V_COLOR + 'cc';
+      c.fillText(Math.round(GRID_V_LO + (GRID_V_HI-GRID_V_LO)*pct/100) + 'V', PL+plotW+4, y);
+    } else {
+      c.fillStyle = powerShowSoc ? 'rgba(150,180,220,0.75)' : 'rgba(150,180,220,0.3)';
+      c.fillText(pct+'%', PL+plotW+4, y);
+    }
   }
-  if (powerShowSoc) {
+  if (powerShowGrid) {
+    const band = (v, lo, hi) => PT + plotH - ((v - lo) / (hi - lo)) * plotH;
+    [['grid_v', GRID_V_COLOR, GRID_V_LO, GRID_V_HI],
+     ['grid_hz', GRID_HZ_COLOR, GRID_HZ_LO, GRID_HZ_HI]].forEach(([key, col, lo, hi]) => {
+      // Gaps are real: rows before this shipped, and gateway profiles whose
+      // register page does not carry these, have no value. Never interpolate.
+      const segs = _splitByGaps(powerData.filter(d => d[key] != null));
+      c.strokeStyle = col; c.lineWidth = 2; c.setLineDash(key === 'grid_hz' ? [4,3] : []);
+      segs.forEach(seg => {
+        if (seg.length < 2) return;
+        const pts = seg.map(d => ({ x: xPx(d.t), y: band(d[key], lo, hi) }));
+        c.beginPath(); c.moveTo(pts[0].x, pts[0].y); _catmullPath(c, pts); c.stroke();
+      });
+    });
+    c.setLineDash([]);
+  }
+  if (powerShowSoc && !powerShowGrid) {
     const socSegs = _splitByGaps(powerData.filter(d => d.soc != null));
     c.strokeStyle = GRAPH_SOC_LINE_COLOR; c.lineWidth = 2; c.setLineDash([]);
     socSegs.forEach(seg => {
@@ -5491,7 +5525,11 @@ function drawPowerChart() {
                  : s.colorPos;
       lines.push({ text: label + ': ' + fmtW(Math.abs(v)), bold: false, color: col+'ee' });
     });
-    if (powerShowSoc) lines.push({ text:'Battery %: '+(d.soc||0)+'%', bold:false, color:GRAPH_SOC_LINE_COLOR });
+    if (powerShowSoc && !powerShowGrid) lines.push({ text:'Battery %: '+(d.soc||0)+'%', bold:false, color:GRAPH_SOC_LINE_COLOR });
+    if (powerShowGrid) {
+      if (d.grid_v  != null) lines.push({ text:'Grid: '+d.grid_v.toFixed(1)+' V',  bold:false, color:GRID_V_COLOR });
+      if (d.grid_hz != null) lines.push({ text:'Freq: '+d.grid_hz.toFixed(2)+' Hz', bold:false, color:GRID_HZ_COLOR });
+    }
 
     c.font = fs+'px sans-serif';
     const tPad  = 7, tLineH = fs + 5;
@@ -5532,7 +5570,16 @@ document.querySelectorAll('#power-series-row .sbtn[data-ps]').forEach(b =>
 
 $('power-soc-btn').addEventListener('click', () => {
   powerShowSoc = !powerShowSoc;
+  if (powerShowSoc) { powerShowGrid = false; $('power-grid-btn').classList.remove('active'); }
   $('power-soc-btn').classList.toggle('active', powerShowSoc);
+  drawPowerChart();
+});
+
+$('power-grid-btn').addEventListener('click', () => {
+  powerShowGrid = !powerShowGrid;
+  // Shares the right-hand axis with battery %, so only one can be shown.
+  if (powerShowGrid) { powerShowSoc = false; $('power-soc-btn').classList.remove('active'); }
+  $('power-grid-btn').classList.toggle('active', powerShowGrid);
   drawPowerChart();
 });
 
