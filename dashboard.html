@@ -554,6 +554,20 @@ input.tr-region-input{flex:0 0 44px;max-width:44px;text-align:center;text-transf
 #batt-modal{display:none;position:fixed;inset:0;z-index:200;
   background:rgba(6,13,28,.88);align-items:center;justify-content:center}
 #batt-modal.open{display:flex}
+/* Shown only when dashboard.html was opened directly as a file:// URL. */
+#file-warning{position:fixed;inset:0;z-index:400;background:rgba(6,13,28,.94);
+  display:flex;align-items:center;justify-content:center;padding:20px}
+.fw-box{background:var(--bg-top);border:1px solid #fb923c;border-radius:16px;
+  max-width:min(560px,94vw);max-height:90vh;overflow-y:auto;padding:22px 24px;
+  font-size:.88rem;line-height:1.55;color:var(--text)}
+.fw-title{font-size:1.02rem;font-weight:700;color:#fb923c;margin-bottom:12px}
+.fw-box p{margin:10px 0}
+.fw-box ol{margin:8px 0 8px 20px;padding:0}
+.fw-box li{margin:6px 0}
+.fw-box code{background:rgba(255,255,255,.09);border-radius:5px;padding:2px 6px;
+  font-size:.85em;white-space:nowrap}
+.fw-box a{color:#60a5fa}
+.fw-foot{color:var(--muted);font-size:.82rem;margin-top:14px}
 #solar-modal{display:none;position:fixed;inset:0;z-index:200;
   background:rgba(6,13,28,.88);align-items:center;justify-content:center}
 #solar-modal.open{display:flex}
@@ -1790,6 +1804,47 @@ function setRingSize(id, px) {
   el.style.width = el.style.height = s;
 }
 
+// ── "Opened as a file" guard ────────────────────────────────────────────────
+// dashboard.html ships in the same folder as the start script, so double-clicking
+// it is an easy and very natural mistake. The page then renders perfectly from a
+// file:// URL and only the API calls fail, which surfaces as a bare
+// "NetworkError when attempting to fetch resource" next to the password box -
+// pointing the user at their password when the real problem is that the server
+// was never started. Two Mac users hit this before it was caught.
+function _openedAsFile() {
+  // Anything that is not http/https cannot reach the API, so treat them all the
+  // same rather than special-casing file: alone. A page served normally that
+  // simply cannot reach the backend is a different problem and keeps the
+  // ordinary "Offline" message.
+  return location.protocol !== 'http:' && location.protocol !== 'https:';
+}
+
+function _showFileWarning() {
+  if (!_openedAsFile() || $('file-warning')) return;
+  const mac = navigator.platform.toLowerCase().includes('mac')
+           || navigator.userAgent.includes('Mac OS');
+  const el = document.createElement('div');
+  el.id = 'file-warning';
+  el.innerHTML = `
+    <div class="fw-box">
+      <div class="fw-title">⚠ The dashboard isn't running yet</div>
+      <p>You've opened <code>dashboard.html</code> directly, so there's nothing for
+         it to get data from. This page is only the display &mdash; the part that
+         talks to your inverter has to be started separately.</p>
+      <p><strong>To fix it:</strong></p>
+      <ol>
+        <li>Go back to the folder you unzipped.</li>
+        <li>Double-click <code>${mac ? 'setup-mac.command' : 'setup.sh'}</code> if you
+            haven't yet, or <code>${mac ? 'start-dashboard.command' : 'start.sh'}</code>
+            if you've already installed.</li>
+        <li>Then open <a href="http://localhost:7890">http://localhost:7890</a> in your browser.</li>
+      </ol>
+      <p class="fw-foot">Bookmark that address rather than this file. Your password
+         is fine &mdash; it was never the problem.</p>
+    </div>`;
+  document.body.appendChild(el);
+}
+
 // ── Plug-in (EcoFlow) solar helpers ─────────────────────────────────────────
 let _efEnabled = false;
 
@@ -2209,8 +2264,11 @@ async function poll() {
     if (d.ok) applyData(d);
     else { $('status-txt').textContent=d.error||'No data'; $('dot').className='err'; }
   } catch(e) {
-    $('status-txt').textContent='Offline · '+e.message;
+    $('status-txt').textContent = _openedAsFile()
+      ? 'Opened as a file · see the message on screen'
+      : 'Offline · ' + e.message;
     $('dot').className='err';
+    _showFileWarning();
   }
   setTimeout(poll, 10000);
 }
@@ -3261,7 +3319,15 @@ async function _tryUnlock() {
     $('pw-modal').classList.remove('open');
     if (_afterUnlock) { const f = _afterUnlock; _afterUnlock = null; f(); }
     else showView(_ctrlDest || 'settings');
-  } catch(e) { $('pw-error').textContent = 'Error: ' + e.message; }
+  } catch(e) {
+    // The commonest cause of a fetch failure here is not a wrong password or a
+    // broken network - it is the page having been opened by double-clicking
+    // dashboard.html, which ships in the same folder as the start script. Say so.
+    $('pw-error').textContent = _openedAsFile()
+      ? 'The dashboard is not running - see the message behind this box.'
+      : 'Error: ' + e.message;
+    if (_openedAsFile()) { _closePwModal(); _showFileWarning(); }
+  }
 }
 
 $('pw-submit').addEventListener('click', _tryUnlock);
