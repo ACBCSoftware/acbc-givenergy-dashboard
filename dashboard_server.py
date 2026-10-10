@@ -1328,6 +1328,15 @@ def init_db():
             conn.execute("ALTER TABLE snapshots ADD COLUMN grid_v REAL")
         if "grid_hz" not in cols:
             conn.execute("ALTER TABLE snapshots ADD COLUMN grid_hz REAL")
+        # Partial index on the plug-in rows. Must come AFTER the plugin_w
+        # migration above: on a fresh database the column does not exist until
+        # then, and creating the index first fails outright.
+        # Plug-in solar exists only from the day the integration was switched on,
+        # so these are a tiny fraction of the table. Without this, integrating
+        # plug-in energy scans all 2.2M rows to find a few thousand (1.06s on
+        # real data) because IS NOT NULL cannot use the plain ts index.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_plugin_ts "
+                     "ON snapshots(ts) WHERE plugin_w IS NOT NULL")
         sched_cols = [r[1] for r in conn.execute("PRAGMA table_info(schedules)")]
         if "power_pct" not in sched_cols:
             conn.execute("ALTER TABLE schedules ADD COLUMN power_pct INTEGER NOT NULL DEFAULT 50")
@@ -1339,6 +1348,22 @@ def init_db():
                 import_cost_p     REAL NOT NULL DEFAULT 0,
                 export_income_p   REAL NOT NULL DEFAULT 0,
                 standing_charge_p REAL NOT NULL DEFAULT 0
+            )
+        """)
+        # Per-day rollup of the inverter's own daily counters, plus plug-in
+        # energy. A CACHE, not a source of truth: every row can be recomputed
+        # from snapshots, so it can never drift into being quietly wrong - a
+        # missing or stale row is simply rebuilt. See _ensure_daily_totals.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_totals (
+                day        TEXT PRIMARY KEY,   -- YYYY-MM-DD, local
+                last_ts    INTEGER NOT NULL,
+                s          REAL NOT NULL DEFAULT 0,   -- solar_today
+                gi         REAL NOT NULL DEFAULT 0,   -- grid_in_today
+                go_        REAL NOT NULL DEFAULT 0,   -- grid_out_today
+                bc         REAL NOT NULL DEFAULT 0,   -- bat_chg_today
+                bd         REAL NOT NULL DEFAULT 0,   -- bat_dis_today
+                p          REAL NOT NULL DEFAULT 0    -- plug-in kWh
             )
         """)
         conn.execute("""
@@ -1526,28 +1551,35 @@ def _batch_compute_and_store_costs(dates: list):
     grid_in_by_day     = {d: 0.0 for d in dates}
     grid_out_by_day    = {d: 0.0 for d in dates}
     try:
+        # Bound by a ts RANGE rather than date(ts,'unixepoch','localtime') IN
+        # (...): the function form cannot use the ts index and scans the whole
+        # table. The range may cover days that were not asked for, so each row
+        # is checked against `wanted` below.
+        wanted = set(dates)
+        t_lo = _local_day_bounds(min(dates))[0]
+        t_hi = _local_day_bounds(max(dates))[1]
         with _db() as conn:
             # Last register reading per day (flat-rate back-fill basis)
             for row in conn.execute(
-                f"SELECT date(ts,'unixepoch','localtime') AS day, "
-                f"grid_in_today, grid_out_today FROM snapshots "
-                f"WHERE ts IN ("
-                f"  SELECT MAX(ts) FROM snapshots "
-                f"  WHERE date(ts,'unixepoch','localtime') IN ({ph}) "
-                f"  GROUP BY date(ts,'unixepoch','localtime'))",
-                dates,
+                "SELECT date(ts,'unixepoch','localtime') AS day, "
+                "grid_in_today, grid_out_today FROM snapshots "
+                "WHERE ts IN ("
+                "  SELECT MAX(ts) FROM snapshots WHERE ts >= ? AND ts < ? "
+                "  GROUP BY date(ts,'unixepoch','localtime'))",
+                (t_lo, t_hi),
             ):
+                if row["day"] not in wanted:
+                    continue
                 grid_in_by_day[row["day"]]  = row["grid_in_today"]  or 0.0
                 grid_out_by_day[row["day"]] = row["grid_out_today"] or 0.0
             # All snapshots ordered by day then ts (for actual-delta computation)
-            snap_rows = list(conn.execute(
-                f"SELECT ts, grid_w, grid_importing, grid_exporting, "
-                f"date(ts,'unixepoch','localtime') AS day "
-                f"FROM snapshots "
-                f"WHERE date(ts,'unixepoch','localtime') IN ({ph}) "
-                f"ORDER BY day, ts",
-                dates,
-            ))
+            snap_rows = [r for r in conn.execute(
+                "SELECT ts, grid_w, grid_importing, grid_exporting, "
+                "date(ts,'unixepoch','localtime') AS day "
+                "FROM snapshots WHERE ts >= ? AND ts < ? "
+                "ORDER BY ts",
+                (t_lo, t_hi),
+            ) if r["day"] in wanted]
     except Exception as exc:
         log.warning("_batch_compute_and_store_costs DB error: %s", exc)
         return
@@ -1601,6 +1633,22 @@ def _ensure_daily_costs(dates: list):
     except Exception:
         cached = set()
     missing = [d for d in dates if d not in cached]
+    if not missing:
+        return
+    # A day with no snapshots can never produce a daily_costs row, so it stays
+    # "missing" for ever and re-triggers the backfill on EVERY request. That was
+    # harmless while history only went back as far as the app had been running;
+    # back-dating a year of data created 273 permanently-empty days in 2025 and
+    # turned it into a guaranteed full-table rescan on every year view.
+    # daily_totals knows exactly which days have data, and it is a 375-row table.
+    try:
+        with _db() as conn:
+            ph2 = ",".join("?" * len(missing))
+            have_data = {r[0] for r in conn.execute(
+                f"SELECT day FROM daily_totals WHERE day IN ({ph2})", missing)}
+    except Exception:
+        have_data = set(missing)      # degrade to the old behaviour, not to silence
+    missing = [d for d in missing if d in have_data]
     if missing:
         _batch_compute_and_store_costs(missing)
 
@@ -5874,35 +5922,14 @@ def api_history():
     # the daily-counter fields.  This avoids the midnight carryover bug where
     # the inverter hasn't yet reset its counter so the first few readings of a
     # new day still show yesterday's total.
-    last_per_day = """
-        SELECT date(ts,'unixepoch','localtime') AS day,
-               solar_today    AS s,
-               grid_in_today  AS gi,
-               grid_out_today AS go_,
-               bat_chg_today  AS bc,
-               bat_dis_today  AS bd
-        FROM snapshots
-        WHERE ts IN (
-            SELECT MAX(ts) FROM snapshots
-            GROUP BY date(ts,'unixepoch','localtime')
-        )
-    """
-
-    # `p` is the plug-in (EcoFlow) energy for the day, 0 before it was installed.
-    # It is kept as its own column all the way through so the UI can show the
-    # split, while solar/home totals below add it in -- the inverter genuinely
-    # cannot see this generation, so leaving it out understates both.
-    #
-    # LEFT JOIN, deliberately, NOT a correlated subquery. Measured on the real
-    # 800k-row production database: a correlated subquery re-runs plugin_daily
-    # per row and took the year view from 1.4s to 30.7s. The join materialises it
-    # once and costs 0.24s over the pre-plug-in baseline.
-    daily_cte = f"""WITH {_PLUGIN_DAILY_CTE},
-        base AS ({last_per_day}),
-        daily AS (
-            SELECT base.*, COALESCE(pd.plugin_kwh, 0) AS p
-            FROM base LEFT JOIN plugin_daily pd ON pd.day = base.day
-        )"""
+    # Reads the daily_totals rollup rather than scanning snapshots. Finding the
+    # last row of each day across the raw table cost 4.11s on a real 2.2M-row
+    # database, and was paid on every request including period=day - which is
+    # why a single day used to cost the same as a whole year. `p` is the plug-in
+    # (EcoFlow) energy, 0 before it was installed, kept as its own column so the
+    # UI can show the split while the solar and home totals below add it in.
+    _ensure_daily_totals()
+    daily_cte = "WITH daily AS (SELECT day, s, gi, go_, bc, bd, p FROM daily_totals)"
 
     if period == "week":
         # Monday of the week: subtract (weekday+6)%7 days so Mon=0 offset
@@ -6568,10 +6595,14 @@ def _plugin_kwh_for_day(day: str) -> float:
     total = 0.0
     try:
         with _db() as conn:
+            t0, t1 = _local_day_bounds(day)
+            # ts range, not date(...,'localtime'): the latter cannot use the
+            # index and costs a full table scan. /api/data calls this on every
+            # poll, so it has to be cheap.
             rows = conn.execute(
                 "SELECT ts, plugin_w FROM snapshots "
-                "WHERE date(ts,'unixepoch','localtime') = ? AND plugin_w IS NOT NULL "
-                "ORDER BY ts", (day,)).fetchall()
+                "WHERE ts >= ? AND ts < ? AND plugin_w IS NOT NULL "
+                "ORDER BY ts", (t0, t1)).fetchall()
         prev_ts = None
         for r in rows:
             if prev_ts is not None:
@@ -6590,33 +6621,124 @@ def _plugin_kwh_today() -> float:
     return _plugin_kwh_for_day(datetime.now().strftime("%Y-%m-%d"))
 
 
-# Per-day plug-in energy, integrated in SQL so history and Year in Review can
-# join it without a query per day. Same rule as _plugin_kwh_for_day: power x
-# elapsed time between consecutive samples, ignoring gaps longer than
-# _EF_KWH_MAX_GAP so a restart or an overnight NULL run cannot invent energy.
+
+
+# ── Daily rollup ──────────────────────────────────────────────────────────────
+# Finding "the last snapshot of each day" across the whole table was the single
+# biggest cost in the history views. Measured on a real 2.2M-row database:
 #
-# LAG runs across the whole ordered set before the day grouping, so the first
-# sample of each day takes its gap from the previous day's last sample. That gap
-# is the overnight shutdown, which is far longer than the cap and therefore
-# discarded -- the filter is self-correcting rather than needing a special case.
+#   SELECT MAX(ts) FROM snapshots GROUP BY date(ts,'unixepoch','localtime')
 #
-# Days before the EcoFlow was installed have no plugin_w rows at all, so they
-# contribute 0 and historical totals are completely unchanged. That is what makes
-# it safe to apply this to Year in Review as well.
-_PLUGIN_DAILY_CTE = f"""
-    plugin_daily AS (
-        SELECT day, ROUND(SUM(w * gap) / 3600000.0, 3) AS plugin_kwh
-        FROM (
-            SELECT date(ts,'unixepoch','localtime') AS day,
-                   plugin_w AS w,
-                   ts - LAG(ts) OVER (ORDER BY ts) AS gap
-            FROM snapshots
-            WHERE plugin_w IS NOT NULL
-        )
-        WHERE gap > 0 AND gap <= {_EF_KWH_MAX_GAP}
-        GROUP BY day
-    )
-"""
+# took 4.11s, because date(...,'localtime') has to be computed for every row and
+# cannot be indexed (SQLite rejects non-deterministic functions in an index).
+# That cost was paid on EVERY history request including period=day, which is why
+# asking for a single day cost the same as asking for a year.
+#
+# daily_totals caches one row per day. It is strictly a cache: each row is
+# recomputed from snapshots with an indexed ts-range query, so a missing, stale
+# or deleted row self-heals rather than becoming a silent wrong answer. Days are
+# filled lazily, so the one-off backfill is spread over cheap indexed queries
+# instead of one enormous scan.
+_DAILY_REFRESH_DAYS = 2      # today and yesterday always recomputed - still moving
+
+
+def _rollup_day(conn, day: str) -> None:
+    """Recompute one day's rollup row from snapshots. Indexed, so it is cheap."""
+    t0, t1 = _local_day_bounds(day)
+    row = conn.execute(
+        "SELECT ts, solar_today, grid_in_today, grid_out_today, "
+        "       bat_chg_today, bat_dis_today "
+        "FROM snapshots WHERE ts >= ? AND ts < ? ORDER BY ts DESC LIMIT 1",
+        (t0, t1)).fetchone()
+    if row is None:
+        conn.execute("DELETE FROM daily_totals WHERE day = ?", (day,))
+        return
+
+    # Plug-in energy: power x elapsed time, ignoring gaps longer than the cap so
+    # a restart or an overnight offline run cannot invent energy. The partial
+    # index on plugin_w keeps this to the handful of rows that have a value.
+    prev_ts, total = None, 0.0
+    for ts, w in conn.execute(
+            "SELECT ts, plugin_w FROM snapshots "
+            "WHERE ts >= ? AND ts < ? AND plugin_w IS NOT NULL ORDER BY ts",
+            (t0, t1)):
+        if prev_ts is not None:
+            gap = ts - prev_ts
+            if 0 < gap <= _EF_KWH_MAX_GAP:
+                total += (w or 0) * gap / 3600.0 / 1000.0
+        prev_ts = ts
+
+    conn.execute(
+        "INSERT INTO daily_totals (day,last_ts,s,gi,go_,bc,bd,p) "
+        "VALUES (?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(day) DO UPDATE SET "
+        "  last_ts=excluded.last_ts, s=excluded.s, gi=excluded.gi, go_=excluded.go_, "
+        "  bc=excluded.bc, bd=excluded.bd, p=excluded.p",
+        (day, row["ts"], row["solar_today"] or 0, row["grid_in_today"] or 0,
+         row["grid_out_today"] or 0, row["bat_chg_today"] or 0,
+         row["bat_dis_today"] or 0, round(total, 3)))
+
+
+def _ensure_daily_totals() -> None:
+    """Bring the rollup up to date: fill any missing day, refresh the recent ones.
+
+    The day list comes from MIN(ts)/MAX(ts) arithmetic rather than a GROUP BY, so
+    working out WHAT to check costs two indexed lookups instead of a full scan.
+    Days with no data simply produce no row.
+    """
+    try:
+        with _db() as conn:
+            # Separate subqueries on purpose: SQLite only rewrites an aggregate
+            # to an index lookup when the query has exactly ONE of MIN/MAX.
+            # "SELECT MIN(ts), MAX(ts)" falls back to a full scan - 0.63s here.
+            bounds = conn.execute(
+                "SELECT (SELECT MIN(ts) FROM snapshots), "
+                "       (SELECT MAX(ts) FROM snapshots)").fetchone()
+            if not bounds or bounds[0] is None:
+                return
+            first = datetime.fromtimestamp(bounds[0]).date()
+            last  = datetime.fromtimestamp(bounds[1]).date()
+            have  = {r[0] for r in conn.execute("SELECT day FROM daily_totals")}
+
+            # Recent days are still accumulating, so always recompute them.
+            stale = {(last - timedelta(days=i)).strftime("%Y-%m-%d")
+                     for i in range(_DAILY_REFRESH_DAYS)}
+
+            todo, d = [], first
+            while d <= last:
+                key = d.strftime("%Y-%m-%d")
+                if key not in have or key in stale:
+                    todo.append(key)
+                d += timedelta(days=1)
+
+            if not todo:
+                return
+            if len(todo) > _DAILY_REFRESH_DAYS:
+                log.info("Building daily history index for %d day(s) - "
+                         "one-off, makes the history views fast", len(todo))
+            for key in todo:
+                _rollup_day(conn, key)
+            conn.commit()
+    except Exception as exc:
+        log.warning("Daily rollup refresh failed: %s", exc)
+
+
+def _local_day_bounds(day: str) -> tuple:
+    """Unix timestamps bounding one LOCAL calendar day: [start, next_start).
+
+    Queries filtered with `date(ts,'unixepoch','localtime') = ?` cannot use the
+    ts index - SQLite has to compute the function for every row, which on a
+    2.2M-row database is a 1.6s full scan for a single day. A plain ts range is
+    indexed and effectively instant.
+
+    Built with datetime rather than arithmetic so the local timezone's own DST
+    rules decide the boundaries: the clock-change days are 23 and 25 hours long,
+    and assuming 86400 would silently clip or double-count an hour on each.
+    """
+    d = datetime.strptime(day, "%Y-%m-%d")
+    start = datetime(d.year, d.month, d.day)
+    nxt   = start + timedelta(days=1)
+    return int(start.timestamp()), int(nxt.timestamp())
 
 
 def _days_in_month(year: int, month: int) -> int:
@@ -6810,6 +6932,13 @@ def _project_year_totals(year: int, daily_rows: list, total_solar: float, home_f
 
 def _year_review_data(year: int) -> dict:
     year_str = str(year)
+    _ensure_daily_totals()
+    # Back-fill the year's costs BEFORE reading them below. The cost rows are
+    # read once at the top, but the back-fill used to be triggered later, from
+    # _project_year_totals - so the very first view of a year read an empty
+    # daily_costs and showed £0 on every best/worst tile, correcting itself only
+    # on a refresh. Idempotent, and a no-op once the rows exist.
+    _ensure_daily_costs(_dates_for_period("year", year_str))
     with _db() as conn:
         # Daily totals: last snapshot per day holds the inverter's final register values.
         # Same "last per day" pattern as api_history to avoid midnight carryover.
@@ -6821,24 +6950,13 @@ def _year_review_data(year: int) -> dict:
         # installed have no plugin_w rows, so they contribute 0 and every past
         # year is bit-for-bit unchanged -- which is what makes this safe to apply
         # here rather than only going forward.
-        # LEFT JOIN rather than a correlated subquery -- see the note in
-        # api_history; the subquery form cost 30s on the production database.
+        # Reads the daily_totals rollup - see the note in api_history. The day
+        # column is a 'YYYY-MM-DD' string, so the year is a prefix match on the
+        # primary key rather than a function over every snapshot row.
         daily_rows = list(conn.execute(
-            f"WITH {_PLUGIN_DAILY_CTE}, "
-            "base AS ("
-            "  SELECT date(ts,'unixepoch','localtime') AS day, "
-            "         solar_today AS s, grid_in_today AS gi, grid_out_today AS go_, "
-            "         bat_chg_today AS bc, bat_dis_today AS bd "
-            "  FROM snapshots "
-            "  WHERE ts IN ("
-            "      SELECT MAX(ts) FROM snapshots "
-            "      GROUP BY date(ts,'unixepoch','localtime')"
-            "  ) AND strftime('%Y', date(ts,'unixepoch','localtime')) = ?"
-            ") "
-            "SELECT base.*, COALESCE(pd.plugin_kwh, 0) AS p "
-            "FROM base LEFT JOIN plugin_daily pd ON pd.day = base.day "
-            "ORDER BY base.day",
-            (year_str,)
+            "SELECT day, s, gi, go_, bc, bd, p FROM daily_totals "
+            "WHERE day LIKE ? ORDER BY day",
+            (year_str + "-%",)
         ))
         cost_rows = list(conn.execute(
             "SELECT date, import_cost_p, export_income_p FROM daily_costs "
@@ -6941,6 +7059,10 @@ def api_power():
     day = request.args.get("day", "")
     if not day:
         return jsonify({"ok": False, "error": "day required"}), 400
+    try:
+        t0, t1 = _local_day_bounds(day)
+    except ValueError:
+        return jsonify({"ok": False, "error": "bad day format, expected YYYY-MM-DD"}), 400
 
     with _db() as conn:
         rows = conn.execute("""
@@ -6959,10 +7081,10 @@ def api_power():
                 ROUND(AVG(grid_v),  1)                                  AS grid_v,
                 ROUND(AVG(grid_hz), 2)                                  AS grid_hz
             FROM snapshots
-            WHERE date(ts, 'unixepoch', 'localtime') = ?
+            WHERE ts >= ? AND ts < ?
             GROUP BY ts / 60
             ORDER BY t
-        """, (day,)).fetchall()
+        """, (t0, t1)).fetchall()
 
     return jsonify({"ok": True, "day": day, "points": [dict(r) for r in rows],
                     "plugin_kwh": round(_plugin_kwh_for_day(day), 2)})
