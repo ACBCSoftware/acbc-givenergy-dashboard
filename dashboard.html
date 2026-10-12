@@ -374,7 +374,40 @@ select optgroup{background:#172035;color:#7fa8cc}
 
 /* ── Flow canvas area ─────────────────────────── */
 #flow-wrap{flex:1;min-height:0;position:relative;}
-#cv{position:absolute;inset:0;width:100%;height:100%}
+#flow-svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.fl-track{fill:none;stroke:rgba(255,255,255,.07);stroke-linecap:round}
+.fl-flow{fill:none;stroke-linecap:round;stroke-dasharray:2 11;animation:fl-dash 1.5s linear infinite;
+  transition:stroke-width .6s}
+@keyframes fl-dash{to{stroke-dashoffset:-26}}
+.fl-rays{stroke:#f59e0b;stroke-width:2.4;stroke-linecap:round;animation:fl-spin 24s linear infinite;
+  transition:opacity .6s}
+.fl-rays.idle{opacity:.18;animation:none}
+@keyframes fl-spin{to{transform:rotate(360deg)}}
+.fl-soc-track,.fl-soc{fill:none}
+.fl-soc-track{stroke:rgba(255,255,255,.08)}
+.fl-soc{stroke-linecap:round;transition:stroke-dasharray 1.2s ease,stroke .6s}
+@media (prefers-reduced-motion:reduce){.fl-flow,.fl-rays{animation:none}}
+.ring-pct{font-weight:700;color:var(--text);line-height:1}
+/* Self-powered box: styled to match #weather-badge, which it lines up with */
+/* Wraps when quick actions are on and a phone has no room for both beside the
+   weather badge: Self-powered then drops under the two buttons */
+#hdr-title{min-width:0}
+#hdr-left-row{display:flex;flex-wrap:wrap;gap:7px;align-items:flex-start}
+#hdr-left-row #quick-action-bar{margin-top:0}
+/* Beside the quick-action buttons the box goes compact so all three fit */
+#hdr-left-row.with-qa #self-pwr{min-width:0;padding:7px 8px}
+#hdr-left-row.with-qa #self-lbl{font-size:.64rem}
+#hdr-left-row.with-qa .self-now{display:none}
+#hdr-left-row.with-qa #self-track{width:60px}
+#self-pwr{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+  background:rgba(0,0,0,0.30);border:1px solid var(--border);border-radius:14px;
+  padding:7px 13px;min-width:110px;font-weight:400;letter-spacing:0}
+#self-pct{font-size:1.3rem;font-weight:700;line-height:1.1}
+#self-lbl{font-size:.75rem;color:var(--muted);white-space:nowrap}
+#self-track{width:84px;height:5px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:2px}
+/* Tiled: the same box sits in the Live tile's top-left corner */
+#flow-wrap #self-pwr{position:absolute;left:10px;top:6px;z-index:1;pointer-events:none}
+#self-bar{height:100%;width:0;border-radius:2px;transition:width 1s ease,background .6s}
 
 /* ── Node elements — positioned by JS ────────── */
 /* Outer nodes: text above ring for solar (top), below for battery/grid (bottom) */
@@ -749,6 +782,239 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 #sf-tile:hover{border-color:rgba(245,158,11,.4)}
 .sf-tile-icon{font-size:1.4rem;line-height:1}
 .sf-tile-lbl{font-size:.75rem;color:var(--muted);white-space:nowrap}
+
+/* ── Desktop tiled layout ─────────────────────────
+   One layout per browser: "tiled" on a desktop, the classic single-view layout
+   everywhere else. Tiled mode does not duplicate anything - the existing panels
+   are moved into the grid below by _enterTiled() and moved back on exit, so the
+   phone and desktop share one set of rendering code. Every rule that changes an
+   existing element is scoped to body.tiled so the phone layout cannot regress. */
+#layout-seg{display:none;background:rgba(0,0,0,0.30);border:1px solid var(--border);
+  border-radius:20px;padding:2px;gap:2px}
+#layout-seg button{background:none;border:none;border-radius:16px;color:var(--muted);
+  font-size:.7rem;padding:3px 10px;cursor:pointer;font-family:inherit}
+#layout-seg button:hover{color:var(--text)}
+#layout-seg button.active{background:rgba(245,158,11,.18);color:#f59e0b}
+#desk-grid{display:none;flex:1;min-height:0;gap:12px;padding:2px 14px 6px;
+  grid-template-columns:repeat(3,minmax(0,1fr));grid-template-rows:repeat(2,minmax(0,1fr));
+  grid-template-areas:"live batt hist" "year power solar"}
+/* No EcoFlow: the power graph takes the Solar Split slot as well */
+#desk-grid.no-solar{grid-template-areas:"live batt hist" "year power power"}
+#desk-grid.no-solar #dt-solar{display:none}
+#dt-live{grid-area:live}#dt-hist{grid-area:hist}#dt-batt{grid-area:batt}
+#dt-year{grid-area:year}#dt-power{grid-area:power}#dt-solar{grid-area:solar}
+.dtile{background:var(--card);border:1px solid var(--border);border-radius:14px;
+  display:flex;flex-direction:column;min-width:0;min-height:0;overflow:hidden}
+.dtile-hdr{display:flex;align-items:center;justify-content:space-between;gap:8px;
+  padding:9px 14px 4px;flex-shrink:0;min-height:30px}
+.dtile-title{font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+.dtile-body{flex:1;min-height:0;display:flex;flex-direction:column}
+.dtile-btn{background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:10px;
+  color:var(--muted);font-size:.7rem;padding:3px 10px;cursor:pointer;font-family:inherit}
+.dtile-btn:hover{color:var(--text)}
+.dtile-btn:disabled{opacity:.4;cursor:default}
+/* Battery tile: animated battery beside the stats; clicking the battery opens
+   the cell/module pop-up the phone uses (#batt-modal) */
+/* Sized off the tile (cqw/cqh), so it neither swamps a 4K tile nor overflows a
+   small one; battery and stats sit together in the middle */
+#dt-batt{container-type:size}
+#dt-batt-body{flex-direction:row;align-items:center;justify-content:center;gap:6cqw;padding:0 16px 10px}
+#bt-visual{flex:0 0 auto;width:min(26cqw,38cqh);display:flex;flex-direction:column;align-items:center;
+  cursor:pointer;border-radius:12px;padding:6px 4px;outline:none;transition:background .2s}
+#bt-visual:hover,#bt-visual:focus-visible{background:rgba(255,255,255,.04)}
+#bt-svg{width:100%;height:auto;display:block}
+.bt-cap{fill:rgba(255,255,255,.18)}
+.bt-shell{fill:rgba(0,0,0,.25);stroke:rgba(255,255,255,.28);stroke-width:2.5;transition:stroke .2s}
+#bt-visual:hover .bt-shell{stroke:rgba(255,255,255,.5)}
+#bt-level{transition:transform 1.2s ease}
+.bt-wave{animation:bt-wave 3.2s linear infinite}
+@keyframes bt-wave{to{transform:translateX(-60px)}}
+.bt-arrows polyline{fill:none;stroke:rgba(255,255,255,.75);stroke-width:4;stroke-linecap:round;
+  stroke-linejoin:round;opacity:0;animation:bt-up 1.8s linear infinite}
+#bt-down polyline{animation-name:bt-down}
+.bt-arrows.off{display:none}
+@keyframes bt-up{0%{transform:translateY(22px);opacity:0}40%{opacity:.8}100%{transform:translateY(-26px);opacity:0}}
+@keyframes bt-down{0%{transform:translateY(-26px);opacity:0}40%{opacity:.8}100%{transform:translateY(22px);opacity:0}}
+.bt-pct{font-size:30px;font-weight:800;fill:#fff;text-anchor:middle;paint-order:stroke;
+  stroke:rgba(4,9,26,.55);stroke-width:4px}
+.bt-kwh{font-size:12px;font-weight:600;fill:rgba(255,255,255,.85);text-anchor:middle;paint-order:stroke;
+  stroke:rgba(4,9,26,.55);stroke-width:3px}
+.bt-hint{font-size:.62rem;color:var(--muted);margin-top:2px;white-space:nowrap}
+@media (prefers-reduced-motion:reduce){.bt-wave,.bt-arrows polyline{animation:none}}
+#bt-stats{flex:0 1 340px;min-width:0;display:flex;flex-direction:column;justify-content:center;
+  font-size:clamp(.74rem,3.3cqh,.95rem)}
+#bt-stats div{display:flex;justify-content:space-between;gap:12px;padding:.42em 0;
+  border-bottom:1px solid rgba(255,255,255,.05);white-space:nowrap}
+#bt-stats span{color:var(--muted)}
+#bt-stats b{font-weight:600;font-variant-numeric:tabular-nums}
+
+body.tiled #hdr{padding:10px 16px 8px}
+body.tiled #hdr-right{flex-direction:row;align-items:center;gap:10px}
+/* Navigation that only exists because the phone shows one view at a time */
+body.tiled #hist-back,body.tiled #hist-yr-row,body.tiled #yr-back,body.tiled #yr-title,
+body.tiled #hourly-back,body.tiled #sbd-header{display:none}
+body.tiled #bat-section{display:none}   /* the Battery tile has its own graphic */
+body.tiled #tiles .tile{cursor:default}
+/* The sun ring opens the Solar Breakdown pop-up on the phone; on a desktop that
+   is its own tile, so no pointer cursor or tooltip suggesting a link */
+body.tiled .node-ring.clickable{cursor:default;pointer-events:none}
+body.tiled #tiles .tile:active{opacity:1}
+body.tiled #tiles{padding:6px 12px 10px}
+/* Compact controls - the phone sizes are for thumbs, not a mouse */
+body.tiled .hnav-btn{width:32px;height:32px;font-size:1.2rem;border-radius:8px}
+body.tiled .period-btn{padding:6px 11px;font-size:.76rem}
+body.tiled .sbtn{padding:5px 9px;font-size:.72rem;border-radius:10px}
+body.tiled #hist-controls,body.tiled #hourly-controls{padding:2px 12px 4px;gap:6px}
+body.tiled #hourly-chart-wrap{padding-bottom:8px}
+body.tiled #hourly-scroll{overflow-x:hidden}   /* bars are fitted to the tile */
+body.tiled .yr-tab{padding:4px 11px}
+body.tiled #yr-top-row{border-bottom:none;padding:0 12px 4px;justify-content:flex-end;min-height:0}
+body.tiled #yr-panel,body.tiled #hourly-panel{display:flex}
+/* History: chart on the left, costs in a full-height box on the right. The
+   cost column is "auto", so the chart takes the whole width when the costs are
+   switched off or there are none. The phone's "tap the chart" hint is dropped -
+   on a desktop the chart carries it as a tooltip instead. */
+body.tiled #hist-panel{display:grid;flex:1;min-height:0;
+  grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr);
+  grid-template-areas:"ctl ctl" "chart cost"}
+body.tiled #hist-controls{grid-area:ctl}
+body.tiled #hist-chart-wrap{grid-area:chart;min-height:0}
+/* Cost box: full height beside the chart but only as wide as its text, all
+   right-aligned. Every size comes off the History tile's height (cqh), so the
+   labels and figures grow together on a big screen and the box widens with
+   them, leaving the rest of the width to the chart. Each row is a label over
+   its figure, with Net Earned as the headline. */
+body.tiled #hist-cost-card{grid-area:cost;min-height:0;display:flex;padding:0 12px 10px 0}
+body.tiled #hist-cost-card:not(:empty){min-width:150px}
+body.tiled #hist-summary{display:none}
+body.tiled #hist-cost-card .cost-card{flex:1;min-height:0;overflow-y:auto;display:flex;
+  flex-direction:column;justify-content:space-between;align-items:stretch;text-align:right;
+  padding:clamp(10px,2.4cqh,22px) clamp(12px,2.2cqh,24px)}
+body.tiled #hist-cost-card .cost-card-hdr{flex-direction:column;align-items:flex-end;gap:2px;margin-bottom:4px}
+body.tiled #hist-cost-card .cost-card-title{font-size:clamp(.82rem,2.2cqh,1.45rem)}
+body.tiled #hist-cost-card .cost-card-est{font-size:clamp(.62rem,1.4cqh,.85rem);max-width:15em;line-height:1.35}
+body.tiled #hist-cost-card .cost-row{flex-direction:column;align-items:flex-end;gap:2px;
+  padding:clamp(4px,1.2cqh,12px) 0}
+body.tiled #hist-cost-card .cost-lbl{font-size:clamp(.72rem,2cqh,1.35rem);white-space:nowrap}
+body.tiled #hist-cost-card .cost-val{font-size:clamp(1rem,3.7cqh,2.4rem);font-weight:700;line-height:1.1;white-space:nowrap}
+body.tiled #hist-cost-card .cost-row.cost-total{margin-top:2px;padding-top:clamp(8px,1.8cqh,16px)}
+body.tiled #hist-cost-card .cost-total .cost-val{font-size:clamp(1.2rem,5.2cqh,3.2rem)}
+/* Mood face: the one matching Net Earned, last in the box */
+.cost-moods{display:none}
+body.tiled #hist-cost-card .cost-moods{display:flex;justify-content:flex-end;padding-top:4px}
+.cost-mood{width:clamp(28px,10cqh,120px);height:auto;fill:none;stroke-width:2.6;stroke-linecap:round}
+.cost-mood .eye{stroke:none}
+.cost-mood.mood-good{stroke:#4ade80;filter:drop-shadow(0 0 8px rgba(74,222,128,.5))}
+.cost-mood.mood-good .eye{fill:#4ade80}
+.cost-mood.mood-ok{stroke:#fb923c;filter:drop-shadow(0 0 8px rgba(251,146,60,.5))}
+.cost-mood.mood-ok .eye{fill:#fb923c}
+.cost-mood.mood-bad{stroke:#f87171;filter:drop-shadow(0 0 8px rgba(248,113,113,.5))}
+.cost-mood.mood-bad .eye{fill:#f87171}
+/* Solar Split reuses the modal box, minus the modal chrome */
+body.tiled #sbd-box{width:auto;max-height:none;flex:1;min-height:0;
+  border:none;border-radius:0;background:none}
+body.tiled #sbd-body{padding:6px 16px 12px}
+/* Solar Split graphic (_renderSolarTile) */
+body.tiled #sbd-body{display:flex;flex-direction:column;overflow:hidden;gap:6px}
+#sg-svg{flex:1;min-height:0;width:100%;display:block}
+.sg-panel rect{fill:url(#sg-cell);stroke:rgba(147,197,253,.6);stroke-width:.8;transition:opacity .6s}
+.sg-panel.idle rect{opacity:.35}
+.sg-lbl{font-size:10px;fill:var(--muted)}
+.sg-val{font-size:16px;font-weight:700}
+.sg-pv{font-size:9px;fill:#bef264;text-anchor:middle;opacity:.85}
+.sg-track{fill:none;stroke:rgba(255,255,255,.07);stroke-width:9;stroke-linecap:round}
+.sg-flow{fill:none;stroke-width:3;stroke-linecap:round;stroke-dasharray:2 11;
+  animation:sg-dash 1.5s linear infinite;transition:stroke-width .6s,opacity .6s}
+.sg-flow.idle{opacity:.15;animation:none;stroke-dasharray:none;stroke-width:2}
+@keyframes sg-dash{to{stroke-dashoffset:-26}}
+.sg-core{fill:#0b1730;stroke:#f59e0b;stroke-width:2.5}
+.sg-rays{stroke:#f59e0b;stroke-width:2.5;stroke-linecap:round;transform-box:view-box;
+  transform-origin:330px 112px;animation:sg-spin 24s linear infinite;transition:opacity .6s}
+.sg-rays.idle{opacity:.2;animation:none}
+@keyframes sg-spin{to{transform:rotate(360deg)}}
+#sg-glow{transition:opacity .6s}
+.sg-total{font-size:15px;font-weight:700;fill:var(--text);text-anchor:middle}
+.sg-total-lbl{font-size:8px;fill:var(--muted);text-anchor:middle}
+.sg-split{display:flex;height:8px;border-radius:4px;overflow:hidden;background:rgba(255,255,255,.07);flex-shrink:0}
+.sg-split i{display:block;height:100%;transition:width .8s ease}
+.sg-legend{display:flex;justify-content:space-between;font-size:.7rem;color:var(--muted);flex-shrink:0}
+.sg-legend span:first-child{color:#f59e0b}.sg-legend span:last-child{color:#a3e635}
+.sg-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;flex-shrink:0}
+.sg-stats div{background:rgba(255,255,255,.04);border-radius:8px;padding:5px 8px;
+  display:flex;flex-direction:column;gap:1px;min-width:0}
+.sg-stats span{font-size:.62rem;color:var(--muted);text-transform:uppercase;letter-spacing:.4px}
+.sg-stats b{font-size:.8rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media (prefers-reduced-motion:reduce){.sg-flow,.sg-rays{animation:none}}
+/* Year in Review: the phone stacks every card in one long scrolling column.
+   Tiled, the three sections sit side by side and carbon + cost share a row,
+   with text sized off the tile itself (cqh/cqw) so it fits at any window size.
+   Scrolling stays as a fallback for windows below the Auto threshold. */
+body.tiled #yr-body{container-type:size;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  grid-template-rows:minmax(0,1fr) auto;gap:8px;padding:2px 12px 10px}
+body.tiled #yr-no-data{grid-column:1/-1}
+body.tiled .yr-stats-wrap{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;min-height:0}
+body.tiled .yr-sec{min-height:0;gap:3px}
+body.tiled .yr-sec-title{font-size:clamp(.56rem,2.6cqh,.66rem);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body.tiled .yr-stats-wrap .yr-cards{flex-direction:column;flex:1;min-height:0;gap:6px}
+body.tiled .yr-card{min-height:0;flex:1;padding:4px 6px;gap:2px;border-radius:10px}
+body.tiled .yr-badge{font-size:clamp(.5rem,2.3cqh,.6rem)}
+body.tiled .yr-val{font-size:clamp(.82rem,5cqh,1.3rem)}
+body.tiled .yr-sub,body.tiled .yr-date{font-size:clamp(.55rem,2.5cqh,.68rem)}
+body.tiled #yr-carbon{padding:8px 10px;border-radius:12px;display:flex;flex-direction:column;justify-content:center}
+body.tiled #yr-carbon-hdr{font-size:clamp(.78rem,4cqh,1.05rem)}
+body.tiled #yr-carbon-hdr svg{width:16px;height:16px;margin-right:5px}
+body.tiled #yr-carbon-sub{margin-top:4px;font-size:clamp(.6rem,2.8cqh,.75rem);line-height:1.45}
+body.tiled #yr-carbon-sub svg{width:13px;height:13px}
+body.tiled #yr-proj-note{font-size:clamp(.55rem,2.4cqh,.64rem);padding:0 2px;line-height:1.35}
+@container (max-width:420px){
+  body.tiled .yr-sec-title svg{display:none}
+}
+/* Live: a short tile moves today's totals into a column beside the triangle,
+   so the flow diagram keeps the full height. layout() re-runs on the resize. */
+#flow-wrap.no-labels .node-lbl{display:none}
+/* The query has to be on the tile, not the body: a container can't restyle itself */
+body.tiled #dt-live{container-type:size}
+@container (max-height:370px){
+  body.tiled #dt-live-body{flex-direction:row}
+  body.tiled #tiles{grid-template-columns:1fr;align-content:center;width:118px;padding:4px 10px 8px 0}
+  body.tiled #tiles .tile{padding:6px 4px}
+  body.tiled .tile-icon{font-size:.9rem}
+  body.tiled .tile-val{font-size:.82rem;margin-top:1px}
+  body.tiled .tile-lbl{font-size:.6rem}
+  /* compact Self-powered box so it clears the solar node */
+  body.tiled #self-pwr{min-width:0;padding:6px 8px;left:6px;top:4px}
+  body.tiled #self-pct{font-size:1.05rem}
+  body.tiled #self-lbl{font-size:.6rem}
+  body.tiled .self-now{display:none}
+  body.tiled #self-track{width:56px}
+}
+/* History: period buttons and day navigation share one row, then the series. */
+body.tiled #dt-hist-body{container-type:size}
+body.tiled #hist-controls{flex-direction:row;flex-wrap:wrap;align-items:center}
+body.tiled #hist-nav{flex:1;min-width:150px}
+body.tiled #hist-series-row{flex-basis:100%}
+@container (max-width:560px){
+  body.tiled .cost-card{padding:7px 9px;font-size:.7rem}
+  body.tiled .cost-card-est{display:none}
+  body.tiled #hist-series-row .sbtn{padding:3px 7px;font-size:.66rem;gap:4px}
+}
+/* Short (up to ~1600x900): tighter controls, and compact label-and-figure cost rows */
+@container (max-height:380px){
+  body.tiled .period-btn{padding:4px 9px}
+  body.tiled .hnav-btn{width:28px;height:28px;font-size:1rem}
+  body.tiled #hist-cost-card .cost-row{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;padding:2px 0}
+  body.tiled #hist-cost-card .cost-val,body.tiled #hist-cost-card .cost-total .cost-val{font-size:.85rem}
+  body.tiled #hist-cost-card .cost-lbl{font-size:.7rem}
+  body.tiled #hist-cost-card .cost-card-est{display:none}
+  body.tiled #hist-cost-card .cost-moods{padding-top:2px}
+  body.tiled #hist-cost-card .cost-mood{width:28px}
+  body.tiled #hist-cost-card .cost-card{padding:8px 10px}
+}
+/* Short tiles (small windows): keep each value and its date, drop the extras */
+@container (max-height:320px){
+  body.tiled .yr-sub,body.tiled #yr-proj-note,body.tiled #yr-carbon-sub{display:none}
+}
 </style>
 </head>
 <body>
@@ -780,12 +1046,26 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
         <span id="ctrl-btn" title="Inverter Control"><svg width="15" height="13" viewBox="0 0 15 13" fill="none" xmlns="http://www.w3.org/2000/svg"><line x1="1" y1="2" x2="14" y2="2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="4.5" cy="2" r="2" fill="currentColor"/><line x1="1" y1="6.5" x2="14" y2="6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="10.5" cy="6.5" r="2" fill="currentColor"/><line x1="1" y1="11" x2="14" y2="11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="6" cy="11" r="2" fill="currentColor"/></svg></span>
         <span id="sched-btn" title="Schedule"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.4V8l2.5 1.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
       </div>
-      <div id="quick-action-bar">
-        <button class="qa-btn" id="qa-charge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#f87171"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Charge</span></button>
-        <button class="qa-btn" id="qa-discharge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#4ade80"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Discharge</span></button>
+      <!-- Quick actions and Self-powered share a row, lined up with the weather
+           badge by _alignHdrRow(). The tiled layout moves #self-pwr into the Live tile. -->
+      <div id="hdr-left-row">
+        <div id="quick-action-bar">
+          <button class="qa-btn" id="qa-charge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#f87171"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Charge</span></button>
+          <button class="qa-btn" id="qa-discharge-btn" title=""><svg width="13" height="19" viewBox="0 0 10 16" fill="#4ade80"><path d="M7 0L0 9h4L2 16l8-10H6z"/></svg><span class="qa-label">1hr Quick Discharge</span></button>
+        </div>
+        <div id="self-pwr" title="Share of the home's use right now not coming from the grid">
+          <div id="self-pct">—</div>
+          <div id="self-lbl">Self-powered<span class="self-now"> now</span></div>
+          <div id="self-track"><div id="self-bar"></div></div>
+        </div>
       </div>
     </div>
     <div id="hdr-right">
+      <div id="layout-seg" title="Screen layout - remembered by this browser only">
+        <button type="button" data-layout="auto">Auto</button>
+        <button type="button" data-layout="tiled">Tiled</button>
+        <button type="button" data-layout="classic">Classic</button>
+      </div>
       <div id="status-pill"><div id="dot"></div><span id="status-txt">Connecting…</span></div>
       <div id="weather-badge" style="display:none" onclick="openSolarForecast()">
         <div id="wx-row1"><span id="wx-icon">—</span><span id="wx-temp">—</span></div>
@@ -801,7 +1081,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 
   <!-- Energy flow area -->
   <div id="flow-wrap">
-    <canvas id="cv"></canvas>
+    <svg id="flow-svg" aria-hidden="true"></svg>
 
     <!-- ☀ Solar — top of circle, text above ring -->
     <div class="node text-above" id="n-solar">
@@ -840,11 +1120,8 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
     <!-- 🔋 Battery — bottom left, text below ring -->
     <div class="node" id="n-battery">
       <div class="node-ring" id="r-battery">
-        <svg viewBox="0 0 44 40" fill="none">
-          <rect x="1" y="11" width="36" height="18" rx="3.5" stroke="#60a5fa" stroke-width="2.2"/>
-          <rect x="37" y="16" width="6" height="8" rx="2" fill="#60a5fa"/>
-          <rect id="batfill" x="3.5" y="13.5" width="0" height="13" rx="2" fill="#60a5fa"/>
-        </svg>
+        <!-- charge % inside the ring; the gauge arc around it is on #flow-svg -->
+        <span class="ring-pct" id="v-bat-ring">—</span>
       </div>
       <div class="node-val" id="v-battery">—</div>
       <div class="node-lbl">Battery</div>
@@ -905,6 +1182,65 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
       <div class="tile-val" id="t-export">—</div>
       <div class="tile-lbl" id="t-export-lbl">Grid export today</div>
     </div>
+  </div>
+
+  <!-- Desktop tiled layout. Empty until _enterTiled() moves the existing
+       panels in; only the Battery tile's own content lives here permanently. -->
+  <div id="desk-grid" class="no-solar">
+    <section class="dtile" id="dt-live">
+      <div class="dtile-hdr"><span class="dtile-title">Live</span></div>
+      <div class="dtile-body" id="dt-live-body"></div>
+    </section>
+    <section class="dtile" id="dt-hist">
+      <div class="dtile-hdr"><span class="dtile-title">History</span></div>
+      <div class="dtile-body" id="dt-hist-body"></div>
+    </section>
+    <section class="dtile" id="dt-batt">
+      <div class="dtile-hdr"><span class="dtile-title">Battery</span></div>
+      <div class="dtile-body" id="dt-batt-body">
+        <div id="bt-visual" role="button" tabindex="0" title="Click for cell and module detail">
+          <svg id="bt-svg" viewBox="0 0 120 210" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+            <defs>
+              <clipPath id="bt-clip"><rect x="13" y="19" width="94" height="180" rx="12"/></clipPath>
+              <linearGradient id="bt-grad" x1="0" y1="0" x2="0" y2="1">
+                <stop id="bt-g1" offset="0" stop-color="#60a5fa"/><stop id="bt-g2" offset="1" stop-color="#1d4ed8"/>
+              </linearGradient>
+            </defs>
+            <rect x="42" y="2" width="36" height="10" rx="4" class="bt-cap"/>
+            <rect x="7" y="13" width="106" height="192" rx="17" class="bt-shell"/>
+            <g clip-path="url(#bt-clip)">
+              <!-- level: _renderBattVisual() slides this group up and down -->
+              <g id="bt-level">
+                <path class="bt-wave" fill="url(#bt-grad)"
+                  d="M0 0 Q15 -6 30 0 T60 0 T90 0 T120 0 T150 0 T180 0 T210 0 V230 H0 Z"/>
+              </g>
+              <g id="bt-up" class="bt-arrows off">
+                <polyline points="48,172 60,160 72,172"/><polyline points="48,172 60,160 72,172"/><polyline points="48,172 60,160 72,172"/>
+              </g>
+              <g id="bt-down" class="bt-arrows off">
+                <polyline points="48,160 60,172 72,160"/><polyline points="48,160 60,172 72,160"/><polyline points="48,160 60,172 72,160"/>
+              </g>
+            </g>
+            <text id="bt-pct" x="60" y="104" class="bt-pct">—</text>
+            <text id="bt-kwh" x="60" y="124" class="bt-kwh"></text>
+          </svg>
+          <div class="bt-hint">Click for cell detail</div>
+        </div>
+        <div id="bt-stats"></div>
+      </div>
+    </section>
+    <section class="dtile" id="dt-year">
+      <div class="dtile-hdr"><span class="dtile-title">Year in Review</span></div>
+      <div class="dtile-body" id="dt-year-body"></div>
+    </section>
+    <section class="dtile" id="dt-power">
+      <div class="dtile-hdr"><span class="dtile-title">Power</span></div>
+      <div class="dtile-body" id="dt-power-body"></div>
+    </section>
+    <section class="dtile" id="dt-solar">
+      <div class="dtile-hdr"><span class="dtile-title">Solar Split</span></div>
+      <div class="dtile-body" id="dt-solar-body"></div>
+    </section>
   </div>
 
   <!-- Version is filled in from /api/data (app_version) so it never lags the backend. -->
@@ -1701,14 +2037,17 @@ function fmtW(w)   { return w >= 1000 ? (w/1000).toFixed(2)+' kW' : Math.round(w
 function fmtKwh(k) { return (k||0).toFixed(1)+' kWh'; }
 
 // ── Canvas ──────────────────────────────────────────────────────────────────
-const canvas = $('cv');
-const ctx    = canvas.getContext('2d');
-let W, H, DPR;
+let W, H;
 
 // Node layout positions — calculated in layout()
 // N[name] = {x, y, r}   (pixel centre, node radius)
 // N._cx, N._cy, N._R    (orbit circle params)
 let N = {};
+
+// True while the desktop tiled layout is active. Declared up here because the
+// live poll and showView() both consult it; see "Desktop tiled layout" below.
+let _isTiled = false;
+const _TILED_VIEWS = new Set(['history', 'hourly', 'yr-review']);
 
 function layout() {
   const wrap = $('flow-wrap');
@@ -1718,12 +2057,8 @@ function layout() {
   if (wrap.clientWidth === 0 || wrap.clientHeight === 0) return;
   W = wrap.clientWidth;
   H = wrap.clientHeight;
-  DPR = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width  = W * DPR;
-  canvas.height = H * DPR;
-  canvas.style.width  = W + 'px';
-  canvas.style.height = H + 'px';
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // The flow layer works in CSS pixels, so it is sharp at any devicePixelRatio
+  $('flow-svg').setAttribute('viewBox', `0 0 ${W} ${H}`);
 
   // ── Option A: all ring sizes derived from R ─────────────────────────────
   const RING_K = 0.36;   // outer ring diameter = R × RING_K
@@ -1732,14 +2067,21 @@ function layout() {
 
   const cx = W / 2;
 
+  // A short tile in the desktop layout drops the node name labels ("Solar",
+  // "Home"...) - the icons already say which is which - and gives that height
+  // to the rings. LBL_H is the label line the text estimates below allow for.
+  const noLabels = _isTiled && H < 300;
+  wrap.classList.toggle('no-labels', noLabels);
+  const LBL_H = noLabels ? 0 : 16;
+
   // R from horizontal fit: cx − R·0.866 − R·RING_K/2 ≥ MARGIN
   const R_horiz = (cx - MARGIN) / (0.866 + RING_K / 2);
   // R from vertical fit: topNeed + botNeed ≤ H − 8
-  //   topNeed  = R + ringPx/2 + textAbove  where textAbove ≈ ringPx·0.34 + 24
-  //   botNeed  = R·0.5 + ringPx/2 + textBelow  where textBelow ≈ ringPx·0.34 + 40
-  //   Combined: R·(1 + 0.5) + R·RING_K·(0.5 + 0.34) + 64 ≤ H
-  //           = R·1.5 + R·RING_K·0.84·2 + 64 ≤ H  → add 16px safety margin
-  const R_vert  = (H - 80) / (1.5 + RING_K * 1.68);
+  //   topNeed  = R + ringPx/2 + textAbove  where textAbove ≈ ringPx·0.34 + 8 + LBL_H
+  //   botNeed  = R·0.5 + ringPx/2 + textBelow  where textBelow ≈ ringPx·0.34 + 24 + LBL_H
+  //   Combined: R·(1 + 0.5) + R·RING_K·(0.5 + 0.34) + 32 + 2·LBL_H ≤ H
+  //           = R·1.5 + R·RING_K·0.84·2 + 32 + 2·LBL_H ≤ H  → add 16px safety margin
+  const R_vert  = (H - 48 - 2 * LBL_H) / (1.5 + RING_K * 1.68);
   const R = Math.max(30, Math.min(R_horiz, R_vert));
 
   const ringPx     = R * RING_K;
@@ -1750,8 +2092,8 @@ function layout() {
   const angBat   = -Math.PI / 2 + 4 * Math.PI / 3;
 
   // Estimated text heights for vertical centring
-  const textAbove = ringPx * 0.34 + 24;   // space above solar ring (column-reverse)
-  const textBelow = ringPx * 0.34 + 40;   // space below bat/grid ring
+  const textAbove = ringPx * 0.34 + 8  + LBL_H;   // space above solar ring (column-reverse)
+  const textBelow = ringPx * 0.34 + 24 + LBL_H;   // space below bat/grid ring
 
   const topNeed  = R + ringPx / 2 + textAbove;
   const botNeed  = R * 0.5 + ringPx / 2 + textBelow;
@@ -1793,9 +2135,10 @@ function layout() {
   const vfs = Math.max(10, Math.round(ringPx     * 0.28)) + 'px';
   const hfs = Math.max(12, Math.round(homeRingPx * 0.36)) + 'px';
   ['v-solar','v-battery','v-grid'].forEach(id => $(id).style.fontSize = vfs);
+  $('v-bat-ring').style.fontSize = Math.max(10, Math.round(ringPx * 0.3)) + 'px';
   $('v-home').style.fontSize = hfs;
 
-  // Snap N[name].{x,y,r} to actual rendered ring centres — edges + particles use these
+  // Snap N[name].{x,y,r} to actual rendered ring centres — the flow lines use these
   const wr = $('flow-wrap').getBoundingClientRect();
   ['solar','battery','grid','home'].forEach(name => {
     const rc = $('r-' + name).getBoundingClientRect();
@@ -1803,6 +2146,7 @@ function layout() {
     N[name].y = rc.top  + rc.height / 2 - wr.top;
     N[name].r = rc.width / 2;
   });
+  render();   // the flow lines follow the rings
 }
 
 function setRingSize(id, px) {
@@ -1866,143 +2210,183 @@ function _efPlugin(d) {
 }
 
 // ── Flow routing ────────────────────────────────────────────────────────────
+// Shares each source's power out to where it actually goes, so every line
+// carries a real figure and no source is drawn sending more than it makes:
+//   solar   -> home, then battery charging, then export
+//   battery -> home, then export
+//   grid    -> home, then battery charging
+// The old rule gave whole readings to every link (Solar -> Grid drawn at the
+// full export figure with 28 W of sun); over a week of real samples it
+// over-claimed in 34% of them, by ~1 kW typically and up to 3.8 kW. Readings
+// are not sampled in lockstep, so the shares rarely balance exactly: what is
+// left over (median 7 W) is simply not drawn. The node figures are untouched.
+// Each flow is coloured by where its power comes from: solar amber, battery
+// purple, grid red.
 function getFlows(d) {
   if (!d) return [];
-  const flows = [];
   const plugin = _efPlugin(d);
-  const solar = (d.solar_w || 0) + plugin;
-  const home  = (d.home_w  || 0) + plugin;
-  const batW  = d.battery_w || 0;
-  const gridW = d.grid_w || 0;
+  let solar = (d.solar_w || 0) + plugin;
+  let home  = (d.home_w  || 0) + plugin;
+  const batW = d.battery_w || 0, gridW = d.grid_w || 0;
+  let batOut  = d.battery_discharging ? batW  : 0;
+  let batIn   = d.battery_charging    ? batW  : 0;
+  let gridIn  = d.grid_importing      ? gridW : 0;
+  let gridOut = d.grid_exporting      ? gridW : 0;
 
-  // Spokes to/from Home
-  if (solar > 20)
-    flows.push({ from:'solar',   to:'home',    col:'#f59e0b', w: solar });
-  // Battery only flows to home when solar isn't already covering demand
-  if (d.battery_discharging && batW > 20 && solar < home)
-    flows.push({ from:'battery', to:'home',    col:'#c084fc', w: batW  });
-  // Grid only flows to home when solar isn't already covering demand
-  if (d.grid_importing && gridW > 20 && solar < home)
-    flows.push({ from:'grid',    to:'home',    col:'#f87171', w: gridW });
-
-  // Outer ring arcs — energy between sources/sinks
-  if (d.battery_charging && batW > 20) {
-    if (solar > 20)
-      flows.push({ from:'solar', to:'battery', col:'#fbbf24', w: batW });
-    if (d.grid_importing && gridW > 20)
-      flows.push({ from:'grid',  to:'battery', col:'#fb923c', w: batW });
-  }
-  if (d.grid_exporting && gridW > 20) {
-    if (solar > 20)
-      flows.push({ from:'solar', to:'grid',    col:'#4ade80', w: gridW });
-    if (d.battery_discharging && batW > 20)
-      flows.push({ from:'battery', to:'grid',  col:'#a78bfa', w: gridW });
-  }
-
+  const flows = [];
+  const COL = { solar: '#f59e0b', battery: '#c084fc', grid: '#f87171' };
+  const send = (from, to, avail, need) => {
+    const w = Math.max(0, Math.min(avail, need));
+    if (w > 20) flows.push({ from, to, col: COL[from], w });
+    return w;
+  };
+  let w;
+  w = send('solar',   'home',    solar,  home);    solar  -= w; home    -= w;
+  w = send('solar',   'battery', solar,  batIn);   solar  -= w; batIn   -= w;
+  w = send('solar',   'grid',    solar,  gridOut); solar  -= w; gridOut -= w;
+  w = send('battery', 'home',    batOut, home);    batOut -= w; home    -= w;
+  w = send('battery', 'grid',    batOut, gridOut); batOut -= w; gridOut -= w;
+  w = send('grid',    'home',    gridIn, home);    gridIn -= w; home    -= w;
+  w = send('grid',    'battery', gridIn, batIn);   gridIn -= w; batIn   -= w;
   return flows;
 }
 
-// ── Particles ───────────────────────────────────────────────────────────────
-const particles = [];
-let frameN = 0, liveData = null, liveFlows = [];
+// ── Flow lines (SVG) ────────────────────────────────────────────────────────
+// Dashed lines the browser animates itself, laid over the rings. Thickness
+// follows the watts, dash speed the power, and colour where the power comes
+// from. The elements are built once; render() only moves and restyles them, so
+// the 10s poll never restarts the animation and nothing redraws per frame.
+// (This replaced a canvas of particles that redrew ~60 times a second.)
+let liveData = null, liveFlows = [];
+const _EDGES = [
+  ['solar',   'home'],     // spoke
+  ['battery', 'home'],     // spoke
+  ['grid',    'home'],     // spoke
+  ['solar',   'battery'],  // outer chord
+  ['solar',   'grid'],     // outer chord
+  ['battery', 'grid'],     // outer chord
+];
+const _SVGNS = 'http://www.w3.org/2000/svg';
+let _flowBuilt = false;
 
-class Particle {
-  constructor(from, to, col) {
-    const a = N[from], b = N[to];
-    this.x1 = a.x; this.y1 = a.y;
-    this.x2 = b.x; this.y2 = b.y;
-    this.t   = Math.random() * 0.3;
-    this.spd = 0.0042 + Math.random() * 0.004;
-    this.r   = 3.5 + Math.random() * 2.5;
-    this.col = col;
-  }
-  tick() { this.t += this.spd; return this.t < 1.12; }
-  draw() {
-    const t = Math.min(1, this.t);
-    const x = this.x1 + (this.x2 - this.x1) * t;
-    const y = this.y1 + (this.y2 - this.y1) * t;
-    const a = t < 0.1 ? t*10 : t > 0.84 ? (1-t)/0.16 : 1;
-    ctx.save();
-    ctx.globalAlpha = a * 0.92;
-    ctx.shadowColor = this.col; ctx.shadowBlur = 14;
-    ctx.fillStyle   = this.col;
-    ctx.beginPath(); ctx.arc(x, y, this.r, 0, Math.PI*2); ctx.fill();
-    ctx.restore();
-  }
+function _svgEl(tag, attrs, parent) {
+  const el = document.createElementNS(_SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(el);
+  return el;
 }
 
-function tickParticles() {
-  frameN++;
-  liveFlows.forEach(fl => {
-    const rate = Math.max(3, Math.round(55 / Math.max(1, fl.w / 400)));
-    if (frameN % rate === 0) particles.push(new Particle(fl.from, fl.to, fl.col));
-  });
-  for (let i = particles.length-1; i >= 0; i--)
-    if (!particles[i].tick()) particles.splice(i, 1);
+function _buildFlowSvg() {
+  const svg = $('flow-svg');
+  svg.innerHTML = '';
+  _EDGES.forEach((_, i) => _svgEl('path', { id: 'fl-t-' + i, class: 'fl-track' }, svg));
+  _EDGES.forEach((_, i) => _svgEl('path', { id: 'fl-f-' + i, class: 'fl-flow' }, svg));
+  // Solar rays, and the battery's charge gauge (a track plus the filled arc)
+  const rays = _svgEl('g', { id: 'fl-rays', class: 'fl-rays' }, svg);
+  for (let i = 0; i < 12; i++) _svgEl('line', {}, rays);
+  _svgEl('circle', { id: 'fl-soc-track', class: 'fl-soc-track' }, svg);
+  _svgEl('circle', { id: 'fl-soc', class: 'fl-soc' }, svg);
+  _flowBuilt = true;
 }
 
-// ── Canvas render ───────────────────────────────────────────────────────────
-function activeEdgeSet() {
-  const s = new Set();
-  liveFlows.forEach(f => s.add(f.from+'-'+f.to));
-  return s;
-}
+// The outer triangle bows gently away from Home (by this fraction of each
+// link's length); the spokes into Home stay straight.
+const _FLOW_BOW = 0.07;
 
-function drawEdge(from, to, active) {
+// Path for the link between two nodes, drawn from `from` to `to` so the dashes
+// run in the direction of flow. Ends are trimmed to the ring edges, along the
+// curve's own tangent so a bowed link still meets the ring squarely.
+function _linkPath(from, to) {
   const a = N[from], b = N[to];
-  if (!a||!b) return;
-  const dx=b.x-a.x, dy=b.y-a.y, len=Math.sqrt(dx*dx+dy*dy);
-  const ux=dx/len, uy=dy/len;
-  const sx=a.x+ux*(a.r+5), sy=a.y+uy*(a.r+5);
-  const ex=b.x-ux*(b.r+5), ey=b.y-uy*(b.r+5);
-  ctx.save();
-  if (active) {
-    ctx.strokeStyle = 'rgba(200,220,255,0.35)';
-    ctx.lineWidth   = 2;
-    ctx.shadowColor = 'rgba(100,160,255,0.5)';
-    ctx.shadowBlur  = 8;
-    ctx.setLineDash([5, 9]);
-    ctx.lineDashOffset = -(frameN * 0.3);
-  } else {
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-    ctx.lineWidth   = 1.2;
-    ctx.setLineDash([]);
+  let cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+  const curved = from !== 'home' && to !== 'home';
+  if (curved) {
+    const h = N.home;
+    const nx = cx - h.x, ny = cy - h.y, nlen = Math.hypot(nx, ny) || 1;
+    // A quadratic's midpoint sits half way to its control point, hence 2x
+    const off = 2 * _FLOW_BOW * Math.hypot(b.x - a.x, b.y - a.y);
+    cx += nx / nlen * off; cy += ny / nlen * off;
   }
-  ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.restore();
+  const trim = (p, tx, ty) => {
+    const dx = tx - p.x, dy = ty - p.y, l = Math.hypot(dx, dy) || 1;
+    return [p.x + dx / l * (p.r + 4), p.y + dy / l * (p.r + 4)];
+  };
+  const [sx, sy] = trim(a, cx, cy), [ex, ey] = trim(b, cx, cy);
+  const f = v => v.toFixed(1);
+  return curved ? `M${f(sx)} ${f(sy)} Q${f(cx)} ${f(cy)} ${f(ex)} ${f(ey)}`
+                : `M${f(sx)} ${f(sy)} L${f(ex)} ${f(ey)}`;
 }
 
 function render() {
-  ctx.clearRect(0, 0, W, H);
   if (!N.solar) return;
+  if (!_flowBuilt) _buildFlowSvg();
+  // Line weight scales with ring size, so a desktop tile and a phone both look right
+  const k = Math.max(0.7, Math.min(1.4, (N.solar.r * 2) / 60));
 
-  const edges = activeEdgeSet();
-
-  // All possible edges: 3 spokes + 3 outer chords
-  const allEdges = [
-    ['solar',   'home'],     // spoke
-    ['battery', 'home'],     // spoke
-    ['grid',    'home'],     // spoke
-    ['solar',   'battery'],  // outer arc chord
-    ['solar',   'grid'],     // outer arc chord
-    ['battery', 'grid'],     // outer arc chord
-  ];
-  allEdges.forEach(([a,b]) => {
-    const on = edges.has(a+'-'+b) || edges.has(b+'-'+a);
-    drawEdge(a, b, on);
+  // Each link is a faint channel; the flow's dashes run inside it
+  _EDGES.forEach(([a, b], i) => {
+    const t = $('fl-t-' + i);
+    t.setAttribute('d', _linkPath(a, b));
+    t.style.strokeWidth = (11 * k).toFixed(1);
+    const p = $('fl-f-' + i);
+    const f = liveFlows.find(fl => (fl.from === a && fl.to === b) || (fl.from === b && fl.to === a));
+    if (!f) { p.style.display = 'none'; return; }
+    p.setAttribute('d', _linkPath(f.from, f.to));
+    p.setAttribute('stroke', f.col);
+    // Width and dash speed on a log scale from 20 W to 5 kW, so each tenfold
+    // step in power looks different: 28 W is thin and slow, 556 W medium,
+    // 2.9 kW thick and fast. (A linear scale saturated at ~1-3 kW.)
+    const lvl = Math.max(0, Math.min(1, Math.log10(f.w / 20) / Math.log10(250)));
+    p.style.strokeWidth = ((1.5 + 6.5 * lvl) * k).toFixed(1);
+    p.style.animationDuration = (3.2 - 2.7 * lvl).toFixed(2) + 's';
+    p.style.display = '';
   });
 
-  // Particles on top
-  particles.forEach(p => p.draw());
+  // Sun rays just outside the solar ring, turning while it generates
+  const s = N.solar, r1 = s.r + 5, r2 = s.r + 5 + Math.max(5, s.r * 0.28);
+  $('fl-rays').querySelectorAll('line').forEach((ln, i) => {
+    const ang = i * Math.PI / 6, c = Math.cos(ang), sn = Math.sin(ang);
+    ln.setAttribute('x1', s.x + r1 * c); ln.setAttribute('y1', s.y + r1 * sn);
+    ln.setAttribute('x2', s.x + r2 * c); ln.setAttribute('y2', s.y + r2 * sn);
+  });
+  $('fl-rays').style.transformOrigin = `${s.x}px ${s.y}px`;
+
+  // Battery charge gauge hugging the battery ring
+  const bt = N.battery, gr = bt.r + 5;
+  ['fl-soc-track', 'fl-soc'].forEach(id => {
+    const c = $(id);
+    c.setAttribute('cx', bt.x); c.setAttribute('cy', bt.y); c.setAttribute('r', gr);
+    c.style.strokeWidth = Math.max(3, bt.r * 0.12).toFixed(1);
+  });
+  _renderLiveExtras();
+}
+
+// Rays and gauge state from the latest data (positions come from render()).
+function _renderLiveExtras() {
+  const d = liveData;
+  if (!d || !_flowBuilt || !N.battery) return;
+  const plugin = _efPlugin(d);
+  $('fl-rays').classList.toggle('idle', (d.solar_w || 0) + plugin <= 20);
+
+  const soc = (d.soc != null && d.soc >= 0 && d.soc <= 100) ? d.soc : null;
+  const cs = d.charge_status;
+  const charging    = cs === 2 || cs === 3 || (cs == null && d.battery_charging);
+  const discharging = cs === 5 || (cs == null && d.battery_discharging);
+  const gauge = $('fl-soc');
+  const circ = 2 * Math.PI * (N.battery.r + 5);
+  gauge.style.display = soc == null ? 'none' : '';
+  gauge.setAttribute('stroke', charging ? '#4ade80' : discharging ? '#c084fc' : '#60a5fa');
+  gauge.setAttribute('stroke-dasharray', `${(circ * (soc || 0) / 100).toFixed(1)} ${circ.toFixed(1)}`);
+  gauge.setAttribute('transform', `rotate(-90 ${N.battery.x} ${N.battery.y})`);
 }
 
 // ── Node styling ────────────────────────────────────────────────────────────
-function styleRing(id, color, active) {
+// glow scales the outer glow (1 = standard); the home ring uses it to show load
+function styleRing(id, color, active, glow = 1) {
   const el = $(id);
   el.style.borderColor = active ? color : color + '40';
   el.style.boxShadow   = active
-    ? `0 0 24px ${color}55, inset 0 0 12px ${color}18`
+    ? `0 0 ${Math.round(24 * glow)}px ${color}${glow > 1 ? '77' : '55'}, inset 0 0 12px ${color}18`
     : 'none';
   el.querySelectorAll('line,path,rect:not([id])').forEach(s => {
     if (s.hasAttribute('stroke') && s.getAttribute('stroke') !== 'none')
@@ -2018,10 +2402,6 @@ function styleRing(id, color, active) {
   });
 }
 
-function updateBatFill(soc) {
-  const f = $('batfill');
-  if (f) f.setAttribute('width', Math.round((soc/100)*28));
-}
 
 // ── Apply live data ─────────────────────────────────────────────────────────
 function applyData(d) {
@@ -2037,6 +2417,7 @@ function applyData(d) {
   liveFlows = getFlows(d);
   setSchedIcon(d.scheduler_active);
   updateQuickActions(d);
+  _alignHdrRow();
   if (d.solar_forecast_configured !== undefined) {
     _sfConfigured = !!d.solar_forecast_configured;
     _updateSfVisibility();
@@ -2066,8 +2447,8 @@ function applyData(d) {
   styleRing('r-solar', '#f59e0b', solarOn);
   $('v-solar').textContent = fmtW(solarTotal);
 
-  // Home
-  styleRing('r-home', '#67e8f9', true);
+  // Home - the glow grows with household load
+  styleRing('r-home', '#67e8f9', true, 0.6 + Math.min(1.4, homeTotal / 3000));
   $('v-home').textContent = fmtW(homeTotal);
 
   // Battery
@@ -2076,15 +2457,15 @@ function applyData(d) {
   const csCharging    = cs === 2 || (cs == null && d.battery_charging);
   const csFinishing   = cs === 3;
   const csDischarging = cs === 5 || (cs == null && d.battery_discharging);
-  const batCol = csDischarging ? '#c084fc' : '#60a5fa';
+  const batCol = csDischarging ? '#c084fc' : (csCharging || csFinishing) ? '#4ade80' : '#60a5fa';
   styleRing('r-battery', batCol, batOn);
   $('v-battery').textContent  = fmtW(d.battery_w);
   const bsEl = $('v-bat-state');
   if      (csFinishing)   { bsEl.textContent='▲ Finishing';   bsEl.style.color='#fbbf24'; }
-  else if (csCharging)    { bsEl.textContent='▲ Charging';    bsEl.style.color='#60a5fa'; }
+  else if (csCharging)    { bsEl.textContent='▲ Charging';    bsEl.style.color='#4ade80'; }
   else if (csDischarging) { bsEl.textContent='▼ Discharging'; bsEl.style.color='#c084fc'; }
   else                    { bsEl.textContent='Idle';           bsEl.style.color='#5a7a9e'; }
-  updateBatFill(d.soc);
+  $('v-bat-ring').textContent = (d.soc != null && d.soc >= 0 && d.soc <= 100) ? d.soc + '%' : '—';
 
   // Grid
   const gridIdle = (d.grid_w || 0) < 10;
@@ -2097,6 +2478,19 @@ function applyData(d) {
   else if (d.grid_importing)           { gdEl.textContent='▼ Importing'; gdEl.style.color='#f87171'; }
   else if (d.grid_exporting)           { gdEl.textContent='▲ Exporting'; gdEl.style.color='#4ade80'; }
   else                                 { gdEl.textContent='Idle';        gdEl.style.color='#5a7a9e'; }
+
+  // Self-powered now: the share of the home's current use NOT drawn from the
+  // grid. Uses only the grid and home readings (no derived balance, which is
+  // noisy sample to sample), clamped to 0-100. Grid import that is charging
+  // the battery counts against it, which matches how a forced charge behaves.
+  const gridIn = (d.grid_importing && !gridIdle) ? (d.grid_w || 0) : 0;
+  const selfPct = homeTotal > 0 ? Math.round(100 * Math.max(0, 1 - gridIn / homeTotal)) : 100;
+  const selfCol = selfPct >= 50 ? '#4ade80' : '#fb923c';
+  $('self-pct').textContent = selfPct + '%';
+  $('self-pct').style.color = selfCol;
+  $('self-bar').style.width = selfPct + '%';
+  $('self-bar').style.background = selfCol;
+  render();
 
   // Battery bar
   const soc = d.soc || 0;
@@ -2130,6 +2524,7 @@ function applyData(d) {
   // Tiles — store data and (re)render with current rotation mode
   _tileLiveData = d;
   _renderTiles();
+  if (_isTiled) _renderTiledLive(d);
 
   // Status — store ts and label; the 1-s ticker (_tickAge) updates the "ago" part
   _lastDataTs     = d.ts || 0;
@@ -2148,8 +2543,6 @@ function _tickAge() {
 }
 setInterval(_tickAge, 1000);
 
-// ── Loop ────────────────────────────────────────────────────────────────────
-let _loopRaf = null;
 // ── Quick Actions ─────────────────────────────────────────────────────────────
 const _QA_PROFILES = new Set(['single_phase_ac_coupled','single_phase_2slot','single_phase_extended']);
 let _qaInFlight = false;
@@ -2258,9 +2651,6 @@ async function _runQuickAction(type, isActive) {
 $('qa-charge-btn').addEventListener('click',    () => quickAction('charge'));
 $('qa-discharge-btn').addEventListener('click', () => quickAction('discharge'));
 
-function loop() { tickParticles(); render(); _loopRaf = requestAnimationFrame(loop); }
-function _pauseLoop()  { if (_loopRaf) { cancelAnimationFrame(_loopRaf); _loopRaf = null; } }
-function _resumeLoop() { if (!_loopRaf && currentView === 'live') _loopRaf = requestAnimationFrame(loop); }
 
 // ── Poll ────────────────────────────────────────────────────────────────────
 async function poll() {
@@ -2335,6 +2725,7 @@ async function pollWeather() {
       $('wx-row3').textContent = 'Obs ' + obsTime;
       // Ensure badge is visible now that we have data (may have been hidden on first load)
       if (currentView === 'live') $('weather-badge').style.display = '';
+      _alignHdrRow();   // the badge's size may have changed with its content
     }
   } catch(e) { /* silently ignore — weather is non-critical */ }
   setTimeout(pollWeather, retryMs);
@@ -2825,6 +3216,14 @@ let _battActiveIdx = 0;
 
 function openBattModal() {
   $('batt-modal').classList.add('open');
+  loadBattDetail();
+}
+
+// Reads the BMS directly: /api/battery opens its own socket to the inverter and
+// the listen loop has to reconnect afterwards. So it only runs when the user
+// opens the pop-up (battery bar on the phone, battery graphic on a desktop) -
+// never on a timer or on page load.
+function loadBattDetail() {
   $('bdd-tabs').innerHTML = '';
   $('bdd-body').innerHTML = '<div class="bdd-spinner">Reading battery modules…</div>';
   fetch('/api/battery', {cache:'no-store'})
@@ -4015,7 +4414,7 @@ async function ecoflowTest() {
 // array and the plug-in system separately, because once they are added together
 // on the home screen there is otherwise no way to tell them apart.
 async function openSolarBreakdown() {
-  if (!_efEnabled) return;
+  if (!_efEnabled || _isTiled) return;   // tiled: already on screen in its own tile
   $('solar-modal').classList.add('open');
   const body = $('sbd-body');
   body.innerHTML = '<div class="bdd-spinner">Loading…</div>';
@@ -4025,40 +4424,46 @@ async function openSolarBreakdown() {
       fetch('/api/ecoflow', {cache:'no-store'})
     ]);
     const d = await dR.json(), e = await eR.json();
-    const inv    = d.solar_w || 0;
-    const plugin = (e.power_w === null || e.power_w === undefined) ? null : e.power_w;
-    const total  = inv + (plugin || 0);
-    // "Offline" and "no reading yet" are different states and must not be
-    // conflated -- a device that is online but has simply not changed its
-    // output for a few minutes is neither.
-    const offline = !e.online;
-    const noValue = plugin === null;
-    const pluginLabel = offline ? 'Offline' : noValue ? 'Waiting…' : fmtW(plugin);
-    body.innerHTML = `
-      <div class="sbd-row">
-        <span class="sbd-name">Inverter array
-          <span class="sbd-sub">Measured by the GivEnergy</span></span>
-        <span class="sbd-val">${fmtW(inv)}</span>
-      </div>
-      <div class="sbd-row">
-        <span class="sbd-name">Plug-in solar
-          <span class="sbd-sub">EcoFlow STREAM${e.serial ? ' · ' + e.serial : ''}</span></span>
-        <span class="sbd-val${(offline || noValue) ? ' muted' : ''}">${pluginLabel}</span>
-      </div>
-      <div class="sbd-row total">
-        <span class="sbd-name">Total generating now</span>
-        <span class="sbd-val">${fmtW(total)}</span>
-      </div>
-      <div class="sbd-row">
-        <span class="sbd-name">Plug-in solar today
-          <span class="sbd-sub">Energy fed into the house</span></span>
-        <span class="sbd-val">${(e.today_kwh ?? 0).toFixed(2)} kWh</span>
-      </div>
-      ${offline ? '<div class="sbd-note">The STREAM powers down overnight and comes back once the panels make around 11&nbsp;W, so "Offline" in the dark is normal. While it is offline nothing is added to Home or Solar.</div>' : ''}
-      <div class="sbd-note">The inverter cannot see the plug-in system &mdash; it feeds in past the grid CT. Home and Solar on the main screen include it; graphs show it as a separate series.</div>`;
+    body.innerHTML = _solarBreakdownHtml(d.solar_w || 0, e);
   } catch(err) {
     body.innerHTML = '<div class="sbd-note">Could not load solar breakdown.</div>';
   }
+}
+
+// `e` is the /api/ecoflow shape. The tiled layout builds the same thing from the
+// ecoflow + plugin_today fields /api/data already carries, so the tile costs no
+// extra requests.
+function _solarBreakdownHtml(inv, e) {
+  const plugin = (e.power_w === null || e.power_w === undefined) ? null : e.power_w;
+  const total  = inv + (plugin || 0);
+  // "Offline" and "no reading yet" are different states and must not be
+  // conflated -- a device that is online but has simply not changed its
+  // output for a few minutes is neither.
+  const offline = !e.online;
+  const noValue = plugin === null;
+  const pluginLabel = offline ? 'Offline' : noValue ? 'Waiting…' : fmtW(plugin);
+  return `
+    <div class="sbd-row">
+      <span class="sbd-name">Inverter array
+        <span class="sbd-sub">Measured by the GivEnergy</span></span>
+      <span class="sbd-val">${fmtW(inv)}</span>
+    </div>
+    <div class="sbd-row">
+      <span class="sbd-name">Plug-in solar
+        <span class="sbd-sub">EcoFlow STREAM${e.serial ? ' · ' + e.serial : ''}</span></span>
+      <span class="sbd-val${(offline || noValue) ? ' muted' : ''}">${pluginLabel}</span>
+    </div>
+    <div class="sbd-row total">
+      <span class="sbd-name">Total generating now</span>
+      <span class="sbd-val">${fmtW(total)}</span>
+    </div>
+    <div class="sbd-row">
+      <span class="sbd-name">Plug-in solar today
+        <span class="sbd-sub">Energy fed into the house</span></span>
+      <span class="sbd-val">${(e.today_kwh ?? 0).toFixed(2)} kWh</span>
+    </div>
+    ${offline ? '<div class="sbd-note">The STREAM powers down overnight and comes back once the panels make around 11&nbsp;W, so "Offline" in the dark is normal. While it is offline nothing is added to Home or Solar.</div>' : ''}
+    <div class="sbd-note">The inverter cannot see the plug-in system &mdash; it feeds in past the grid CT. Home and Solar on the main screen include it; graphs show it as a separate series.</div>`;
 }
 
 async function _doSaveSettings(msgEl) {
@@ -4178,7 +4583,31 @@ function _updateSfVisibility() {
   $('sf-tile').style.display = (live && _sfConfigured && !_weatherConfigured) ? 'flex' : 'none';
   // Weather badge gets a pointer cursor when SF is configured (click opens SF panel)
   $('weather-badge').style.cursor = (live && _weatherConfigured && _sfConfigured) ? 'pointer' : 'default';
+  $('self-pwr').style.display = live ? '' : 'none';
+  _alignHdrRow();
 }
+
+// Line the header's left row (quick actions + Self-powered) up with the weather
+// badge or forecast tile opposite: same top, and the Self-powered box the same
+// height. Whichever side sits higher moves down to meet the other - on a phone
+// the two-line title pushes the left side lower. Measured, not fixed, because
+// the title wraps differently at each screen width.
+function _alignHdrRow() {
+  const row = $('hdr-left-row'), box = $('self-pwr');
+  const refs = [$('weather-badge'), $('sf-tile')];
+  row.style.marginTop = '0px';
+  box.style.minHeight = '';
+  row.classList.toggle('with-qa', $('quick-action-bar').style.display === 'flex');
+  refs.forEach(el => el.style.marginTop = '');
+  if (_isTiled) return;   // the desktop header is a single row; nothing to line up
+  const ref = refs.find(el => el.offsetParent !== null);
+  if (!ref || box.offsetParent === null) return;
+  box.style.minHeight = ref.offsetHeight + 'px';
+  const gap = ref.getBoundingClientRect().top - row.getBoundingClientRect().top;
+  if (gap > 0.5) row.style.marginTop = gap + 'px';
+  else if (gap < -0.5) ref.style.marginTop = -gap + 'px';
+}
+window.addEventListener('resize', _alignHdrRow);
 
 function openSolarForecast() {
   if (!_sfConfigured) return;
@@ -4363,7 +4792,7 @@ async function initApp() {
 }
 
 // ── Init ────────────────────────────────────────────────────────────────────
-window.addEventListener('resize', () => { layout(); particles.length = 0; });
+window.addEventListener('resize', () => { layout(); });
 
 // Re-run layout whenever the flow container actually changes size. This catches
 // the page still settling on load (mobile URL bar, font loading, PWA chrome),
@@ -4371,29 +4800,22 @@ window.addEventListener('resize', () => { layout(); particles.length = 0; });
 // zero-size firings (when another view is showing).
 if (window.ResizeObserver) {
   const ro = new ResizeObserver(() => {
-    if (currentView === 'live') { layout(); particles.length = 0; }
+    if (currentView === 'live') layout();
   });
   ro.observe($('flow-wrap'));
 }
 
 // Re-layout when fonts finish loading (text-height estimates depend on them)
 if (document.fonts && document.fonts.ready) {
-  document.fonts.ready.then(() => { if (currentView === 'live') layout(); });
+  document.fonts.ready.then(() => { if (currentView === 'live') { layout(); _alignHdrRow(); } });
 }
 
 // Re-layout when returning to the tab / resuming the PWA
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    _pauseLoop();
-  } else if (currentView === 'live') {
-    layout(); particles.length = 0;
-    render();       // draw lines immediately — don't wait for first rAF tick
-    _resumeLoop();  // then start the animation loop for particles
-  }
+  if (!document.hidden && currentView === 'live') layout();
 });
 
 layout();
-_loopRaf = requestAnimationFrame(loop);
 poll();
 initApp();
 
@@ -4456,12 +4878,18 @@ let _showCostCard = true;
 let currentView  = 'live';
 
 function showView(v) {
+  // History, the power graph and Year in Review are tiles of the live screen
+  // when tiled, so the phone's routes to them all land back on the grid.
+  if (_isTiled && _TILED_VIEWS.has(v)) v = 'live';
   currentView = v;
   const live = v === 'live';
+  const grid = _isTiled && live;
+  $('desk-grid').style.display      = grid         ? 'grid' : 'none';
   $('flow-wrap').style.display      = live         ? '' : 'none';
   $('bat-section').style.display    = live         ? '' : 'none';
   $('tiles').style.display          = live         ? '' : 'none';
-  $('hist-panel').style.display     = v==='history'? 'flex' : 'none';
+  // '' (not 'flex') when tiled, so the body.tiled rules decide the display
+  $('hist-panel').style.display     = grid ? '' : v==='history'? 'flex' : 'none';
   $('settings-panel').style.display             = v==='settings'             ? 'flex' : 'none';
   $('settings-display-panel').style.display     = v==='settings-display'     ? 'flex' : 'none';
   $('settings-integrations-panel').style.display= v==='settings-integrations'? 'flex' : 'none';
@@ -4471,8 +4899,8 @@ function showView(v) {
   $('ctrl-panel').style.display     = v==='control' ? 'flex' : 'none';
   $('logs-panel').style.display     = v==='logs'    ? 'flex' : 'none';
   $('sched-panel').style.display    = v==='schedule'? 'flex' : 'none';
-  $('hourly-panel').style.display   = v==='hourly'   ? 'flex' : 'none';
-  $('yr-panel').style.display       = v==='yr-review'? 'flex' : 'none';
+  $('hourly-panel').style.display   = grid ? '' : v==='hourly'   ? 'flex' : 'none';
+  $('yr-panel').style.display       = grid ? '' : v==='yr-review'? 'flex' : 'none';
   _updateSfVisibility();
   if (live) {
     if (liveData) {
@@ -4491,10 +4919,9 @@ function showView(v) {
     // Without the rAF, snapped ring centres can be stale (seen as animation
     // triangle drifting right on Chrome mobile until a manual repaint).
     requestAnimationFrame(() => {
-      layout(); particles.length = 0; render(); _resumeLoop();
+      layout();
+      if (grid) _drawTiledCharts();
     });
-  } else {
-    _pauseLoop();
   }
   if (v==='history')   loadHistory();
   if (v==='yr-review') loadYearReview();
@@ -4539,6 +4966,8 @@ function renderHistory() {
   // In Day view the chart is tappable to drill into an hourly breakdown
   const dayMode = histPeriod === 'day' && histData.length;
   $('hist-canvas').style.cursor = dayMode ? 'pointer' : 'default';
+  // The History tile has no hint line, so on a desktop the chart carries it
+  $('hist-canvas').title = (dayMode && _isTiled) ? 'Click to show this day in the Power graph' : '';
 
   drawHistChart();
   updateHistSummary();
@@ -4735,6 +5164,22 @@ function updateCostCard(cost) {
   const netClass   = netEarned >= 0 ? 'is-income' : 'is-cost';
   const netDisplay = (netEarned >= 0 ? '' : '−') + fmtP(netEarned);
 
+  // Mood face (desktop History tile only; hidden on the phone by CSS), one at
+  // a time: happy = more than 10p ahead, straight = within 10p either way,
+  // sad = more than 10p behind. While earlier days are still being costed the
+  // total is partial, so no face is shown rather than judging a half-finished
+  // figure.
+  const mood = cost.pending_days ? null
+             : netEarned > 10 ? 'good' : netEarned < -10 ? 'bad' : 'ok';
+  const MOUTH = { good: 'M12 24 Q20 32 28 24', ok: 'M13 26 L27 26', bad: 'M12 29 Q20 21 28 29' };
+  const LABEL = { good: 'Ahead', ok: 'About even', bad: 'Behind' };
+  const moods = !mood ? '' : `<div class="cost-moods"
+        title="Net Earned: happy if over 10p ahead, straight within 10p, sad if over 10p behind">
+      <svg class="cost-mood mood-${mood}" viewBox="0 0 40 40" role="img" aria-label="${LABEL[mood]}">
+        <circle cx="20" cy="20" r="17"/><circle class="eye" cx="14" cy="16" r="2.2"/><circle class="eye" cx="26" cy="16" r="2.2"/>
+        <path d="${MOUTH[mood]}"/></svg>
+    </div>`;
+
   el.innerHTML = `
     <div class="cost-card">
       <div class="cost-card-hdr">
@@ -4758,12 +5203,14 @@ function updateCostCard(cost) {
         <span class="cost-lbl">Net Earned</span>
         <span class="cost-val ${netClass}">${netDisplay}</span>
       </div>
+      ${moods}
     </div>`;
 }
 
 // Tap any bottom tile to open history with all series showing
 document.querySelectorAll('#tiles .tile').forEach(tile =>
   tile.addEventListener('click', () => {
+    if (_isTiled) return;   // History is already on screen
     activeSeries = new Set(SERIES_DEF.map(s => s.key));
     document.querySelectorAll('#hist-series-row .sbtn[data-s]').forEach(b => b.classList.add('active'));
     showView('history');
@@ -4820,22 +5267,31 @@ let _hourlyScrolledDay = '';  // auto-scroll the view once per day shown
 
 function openHourly(day) {
   hourlyDay = day;
-  showView('hourly');
+  if (!_isTiled) showView('hourly');   // tiled: the Power tile just changes day
   loadHourly();
 }
 
+let _hourlyDataDay = '';      // which day hourlyData holds
 async function loadHourly() {
+  // Power mode doesn't use the hourly bars, and /api/hourly is the slow one
+  // (~3.4s on a large database) - setPowerMode(false) fetches them on demand.
+  if (powerMode) { _hourlyNavSync(); loadPowerData(); return; }
   try {
     const r = await fetch('/api/hourly?day=' + encodeURIComponent(hourlyDay), {cache:'no-store'});
     const d = await r.json();
     hourlyData = d.ok ? d.hours : [];
-  } catch(e) { hourlyData = []; }
+    _hourlyDataDay = hourlyDay;
+  } catch(e) { hourlyData = []; _hourlyDataDay = ''; }
+  _hourlyNavSync();
+  if (powerMode) loadPowerData(); else drawHourlyChart();
+}
+
+function _hourlyNavSync() {
   $('hourly-nav-label').textContent = _hourlyDateLabel(hourlyDay);
   // Disable "next" if we're already on (or past) today
   const today = new Date(); today.setHours(0,0,0,0);
   const shown = new Date(hourlyDay + 'T00:00:00');
   $('hourly-next').disabled = shown >= today;
-  if (powerMode) loadPowerData(); else drawHourlyChart();
 }
 
 function _hourlyDateLabel(day) {
@@ -4913,7 +5369,10 @@ function drawHourlyChart() {
   // ── Scrollable bars canvas ────────────────────────────────────────────────
   const PXH = 46;                                 // pixels per hour
   const LPAD = 6, RPAD = 8;
-  const contentW = Math.max(scrollEl.clientWidth, n*PXH + LPAD + RPAD);
+  // The phone scrolls sideways at a fixed width per hour; the desktop Power
+  // tile fits all 24 hours to its width instead, with no scroll bar.
+  const contentW = _isTiled ? scrollEl.clientWidth
+                            : Math.max(scrollEl.clientWidth, n*PXH + LPAD + RPAD);
   canv.style.width = contentW + 'px';
   canv.width = contentW*dpr; canv.height = H*dpr;
   const c = canv.getContext('2d');
@@ -4929,6 +5388,8 @@ function drawHourlyChart() {
 
   const plotW = contentW - LPAD - RPAD;
   const gW = plotW / n;
+  // Fitted to a narrow tile, hour labels thin out so they never collide
+  const lblEvery = gW < 13 ? 3 : gW < 22 ? 2 : 1;
 
   // Grid lines (full width)
   c.strokeStyle='rgba(255,255,255,0.07)'; c.lineWidth=1; c.setLineDash([]);
@@ -4962,10 +5423,12 @@ function drawHourlyChart() {
       c.lineTo(bx,by+r); c.quadraticCurveTo(bx,by,bx+r,by);
       c.closePath(); c.fill();
     });
-    // X label every hour (room to breathe now)
-    c.fillStyle='rgba(150,180,220,0.65)'; c.font=fs+'px sans-serif';
-    c.textAlign='center'; c.textBaseline='top';
-    c.fillText(String(h.hour).padStart(2,'0'), gx+gW/2, PT+cH+6);
+    // X label every hour (or every 2nd/3rd when fitted to a narrow tile)
+    if (gi % lblEvery === 0) {
+      c.fillStyle='rgba(150,180,220,0.65)'; c.font=fs+'px sans-serif';
+      c.textAlign='center'; c.textBaseline='top';
+      c.fillText(String(h.hour).padStart(2,'0'), gx+gW/2, PT+cH+6);
+    }
   });
 
   // SOC line (0–100% mapped over full height) with inline % labels
@@ -4982,10 +5445,12 @@ function drawHourlyChart() {
       c.stroke();
       c.fillStyle = SOC_LINE_COLOR;
       pts.forEach(p => { c.beginPath(); c.arc(p.x,p.y,2.4,0,Math.PI*2); c.fill(); });
-      // Inline % labels every 3 hours so the SOC is readable without an axis
+      // Inline % labels every 3 hours (6 on a narrow fitted tile) so the SOC
+      // is readable without an axis
       c.font = 'bold '+fs+'px sans-serif'; c.textAlign='center'; c.textBaseline='bottom';
+      const socEvery = gW < 22 ? 6 : 3;
       pts.forEach(p => {
-        if (p.gi % 3 === 0) {
+        if (p.gi % socEvery === 0) {
           c.fillStyle='rgba(8,14,28,0.7)';
           const t = p.soc+'%'; const w = c.measureText(t).width+4;
           c.fillRect(p.x-w/2, p.y-fs-6, w, fs+3);
@@ -5059,19 +5524,23 @@ function setPowerMode(on) {
   } else {
     _powerView = { t0: 0, t1: 86400 };
     _powerCross = null;
-    requestAnimationFrame(drawHourlyChart);
+    // The tiled layout opens straight into Power, so the bar data may not be loaded
+    if (_hourlyDataDay !== hourlyDay) loadHourly();
+    else requestAnimationFrame(drawHourlyChart);
   }
 }
 
-async function loadPowerData() {
+// keepView: a background refresh of the same day keeps the user's zoom/pan.
+async function loadPowerData(keepView) {
   if (!hourlyDay) return;
+  const kept = keepView && _powerDay === hourlyDay ? _powerView : null;
   try {
     const r = await fetch('/api/power?day=' + encodeURIComponent(hourlyDay), {cache:'no-store'});
     const d = await r.json();
     powerData = d.ok ? d.points : [];
     _powerDay = hourlyDay;
-  } catch(e) { powerData = []; _powerDay = ''; }
-  _powerView = { t0: 0, t1: 86400 };  // always start at full-day view for a new date
+  } catch(e) { if (kept) return; powerData = []; _powerDay = ''; }
+  _powerView = kept || { t0: 0, t1: 86400 };  // a new date starts at the full-day view
   drawPowerChart();
 }
 
@@ -5241,14 +5710,15 @@ function _renderYearReview(d) {
   $('yr-body').innerHTML = html;
 }
 
-async function loadYearReview() {
-  $('yr-body').innerHTML = '<div id="yr-no-data">Loading...</div>';
+// quiet: a background refresh - no "Loading" flash, and a failure keeps what is shown.
+async function loadYearReview(quiet) {
+  if (!quiet) $('yr-body').innerHTML = '<div id="yr-no-data">Loading...</div>';
   try {
     const r = await fetch(`/api/year_review?year=${_yrYear}`, { cache: 'no-store' });
     const d = await r.json();
     _renderYearReview(d);
   } catch(e) {
-    $('yr-body').innerHTML = '<div id="yr-no-data">Could not load data.</div>';
+    if (!quiet) $('yr-body').innerHTML = '<div id="yr-no-data">Could not load data.</div>';
   }
 }
 
@@ -5681,6 +6151,329 @@ $('power-canvas').addEventListener('dblclick', () => {
   _powerCross = null;
   drawPowerChart();
 });
+
+// ── Desktop tiled layout ─────────────────────────────────────────────────────
+// A per-browser choice of Auto / Tiled / Classic, kept in localStorage so it
+// never touches the server or config.ini and a phone is never affected by what
+// a desktop chose. ?layout=tiled|classic|auto overrides it for that page load
+// (a wall display, say) without being saved.
+//
+// Auto asks what the browser can do rather than which browser it is - user
+// agents lie (iPads report as Macs, see _showFileWarning):
+//   - a mouse or trackpad, not a finger
+//   - not running as the installed PWA
+//   - a window big enough for six tiles to be readable
+const _LAYOUT_KEY    = 'layoutMode';
+const _LAYOUTS       = ['auto', 'tiled', 'classic'];
+const _TILED_MIN_W   = 1200;
+const _TILED_MIN_H   = 680;
+const _mqPointerFine = matchMedia('(hover: hover) and (pointer: fine)');
+const _mqStandalone  = matchMedia('(display-mode: standalone)');
+const _urlLayout     = new URLSearchParams(location.search).get('layout');
+let _layoutPref = 'auto';
+try { _layoutPref = localStorage.getItem(_LAYOUT_KEY) || 'auto'; } catch(e) {}
+if (_LAYOUTS.includes(_urlLayout)) _layoutPref = _urlLayout;
+if (!_LAYOUTS.includes(_layoutPref)) _layoutPref = 'auto';
+
+function _wantTiled() {
+  if (_layoutPref === 'tiled')   return true;
+  if (_layoutPref === 'classic') return false;
+  return _mqPointerFine.matches && !_mqStandalone.matches
+      && innerWidth >= _TILED_MIN_W && innerHeight >= _TILED_MIN_H;
+}
+
+// Which existing elements each tile borrows, in display order. The Battery
+// tile borrows nothing: its graphic and stats live in the grid permanently.
+const _TILE_CONTENT = {
+  'dt-live-body':  ['flow-wrap', 'tiles'],
+  'flow-wrap':     ['self-pwr'],   // out of the header, into the Live tile's corner
+  'dt-hist-body':  ['hist-panel'],
+  'dt-year-body':  ['yr-panel'],
+  'dt-power-body': ['hourly-panel'],
+  'dt-solar-body': ['sbd-box'],
+};
+const _tileHomes = new Map();   // element id -> placeholder marking where it came from
+
+function _enterTiled() {
+  for (const [slot, ids] of Object.entries(_TILE_CONTENT)) {
+    for (const id of ids) {
+      const el = $(id);
+      if (!_tileHomes.has(id) && el.parentNode.id !== slot) {
+        const mark = document.createComment(id);
+        el.parentNode.insertBefore(mark, el);
+        _tileHomes.set(id, mark);
+      }
+      $(slot).appendChild(el);
+    }
+  }
+  // Power opens on today in the power-graph view (the phone defaults to bars)
+  if (!hourlyDay) hourlyDay = _todayStr();
+  _hourlyNavSync();
+  if (!powerMode) setPowerMode(true); else loadPowerData(true);
+  loadHistory();
+  loadYearReview(true);
+  if (liveData) _renderTiledLive(liveData);
+}
+
+function _exitTiled() {
+  for (const [id, mark] of _tileHomes) {
+    mark.parentNode.insertBefore($(id), mark);
+    mark.remove();
+  }
+  _tileHomes.clear();
+  renderHistory();   // drops the desktop-only chart tooltip
+}
+
+function _applyLayout() {
+  const want = _wantTiled();
+  _syncLayoutSeg();
+  if (want === _isTiled) return;
+  _isTiled = want;
+  document.body.classList.toggle('tiled', want);
+  if (want) _enterTiled(); else _exitTiled();
+  showView(currentView);
+}
+
+function _syncLayoutSeg() {
+  // Offered wherever there is a mouse, and anywhere a non-default choice is in
+  // force so it can always be undone from the same screen.
+  const seg = $('layout-seg');
+  seg.style.display = (_mqPointerFine.matches || _layoutPref !== 'auto') ? 'flex' : 'none';
+  seg.querySelectorAll('button').forEach(b =>
+    b.classList.toggle('active', b.dataset.layout === _layoutPref));
+}
+
+$('layout-seg').querySelectorAll('button').forEach(b =>
+  b.addEventListener('click', () => {
+    _layoutPref = b.dataset.layout;
+    try { localStorage.setItem(_LAYOUT_KEY, _layoutPref); } catch(e) {}
+    _applyLayout();
+  }));
+
+function _todayStr() {
+  const t = new Date();
+  return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
+}
+
+function _drawTiledCharts() {
+  drawHistChart();
+  if (powerMode) drawPowerChart(); else drawHourlyChart();
+}
+
+// Battery and Solar Split tiles, refreshed from every /api/data poll.
+function _renderTiledLive(d) {
+  $('desk-grid').classList.toggle('no-solar', !d.ecoflow_enabled);
+  if (d.ecoflow_enabled && d.ecoflow) _renderSolarTile(d);
+
+  const rows = [];
+  const add = (k, v) => rows.push(`<div><span>${k}</span><b>${v}</b></div>`);
+  const cs = d.charge_status;
+  const state = cs === 3 ? 'Finishing'
+              : (cs === 2 || (cs == null && d.battery_charging))    ? 'Charging'
+              : (cs === 5 || (cs == null && d.battery_discharging)) ? 'Discharging'
+              : 'Idle';
+  add('Status', state === 'Idle' ? 'Idle' : `${state} ${fmtW(d.battery_w)}`);
+  const capKwh = d.battery_capacity_kwh;
+  if (capKwh != null && d.soc != null && d.soc >= 0 && d.soc <= 100)
+    add('Stored', `${(capKwh * d.soc / 100).toFixed(1)} of ${capKwh} kWh`);
+  else if (capKwh != null)
+    add('Capacity', `${capKwh} kWh`);
+  // The gateway path has no battery voltage or temperature and reports 0 for
+  // both, so a zero voltage means "not available" rather than a flat battery.
+  if (d.v_battery > 0) {
+    add('Voltage', `${d.v_battery.toFixed(1)} V`);
+    if (d.t_battery != null) add('Battery temp', `${d.t_battery.toFixed(1)}°C`);
+  }
+  if (d.t_heatsink != null) add('Inverter temp', `${d.t_heatsink.toFixed(1)}°C`);
+  if (d.bat_chg_today != null) add('Charged today',    fmtKwh(d.bat_chg_today));
+  if (d.bat_dis_today != null) add('Discharged today', fmtKwh(d.bat_dis_today));
+  $('bt-stats').innerHTML = rows.join('');
+  _renderBattVisual(d, state);
+}
+
+// The Battery tile's graphic: fill level = charge, colour = state (green
+// charging, purple discharging, blue idle - as on the Live view), a moving
+// surface, and chevrons rising or falling faster as the power grows.
+const _BT_COLS = { Charging: ['#4ade80', '#15803d'], Finishing: ['#4ade80', '#15803d'],
+                   Discharging: ['#c084fc', '#7e22ce'], Idle: ['#60a5fa', '#1d4ed8'] };
+function _renderBattVisual(d, state) {
+  const soc = (d.soc != null && d.soc >= 0 && d.soc <= 100) ? d.soc : null;
+  // Inner battery runs y=19 (full) to y=199 (empty)
+  $('bt-level').style.transform = `translateY(${(199 - 180 * (soc || 0) / 100).toFixed(1)}px)`;
+  const [c1, c2] = _BT_COLS[state];
+  $('bt-g1').setAttribute('stop-color', c1);
+  $('bt-g2').setAttribute('stop-color', c2);
+  $('bt-pct').textContent = soc == null ? '—' : soc + '%';
+  const capKwh = d.battery_capacity_kwh;
+  $('bt-kwh').textContent = (capKwh != null && soc != null) ? (capKwh * soc / 100).toFixed(1) + ' kWh' : '';
+  const moving = state !== 'Idle' && (d.battery_w || 0) > 20;
+  const up = moving && state !== 'Discharging';
+  $('bt-up').classList.toggle('off', !up);
+  $('bt-down').classList.toggle('off', !moving || up);
+  // Three staggered chevrons; more power, faster: ~3s at 800 W down to 0.8s at 3 kW
+  const secs = Math.max(0.8, Math.min(3, 2400 / Math.max(1, d.battery_w || 0)));
+  document.querySelectorAll('#bt-svg .bt-arrows polyline').forEach((pl, i) => {
+    pl.style.animationDuration = secs.toFixed(2) + 's';
+    pl.style.animationDelay = (-(i % 3) * secs / 3).toFixed(2) + 's';
+  });
+}
+
+$('bt-visual').addEventListener('click', openBattModal);
+$('bt-visual').addEventListener('keydown', e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openBattModal(); }
+});
+
+// ── Solar Split tile graphic ─────────────────────────────────────────────────
+// The roof array (what the inverter measures) and the STREAM's two plug-in
+// panels, each feeding an animated line into a "total now" sun. Line width
+// follows each source's share and dash speed its power. The SVG is built once
+// and only updated after that, so the 10s poll never restarts the animation.
+// The phone keeps the plain breakdown in its modal (_solarBreakdownHtml).
+const _SG_ROOF = '#f59e0b', _SG_PLUG = '#a3e635';
+const _SG_ON_W = 20;    // below this a source counts as not generating
+
+function _sgCells(x, y, cols, rows, w, h) {
+  let s = '';
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++)
+      s += `<rect x="${x + c*(w+2)}" y="${y + r*(h+2)}" width="${w}" height="${h}" rx="1.5"/>`;
+  return s;
+}
+
+function _solarTileSkeleton() {
+  const rays = Array.from({length: 12}, (_, i) => {
+    const a = i * Math.PI / 6, c = Math.cos(a), s = Math.sin(a);
+    return `<line x1="${(330 + 41*c).toFixed(1)}" y1="${(112 + 41*s).toFixed(1)}" x2="${(330 + 49*c).toFixed(1)}" y2="${(112 + 49*s).toFixed(1)}"/>`;
+  }).join('');
+  return `
+  <svg id="sg-svg" viewBox="0 0 400 210" preserveAspectRatio="xMidYMid meet" aria-label="Solar split">
+    <defs>
+      <linearGradient id="sg-cell" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#2b4a7a"/><stop offset="1" stop-color="#132644"/>
+      </linearGradient>
+      <radialGradient id="sg-sun"><stop offset="0" stop-color="rgba(245,158,11,.35)"/><stop offset="1" stop-color="rgba(245,158,11,0)"/></radialGradient>
+    </defs>
+    <!-- roof array -->
+    <g id="sg-roof-panel" class="sg-panel" transform="translate(40,28) skewX(-14)">${_sgCells(0, 0, 5, 2, 19, 16)}</g>
+    <text x="30" y="84" class="sg-lbl">Roof array</text>
+    <text x="30" y="102" class="sg-val" id="sg-roof-val" fill="${_SG_ROOF}">—</text>
+    <!-- plug-in: the STREAM's two inputs, one panel each -->
+    <text x="62" y="124" class="sg-pv" id="sg-pv1">—</text>
+    <text x="114" y="124" class="sg-pv" id="sg-pv2">—</text>
+    <g id="sg-plug-panels" class="sg-panel" transform="translate(42,130) skewX(-14)">${_sgCells(0, 0, 2, 2, 19, 13)}${_sgCells(52, 0, 2, 2, 19, 13)}</g>
+    <text x="30" y="178" class="sg-lbl">Plug-in &middot; STREAM</text>
+    <text x="30" y="196" class="sg-val" id="sg-plug-val" fill="${_SG_PLUG}">—</text>
+    <!-- energy lines -->
+    <path class="sg-track" d="M150 47 C 230 47, 240 100, 292 105"/>
+    <path class="sg-track" d="M150 145 C 230 145, 240 122, 292 119"/>
+    <path class="sg-flow" id="sg-roof-flow" stroke="${_SG_ROOF}" d="M150 47 C 230 47, 240 100, 292 105"/>
+    <path class="sg-flow" id="sg-plug-flow" stroke="${_SG_PLUG}" d="M150 145 C 230 145, 240 122, 292 119"/>
+    <!-- total -->
+    <circle cx="330" cy="112" r="62" fill="url(#sg-sun)" id="sg-glow"/>
+    <g class="sg-rays" id="sg-rays">${rays}</g>
+    <circle cx="330" cy="112" r="35" class="sg-core"/>
+    <text x="330" y="114" class="sg-total" id="sg-total">—</text>
+    <text x="330" y="130" class="sg-total-lbl">generating now</text>
+  </svg>
+  <div class="sg-split"><i id="sg-bar-roof" style="background:${_SG_ROOF}"></i><i id="sg-bar-plug" style="background:${_SG_PLUG}"></i></div>
+  <div class="sg-legend"><span id="sg-leg-roof"></span><span id="sg-leg-plug"></span></div>
+  <div class="sg-stats">
+    <div><span>Roof today</span><b id="sg-roof-today">—</b></div>
+    <div><span>Plug-in today</span><b id="sg-plug-today">—</b></div>
+    <div><span>STREAM</span><b id="sg-status">—</b></div>
+  </div>`;
+}
+
+function _sgFlow(id, watts, share) {
+  const el = $(id);
+  const on = watts != null && watts >= _SG_ON_W;
+  el.classList.toggle('idle', !on);
+  el.style.strokeWidth = on ? (2 + 7 * share).toFixed(1) : '';
+  // More power, faster dashes: ~3s at 20 W down to 0.5s at 1.2 kW and above
+  el.style.animationDuration = on ? Math.max(0.5, Math.min(3, 600 / watts)).toFixed(2) + 's' : '';
+}
+
+function _renderSolarTile(d) {
+  if (!$('sg-svg')) $('sbd-body').innerHTML = _solarTileSkeleton();
+  const e = d.ecoflow;
+  const roof = d.solar_w || 0;
+  // Offline and "no reading yet" are both shown as no plug-in power, never as 0 W
+  const plug = (!e.online || e.power_w == null) ? null : e.power_w;
+  const total = roof + (plug || 0);
+  const roofShare = total > 0 ? roof / total : 0;
+  const plugShare = total > 0 ? (plug || 0) / total : 0;
+
+  $('sg-roof-val').textContent = fmtW(roof);
+  $('sg-plug-val').textContent = !e.online ? 'Offline' : plug == null ? 'Waiting…' : fmtW(plug);
+  $('sg-pv1').textContent = e.online && e.pv1_w != null ? fmtW(e.pv1_w) : '';
+  $('sg-pv2').textContent = e.online && e.pv2_w != null ? fmtW(e.pv2_w) : '';
+  $('sg-total').textContent = fmtW(total);
+  $('sg-roof-panel').classList.toggle('idle', roof < _SG_ON_W);
+  $('sg-plug-panels').classList.toggle('idle', plug == null || plug < _SG_ON_W);
+  _sgFlow('sg-roof-flow', roof, roofShare);
+  _sgFlow('sg-plug-flow', plug, plugShare);
+  const generating = total >= _SG_ON_W;
+  $('sg-rays').classList.toggle('idle', !generating);
+  $('sg-glow').style.opacity = generating ? Math.min(1, 0.35 + total / 3000).toFixed(2) : '0';
+
+  $('sg-bar-roof').style.width = (roofShare * 100) + '%';
+  $('sg-bar-plug').style.width = (plugShare * 100) + '%';
+  $('sg-leg-roof').textContent = total > 0 ? `Roof ${Math.round(roofShare * 100)}%` : 'Roof';
+  $('sg-leg-plug').textContent = total > 0 ? `Plug-in ${Math.round(plugShare * 100)}%` : 'Plug-in';
+  $('sg-roof-today').textContent = d.solar_today != null ? d.solar_today.toFixed(1) + ' kWh' : '—';
+  $('sg-plug-today').textContent = d.plugin_today != null ? d.plugin_today.toFixed(2) + ' kWh' : '—';
+  // Offline overnight is normal: the STREAM sleeps until its panels make ~11 W
+  $('sg-status').textContent = e.online ? 'Online' : 'Offline (normal overnight)';
+  $('sg-status').style.color = e.online ? '#4ade80' : 'var(--muted)';
+}
+
+// Background refresh while tiled. Live data already polls every 10s; the rest
+// change slowly, so each gets its own (much longer) interval. Nothing here
+// touches the inverter - the battery cell read is manual only.
+let _tiledTicks = 0;
+let _tiledToday = _todayStr();
+setInterval(() => {
+  if (!_isTiled || currentView !== 'live' || document.hidden) return;
+  _tiledTicks++;
+  const today = _todayStr();
+  // Follow today over midnight, unless the user had navigated to another day
+  if (hourlyDay === _tiledToday && today !== _tiledToday) {
+    hourlyDay = today;
+    _hourlyNavSync();
+    if (powerMode) loadPowerData(); else loadHourly();
+  } else if (hourlyDay === today) {
+    // /api/hourly costs ~3.4s on a Pi with a year of history; /api/power ~0.1s
+    if (powerMode) { if (_tiledTicks % 2 === 0) loadPowerData(true); }
+    else if (_tiledTicks % 10 === 0) loadHourly();
+  }
+  _tiledToday = today;
+  if (histOffset === 0 && _tiledTicks % 5  === 0) loadHistory();
+  if (_tiledTicks % 30 === 0) loadYearReview(true);
+}, 60000);
+
+// Redraw the tile charts whenever a tile changes size (window resize, or the
+// power tile widening when EcoFlow is off).
+if (window.ResizeObserver) {
+  let pending = false;
+  const tro = new ResizeObserver(() => {
+    if (!_isTiled || currentView !== 'live' || pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; _drawTiledCharts(); });
+  });
+  tro.observe($('hist-chart-wrap'));
+  tro.observe($('hourly-chart-wrap'));
+}
+
+let _layoutRaf = null;
+window.addEventListener('resize', () => {
+  if (_layoutRaf) return;
+  _layoutRaf = requestAnimationFrame(() => { _layoutRaf = null; _applyLayout(); });
+});
+// addListener is the pre-Safari-14 spelling; an old iPhone must not lose the
+// rest of this script over it.
+[_mqPointerFine, _mqStandalone].forEach(mq =>
+  mq.addEventListener ? mq.addEventListener('change', _applyLayout) : mq.addListener(_applyLayout));
+_applyLayout();
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => {});
