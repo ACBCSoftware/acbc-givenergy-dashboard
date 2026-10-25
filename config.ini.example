@@ -34,6 +34,13 @@ poll_interval        = 10
 web_port             = 7890
 ; How many days of history to retain in the database
 data_retention_days  = 730
+; Sites allowed to show the dashboard inside their own page (an iframe), for
+; example a Home Assistant "Webpage" dashboard. Leave empty to block all
+; embedding (recommended unless you need it). List exact addresses including
+; http/https and port, separated by spaces or commas:
+;   frame_ancestors = http://homeassistant.local:8123
+; Note: an https page cannot embed the dashboard while it is served over http.
+frame_ancestors      =
 
 [weather]
 ; Met Office DataHub API key (Observation Land product — free tier)

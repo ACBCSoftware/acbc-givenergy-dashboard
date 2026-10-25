@@ -160,6 +160,9 @@ def _sf_configured() -> bool:
 # When False, control/action endpoints are open (local-only convenience mode).
 # Settings always stays behind the strict password check regardless.
 REQUIRE_AUTH = _cfg.getboolean("server", "require_auth", fallback=True)
+# Origins allowed to embed the dashboard in an iframe (#61) - validated into
+# FRAME_ANCESTORS once logging exists, next to add_security_headers().
+FRAME_ANCESTORS_RAW = _cfg.get("server", "frame_ancestors", fallback="")
 
 BACKUP_ENABLED   = _cfg.getboolean("backup", "enabled",   fallback=True)
 BACKUP_KEEP_DAYS = _cfg.getint("backup",     "keep_days", fallback=7)
@@ -7194,12 +7197,49 @@ def service_worker():
 def icons(filename):
     return send_from_directory(str(Path(__file__).parent / "icons"), filename)
 
+# ── Embedding (#61) ───────────────────────────────────────────────────────────
+# By default nothing may show the dashboard inside a frame. That is what stops
+# another site loading it invisibly over its own page and tricking clicks onto
+# the inverter controls. [server] frame_ancestors relaxes it for exact, listed
+# origins only - e.g. a Home Assistant "Webpage" dashboard:
+#     frame_ancestors = http://homeassistant.local:8123
+# Each entry must be a bare scheme://host[:port] origin. Anything else (paths,
+# wildcards, "*") is skipped with a log line rather than silently widening the
+# policy or silently dropping it.
+_FRAME_ORIGIN_RE = re.compile(r"^https?://[a-z0-9.-]+(:\d{1,5})?$", re.IGNORECASE)
+
+
+def _parse_frame_ancestors(raw: str) -> list:
+    origins = []
+    for item in re.split(r"[\s,]+", raw or ""):
+        item = item.strip().rstrip("/")
+        if not item:
+            continue
+        if _FRAME_ORIGIN_RE.match(item):
+            if item.lower() not in origins:
+                origins.append(item.lower())
+        else:
+            log.warning("frame_ancestors: ignoring %r - each entry must be an origin "
+                        "like http://homeassistant.local:8123", item)
+    return origins
+
+
+FRAME_ANCESTORS = _parse_frame_ancestors(FRAME_ANCESTORS_RAW)
+
+
 @app.after_request
 def add_security_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
+    if FRAME_ANCESTORS:
+        # X-Frame-Options cannot express an allow-list, and a DENY there would
+        # override the CSP in some browsers, so it is only sent when no
+        # embedding is configured.
+        frame = "frame-ancestors 'self' " + " ".join(FRAME_ANCESTORS)
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
+        frame = "frame-ancestors 'none'"
     # CSP: allow inline scripts/styles (single-page app requirement) but block
     # external origins, object embeds, and framing from outside.
     response.headers["Content-Security-Policy"] = (
@@ -7211,7 +7251,7 @@ def add_security_headers(response):
         "font-src 'self' data:; "
         "object-src 'none'; "
         "base-uri 'self'; "
-        "frame-ancestors 'none'"
+        + frame
     )
     return response
 
@@ -7221,6 +7261,10 @@ if __name__ == "__main__":
     _apply_pending_imports()  # swap in a staged restore before opening the DB
     init_db()
     _configure_syslog()       # before the threads start, so startup is forwarded too
+    if FRAME_ANCESTORS:
+        log.info("Embedding allowed from: %s", ", ".join(FRAME_ANCESTORS))
+    elif FRAME_ANCESTORS_RAW.strip():
+        log.warning("frame_ancestors is set but no entry was valid - embedding stays blocked")
 
     t = threading.Thread(target=_data_loop, daemon=True)
     t.start()
