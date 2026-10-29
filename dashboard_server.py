@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import io
 import json
+import math
 import logging
 import logging.handlers
 import os
@@ -1801,10 +1802,56 @@ _last_soc:       int   | None = None
 _last_v_battery: float | None = None
 _last_t_battery: float | None = None
 
+# Daily energy counters only ever rise during a day; the inverter resets them
+# around midnight. A lower reading at any other time is a bad read: on a
+# GIV-AC3.0 a lone 0 on the import counter appeared on 16 of 120 days, and each
+# one wiped that day's off-peak import cost (the cost guard in _handle_reading
+# took it as a reset) and dropped a spike into the history. So a drop is held
+# at the day's highest value unless it is a genuine reset, which is either
+#   - within _COUNTER_RESET_GRACE_MIN of midnight, or
+#   - sustained for _COUNTER_DROP_CONFIRM consecutive readings - the inverter
+#     can carry yesterday's totals a few minutes past midnight before resetting,
+#     and a real reset persists where a bad read does not.
+_DAILY_COUNTERS          = ("solar_today", "grid_in_today", "grid_out_today",
+                            "bat_chg_today", "bat_dis_today")
+_COUNTER_RESET_GRACE_MIN = 15
+_COUNTER_DROP_CONFIRM    = 3
+_counter_state = {"date": None, "best": {}, "drops": {}}
+
+
+def _hold_daily_counters(out: dict, now: "datetime | None" = None) -> None:
+    """Hold back mid-day drops in the daily energy counters (in place)."""
+    now = now or datetime.now()
+    today = now.date().isoformat()
+    if _counter_state["date"] != today:
+        _counter_state.update(date=today, best={}, drops={})
+    in_grace = now.hour == 0 and now.minute < _COUNTER_RESET_GRACE_MIN
+    best, drops = _counter_state["best"], _counter_state["drops"]
+    for f in _DAILY_COUNTERS:
+        v = out.get(f)
+        if v is None:
+            continue
+        top = best.get(f)
+        if top is None or v >= top:
+            best[f], drops[f] = v, 0
+            continue
+        drops[f] = drops.get(f, 0) + 1
+        if in_grace or drops[f] >= _COUNTER_DROP_CONFIRM:
+            log.info("Daily counter %s reset %.1f -> %.1f (%s)", f, top, v,
+                     "midnight" if in_grace else f"held {drops[f]} readings")
+            best[f], drops[f] = v, 0
+        else:
+            log.warning("Daily counter %s dropped %.1f -> %.1f mid-day - "
+                        "ignoring as a bad read", f, top, v)
+            out[f] = top
+
+
 def _smooth(data: dict) -> dict:
-    """Return a copy of data with zero-blips, SOC spikes, and BMS splice corruption suppressed."""
+    """Return a copy of data with zero-blips, SOC spikes, BMS splice corruption
+    and mid-day daily-counter drops suppressed."""
     global _last_soc, _last_v_battery, _last_t_battery
     out = dict(data)
+    _hold_daily_counters(out)
 
     # Zero-blip debounce for power fields
     for field, needed in _DEBOUNCE.items():
@@ -2248,6 +2295,9 @@ def _note_heartbeat() -> float:
     return time.time()
 
 # ── Shared loop housekeeping ─────────────────────────────────────────────────────
+_zero_reads = {"in": 0, "out": 0}   # consecutive zero reads of the daily grid counters
+
+
 def _handle_reading(data: dict, st: dict):
     """Process one fresh reading (from either mode): log to DB, smooth, publish
     to the cache, log recovery, and track inverter status changes + purging."""
@@ -2313,10 +2363,16 @@ def _handle_reading(data: dict, st: dict):
             # For Agile the cap is 100p/kWh; for TOU use the highest window rate
             _max_rate = (100.0 if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES
                          else (max([TARIFF_IMPORT_P] + [w["rate_p"] for w in TARIFF_TOU]) or 100.0))
-            if _gout < 0.01 and _today_export_income_p > 1.0:
+            # A zero register only means "nothing today" if it stays zero:
+            # one bad read used to wipe the day's import cost (16 of 120 days on
+            # a GIV-AC3.0). _smooth() now holds mid-day drops; this is the
+            # second line of defence.
+            _zero_reads["in"]  = _zero_reads["in"]  + 1 if _gin  < 0.01 else 0
+            _zero_reads["out"] = _zero_reads["out"] + 1 if _gout < 0.01 else 0
+            if _zero_reads["out"] >= _COUNTER_DROP_CONFIRM and _today_export_income_p > 1.0:
                 # Register shows no export today → income must be zero
                 _today_export_income_p = 0.0
-            if (_gin < 0.01 and _today_import_cost_p > 1.0) or \
+            if (_zero_reads["in"] >= _COUNTER_DROP_CONFIRM and _today_import_cost_p > 1.0) or \
                (_gin > 0  and _today_import_cost_p > _gin * _max_rate * 1.1):
                 # Cost implies more energy than the register recorded → recompute
                 _recompute_today_cost(_gin, _gout)
@@ -3027,14 +3083,18 @@ _WRITE_MAX_ATTEMPTS = 7    # 1 initial attempt + 6 retries (matches psylsph beha
 
 def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
               attempts: int = _WRITE_MAX_ATTEMPTS,
-              timeout_retries: int = 1) -> None:
+              timeout_retries: int = 2) -> None:
     """Write a single holding register.  Verifies the echo response.
     Retries on exception code 67 (dongle busy) up to `attempts` times (default 7,
     as the manual controls use). The scheduler passes attempts=1 to FAIL FAST: the
     sustained busy-retry hammering is what disrupted the Gen2 listen stream, so it
     aborts on busy and lets the 15s re-queue try again instead.
-    Retries on timeout up to `timeout_retries` times (default 1, 1.5 s wait) --
-    the first write in a sequence can catch the inverter in broadcast/listen mode.
+    Retries on timeout up to `timeout_retries` times (default 2, 1.5 s wait) --
+    the first write in a sequence can catch the inverter in broadcast/listen mode,
+    and the dongle (effectively single-client, held by the live feed) sometimes
+    does not accept a new connection in time. A connection that cannot be opened
+    counts as a timeout too: nothing has been sent, and rewriting the same value
+    is harmless.
     Stale echo frames (a previous write's confirmation re-emitted by the dongle)
     are ignored; only the echo matching this reg/val confirms success.
     Raises on timeout (no matching echo), dongle-busy exhaustion, or exhausted
@@ -3058,7 +3118,14 @@ def _hr_write(slave: int, reg: int, value: int, timeout: float = 5.0,
                 log.warning("HR write: dongle busy, retrying in 2s (attempt %d/%d) …",
                             attempt + 1, attempts)
                 time.sleep(2)
-            s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+            try:
+                s = socket.create_connection((INVERTER_IP, INVERTER_PORT), timeout=timeout)
+            except (socket.timeout, TimeoutError, ConnectionError) as exc:
+                # Used to escape the retry logic entirely, failing a manual control
+                # on its first attempt ("Control failed set_discharge_limit: timed out").
+                log.warning("HR write: could not connect to the inverter (%s)", exc)
+                timed_out = True
+                break  # to the timeout retry below
             s.settimeout(timeout)
             try:
                 s.sendall(frame)
@@ -3283,6 +3350,80 @@ _HR = {
     "BATTERY_POWER_RESERVE": 114,
 }
 
+# ── Battery power limits ──────────────────────────────────────────────────────
+# Everything above this layer - the API, the control page, scheduler rules and
+# quick actions - speaks one unit: percent of the maximum battery power set in
+# [inverter] max_charge_w / max_discharge_w. Only these helpers know what the
+# registers actually hold (checked against givenergy-modbus and GivTCP, Oct 2026):
+#
+#   HR 111/112  a battery C-rate cap in C/100 of the pack's capacity (50 = 0.5C).
+#               NOT a percentage of inverter power, which is what this code used
+#               to assume: on a 19 kWh bank "1 kW" was written as 16 (= 0.16C,
+#               about 3 kW) and "3 kW" as 50 (about 9.5 kW), so the limit never bit.
+#   HR 313/314  a percentage (1-100) of inverter power on Gen3/AIO. Writing 0
+#               ERRORS on AC hardware (givenergy-modbus #306), so the floor is 1.
+#
+# The effective rate is min(C-rate cap, inverter %, BMS). Confirmed on a
+# GIV-AC3.0 (29 Oct 2026, forced charge and discharge at ~2.9 kW):
+#   HR 111 = 5  -> charge 2892 -> 921 W    HR 313 = 33 -> charge 2896 -> 960 W
+#   HR 112 = 5  -> discharge 2912 -> 961 W HR 314 = 33 -> discharge 2915 -> 1121 W
+# so on AC models BOTH pairs bite and the lower wins. The limits only apply to
+# timed (forced) charge/discharge: in Eco self-consumption the battery follows
+# the house load and ignores them. The GivEnergy/Octopus side itself wrote
+# HR 111/112 = 16 for 3 kW on that 19 kWh bank - the C-rate formula below.
+# AC-coupled therefore stays on HR 111/112 (the pair the official system uses),
+# and the control page also shows HR 313/314 when they would cap it lower.
+_LIMIT_REGS = {"charge": (111, 313), "discharge": (112, 314)}
+
+
+def _limit_uses_ac_pair(profile: str) -> bool:
+    return profile == "single_phase_extended"
+
+
+def _limit_capacity_wh() -> "float | None":
+    """Pack capacity for the C-rate conversion: detected from the hardware, else
+    the predictive-charge override, else None (unknown)."""
+    kwh = _battery_capacity_kwh() or (PRED_BATTERY_KWH if PRED_BATTERY_KWH > 0 else None)
+    return kwh * 1000.0 if kwh else None
+
+
+def _limit_max_w(kind: str) -> int:
+    return MAX_CHARGE_W if kind == "charge" else MAX_DISCHARGE_W
+
+
+def _limit_pct_to_reg(kind: str, pct: float, profile: str) -> "tuple[int, int]":
+    """(register, raw value) for a limit of `pct` percent of max battery power."""
+    pct = max(0, min(100, int(round(pct))))
+    dc_reg, ac_reg = _LIMIT_REGS[kind]
+    if _limit_uses_ac_pair(profile):
+        return ac_reg, max(1, pct)
+    cap_wh = _limit_capacity_wh()
+    if not cap_wh:
+        log.warning("Battery capacity unknown - %s limit written on the old 0-50 scale, "
+                    "which overstates the limit on large battery banks", kind)
+        return dc_reg, pct // 2
+    max_w = _limit_max_w(kind)
+    if pct >= 100:
+        # Full rate rounds UP: rounding down can never reach the maximum, and
+        # jumping straight to 50 would be far above it on a big bank (GivTCP #562).
+        val = math.ceil(max_w / cap_wh * 100)
+    else:
+        val = round(pct / 100 * max_w / cap_wh * 100)
+        if pct > 0:
+            val = max(1, val)   # a small but non-zero request must not become "off"
+    return dc_reg, max(0, min(50, val))
+
+
+def _limit_reg_to_pct(kind: str, raw: int, profile: str) -> int:
+    """Percent of max battery power for a raw register value (read-back)."""
+    if _limit_uses_ac_pair(profile):
+        return max(0, min(100, int(raw)))
+    cap_wh = _limit_capacity_wh()
+    if not cap_wh:
+        return max(0, min(100, int(raw) * 2))
+    watts = int(raw) / 100 * cap_wh
+    return max(0, min(100, round(watts / _limit_max_w(kind) * 100)))
+
 # Slot time-pair registers: (start_hr, end_hr).
 # Slot 1 (94/95) is shared across all profiles. Charge slot 2 differs: the extended
 # profile uses the contiguous block at 243/244 (confirmed on AIO 0x8001 hardware,
@@ -3413,6 +3554,7 @@ def _read_control_state() -> dict:
         if n < 120:  return regs_60[n - 60]
         raise IndexError(f"HR {n} not in base read range")
 
+    ac_limits = None   # HR 313/314 on AC-coupled: a second, inverter-side cap
     if profile == "single_phase_extended":
         regs_240 = _hr_read(slave, 240, 60)   # HR 240-299
         regs_313 = _hr_read(slave, 313, 2)    # HR 313-314: AIO charge/discharge power limits (0-100%)
@@ -3423,6 +3565,14 @@ def _read_control_state() -> dict:
         regs_313 = None
         def hr_ext(n):
             return hr(n)
+        if profile == "single_phase_ac_coupled":
+            # Both pairs apply on AC models and the lower wins, so a low HR 313/314
+            # set elsewhere (GE app, Octopus) would make our limit look ignored.
+            # Informational only: a failed read must not break the control page.
+            try:
+                ac_limits = _hr_read(slave, 313, 2)
+            except Exception as exc:
+                log.debug("Control: HR 313-314 read failed (%s) - inverter limits not shown", exc)
 
     _aio_slots_ok = True
     if profile == "three_phase_aio":
@@ -3509,8 +3659,12 @@ def _read_control_state() -> dict:
         "clock_drift_secs":     _clock_cache["drift"],
         "inverter_clock":       _clock_cache["inverter_time"],
         "auto_clock_sync":      AUTO_CLOCK_SYNC,
-        "charge_limit":    regs_313[0] if regs_313 else hr(_HR["BATTERY_CHARGE_LIMIT"]) * 2,
-        "discharge_limit": regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]) * 2,
+        "charge_limit":    _limit_reg_to_pct("charge",
+                                regs_313[0] if regs_313 else hr(_HR["BATTERY_CHARGE_LIMIT"]), profile),
+        "discharge_limit": _limit_reg_to_pct("discharge",
+                                regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]), profile),
+        "inverter_charge_limit_pct":    ac_limits[0] if ac_limits else None,
+        "inverter_discharge_limit_pct": ac_limits[1] if ac_limits else None,
         "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
         "charge_slots":         charge_slots,
         "discharge_slots":      discharge_slots,
@@ -3592,6 +3746,11 @@ def _execute_control(command: str, params: dict) -> dict:
         err = str(exc)
         _log_control(command, params, False, f"Control failed {command}: {err}")
         log.error("Control failed %s: %s", command, err)
+        if isinstance(exc, (TimeoutError, socket.timeout)):
+            # Commands that write several registers can time out part-way, so
+            # do not promise that nothing changed.
+            err = ("Couldn't reach the inverter in time - the change may not have "
+                   "been applied. Check the value shown and try again.")
         return {"ok": False, "message": err}
 
 
@@ -3678,21 +3837,12 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
         wr(_HR["BATTERY_SOC_RESERVE"], val)
         return f"SOC reserve set to {val}%"
 
-    if command == "set_charge_limit":
+    if command in ("set_charge_limit", "set_discharge_limit"):
+        kind = "charge" if command == "set_charge_limit" else "discharge"
         val = max(0, min(100, int(params["value"])))
-        if profile == "single_phase_extended":
-            wr(313, val)
-        else:
-            wr(_HR["BATTERY_CHARGE_LIMIT"], val // 2)
-        return f"Charge power limit set to {val}%"
-
-    if command == "set_discharge_limit":
-        val = max(0, min(100, int(params["value"])))
-        if profile == "single_phase_extended":
-            wr(314, val)
-        else:
-            wr(_HR["BATTERY_DISCHARGE_LIMIT"], val // 2)
-        return f"Discharge power limit set to {val}%"
+        reg, raw = _limit_pct_to_reg(kind, val, profile)
+        wr(reg, raw)
+        return f"{kind.capitalize()} power limit set to {val}% (HR {reg} = {raw})"
 
     if command == "set_discharge_mode":
         val = max(0, min(1, int(params["value"])))
@@ -3800,16 +3950,12 @@ def _sched_compute_writes(desired: dict):
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
 
     mode = desired["mode"]
+    # Rules store power_pct as 0-50 (half-percent of max battery power) - the
+    # schedule editor and existing databases depend on that - so double it into
+    # the percent the limit helpers take.
     pct  = max(0, min(50, int(desired.get("power_pct", 50))))
-    # Power-limit register/value differ by profile:
-    # Gen 1/2: HR 111/112 take 0-50 (half-percent); pct is already in this range from the DB.
-    # AIO (single_phase_extended): HR 313/314 take 0-100 (full-percent); multiply by 2.
-    if profile == "single_phase_extended":
-        _chrg_limit_reg, _chrg_limit_val = 313, pct * 2
-        _dchg_limit_reg, _dchg_limit_val = 314, pct * 2
-    else:
-        _chrg_limit_reg, _chrg_limit_val = _HR["BATTERY_CHARGE_LIMIT"],    pct
-        _dchg_limit_reg, _dchg_limit_val = _HR["BATTERY_DISCHARGE_LIMIT"], pct
+    _chrg_limit_reg, _chrg_limit_val = _limit_pct_to_reg("charge",    pct * 2, profile)
+    _dchg_limit_reg, _dchg_limit_val = _limit_pct_to_reg("discharge", pct * 2, profile)
 
     if mode == "charge":
         target = max(4, min(100, int(desired.get("target_soc", 100))))
@@ -4087,14 +4233,11 @@ def _quick_action_do(action: str):
 
     if action == "charge":
         s_hr, e_hr, free_slot = _qa_find_free_charge_slot(slave, profile)
-        if profile == "single_phase_extended":
-            chrg_limit_reg     = 313
-            pct                = max(0, min(100, QUICK_CHARGE_POWER_PCT))
+        chrg_limit_reg, pct = _limit_pct_to_reg("charge", QUICK_CHARGE_POWER_PCT, profile)
+        if chrg_limit_reg == 313:
             chrg_limit_restore = aio_limits[0] if aio_limits else 100
         else:
-            chrg_limit_reg     = _HR["BATTERY_CHARGE_LIMIT"]   # HR 111, 0-50
-            pct                = max(0, min(50, QUICK_CHARGE_POWER_PCT * 50 // 100))
-            chrg_limit_restore = _snap(_HR["BATTERY_CHARGE_LIMIT"], 50)
+            chrg_limit_restore = _snap(chrg_limit_reg, 50)   # 50 = 0.5C, full rate
         target = QUICK_CHARGE_TARGET_SOC
         writes = [
             (s_hr,                                                   cs),
@@ -4116,18 +4259,15 @@ def _quick_action_do(action: str):
             [chrg_limit_reg,                    chrg_limit_restore],
             [_HR["ENABLE_CHARGE"],              _snap(_HR["ENABLE_CHARGE"],             0)],
         ]
-        display_pct = pct if profile == "single_phase_extended" else pct * 2
-        label = f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, power {display_pct}%"
+        label = (f"Quick charge started: slot {cs:04d}-{ce:04d}, target {target}%, "
+                 f"power {QUICK_CHARGE_POWER_PCT}% (HR {chrg_limit_reg} = {pct})")
     else:
         s_hr, e_hr, free_slot = _qa_find_free_discharge_slot(slave, profile, snap_raw)
-        if profile == "single_phase_extended":
-            dchg_limit_reg     = 314
-            pct                = max(0, min(100, QUICK_DISCHARGE_POWER_PCT))
+        dchg_limit_reg, pct = _limit_pct_to_reg("discharge", QUICK_DISCHARGE_POWER_PCT, profile)
+        if dchg_limit_reg == 314:
             dchg_limit_restore = aio_limits[1] if aio_limits else 100
         else:
-            dchg_limit_reg     = _HR["BATTERY_DISCHARGE_LIMIT"]   # HR 112, 0-50
-            pct                = max(0, min(50, QUICK_DISCHARGE_POWER_PCT * 50 // 100))
-            dchg_limit_restore = _snap(_HR["BATTERY_DISCHARGE_LIMIT"], 50)
+            dchg_limit_restore = _snap(dchg_limit_reg, 50)   # 50 = 0.5C, full rate
         stop  = max(4, SCHEDULER_BASELINE_SOC_RESERVE)
         writes = [
             (s_hr,                                                   cs),
@@ -4147,8 +4287,8 @@ def _quick_action_do(action: str):
             [dchg_limit_reg,                    dchg_limit_restore],
             [_HR["ENABLE_DISCHARGE"],           _snap(_HR["ENABLE_DISCHARGE"],           1)],
         ]
-        display_pct = pct if profile == "single_phase_extended" else pct * 2
-        label = f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, power {display_pct}%"
+        label = (f"Quick discharge started: slot {cs:04d}-{ce:04d}, stop {stop}% SOC, "
+                 f"power {QUICK_DISCHARGE_POWER_PCT}% (HR {dchg_limit_reg} = {pct})")
 
     for reg, val in writes:
         _hr_write(slave, reg, val)

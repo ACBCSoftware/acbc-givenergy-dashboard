@@ -781,6 +781,7 @@ input[type="color"].color-swatch{width:44px!important;height:34px!important;
 }
 #sf-tile:hover{border-color:rgba(245,158,11,.4)}
 .sf-tile-icon{font-size:1.4rem;line-height:1}
+.ctrl-inv-limit{color:#fb923c;opacity:1}
 .sf-tile-lbl{font-size:.75rem;color:var(--muted);white-space:nowrap}
 
 /* ── Desktop tiled layout ─────────────────────────
@@ -1765,6 +1766,8 @@ body.tiled #hist-series-row{flex-basis:100%}
             oninput="ctrlLimitLabel('charge')">
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set charge power limit','charge')">Set</button>
         </div>
+        <div class="sett-hint">Applies to timed charge slots, not Eco mode.</div>
+        <div class="sett-hint ctrl-inv-limit" id="cv-charge-inv-limit" style="display:none"></div>
         <div class="ctrl-heading" style="margin-top:4px">Charge Slots</div>
         <div id="charge-slots-container"></div>
         <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all charge slots','charge')" style="margin-top:4px">Save Charge Slots</button>
@@ -1799,6 +1802,8 @@ body.tiled #hist-series-row{flex-basis:100%}
             oninput="ctrlLimitLabel('discharge')">
           <button class="ctrl-btn amber ctrl-btn-sm" onclick="ctrlConfirmLimit('Set discharge power limit','discharge')">Set</button>
         </div>
+        <div class="sett-hint">Applies to timed discharge slots, not Eco mode.</div>
+        <div class="sett-hint ctrl-inv-limit" id="cv-discharge-inv-limit" style="display:none"></div>
         <div class="ctrl-heading" style="margin-top:4px">Discharge Slots</div>
         <div id="discharge-slots-container"></div>
         <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all discharge slots','discharge')" style="margin-top:4px">Save Discharge Slots</button>
@@ -2874,6 +2879,8 @@ async function loadControlState() {
     };
     _configLimitSlider('charge',    d.charge_limit);
     _configLimitSlider('discharge', d.discharge_limit);
+    _showInverterLimit('charge',    d.inverter_charge_limit_pct);
+    _showInverterLimit('discharge', d.inverter_discharge_limit_pct);
 
     // Render slot grids dynamically from API arrays
     _renderSlots('charge',    d.charge_slots    || [], d.profile);
@@ -2940,6 +2947,20 @@ function _configLimitSlider(type, pctVal) {
     sl.value = pctVal;
     cv.textContent = pctVal + '%';
   }
+}
+
+// AC-coupled inverters have a second, inverter-side limit (HR 313/314) and the
+// lower of the two wins - so a low one set elsewhere (GivEnergy app, Octopus)
+// would otherwise make this slider look ignored. Shown only when it caps.
+function _showInverterLimit(type, pct) {
+  const el = $('cv-' + type + '-inv-limit');
+  if (!el) return;
+  if (pct == null || pct >= 100) { el.style.display = 'none'; return; }
+  const w = _ctrlPower.units === 'watts'
+    ? ' (about ' + Math.round(pct / 100 * _limitMax(type) / 100) * 100 + ' W)' : '';
+  el.textContent = 'The inverter\'s own ' + type + ' limit is also set to ' + pct + '%' + w +
+                   ' - the lower of the two applies.';
+  el.style.display = '';
 }
 
 function ctrlLimitLabel(type) {
