@@ -1983,6 +1983,16 @@ def _scaled(raw, divisor, lo, hi):
     return round(val, 2) if lo <= val <= hi else None
 
 
+def _apply_gen1_battery_energy(d: dict) -> dict:
+    """Swap in IR 182/183 for today's battery energy on a Hybrid Gen1, when a
+    fresh reading is cached. Anything else keeps IR 36/37 unchanged."""
+    c = _gen1_batt_today
+    if (_inverter_model == "Hybrid Inverter Gen 1" and c["chg"] is not None
+            and time.time() - c["ts"] <= _GEN1_BATT_FRESH_SECS):
+        d["bat_chg_today"], d["bat_dis_today"] = c["chg"], c["dis"]
+    return d
+
+
 def _build_from_input_page(g) -> dict:
     """Build the live data dict from input registers 0–59, where `g(n)` returns
     the raw value of register n. This same mapping serves BOTH the active-poll
@@ -1991,7 +2001,7 @@ def _build_from_input_page(g) -> dict:
     def signed(v): return v - 65536 if v >= 32768 else v
     battery_w_raw = signed(g(52))    # P_BATTERY   (-=charge +=discharge)
     grid_w_raw    = signed(g(30))    # P_GRID_OUT  (-=import +=export)
-    return {
+    return _apply_gen1_battery_energy({
         "ok":  True,
         "ts":  time.time(),
         "solar_w":             g(18) + g(20),         # P_PV1 + P_PV2
@@ -2006,8 +2016,10 @@ def _build_from_input_page(g) -> dict:
         "soc":           max(0, min(100, g(59))),         # BATTERY_PERCENT — clamp uint16 to valid %
         "charge_status": g(14),                        # CHARGE_STATUS (0=idle 2=charging 3=finishing 5=discharging)
         "v_battery":  g(50) / 100,                    # V_BATTERY
-        "t_battery":  g(56) / 10,                     # TEMP_BATTERY
-        "t_heatsink": g(41) / 10,                     # TEMP_INVERTER_HEATSINK
+        # Temperatures are SIGNED (givenergy-modbus: int16 deci). Read unsigned,
+        # -1.0 C came out as 6552.6 C - on screen and stored in history.
+        "t_battery":  signed(g(56)) / 10,             # TEMP_BATTERY
+        "t_heatsink": signed(g(41)) / 10,             # TEMP_INVERTER_HEATSINK
         "solar_today":    g(17) / 10 + g(19) / 10,    # E_PV1_DAY + E_PV2_DAY
         "grid_in_today":  g(26) / 10,                 # E_GRID_IN_DAY
         "grid_out_today": g(25) / 10,                 # E_GRID_OUT_DAY
@@ -2022,7 +2034,7 @@ def _build_from_input_page(g) -> dict:
         "grid_v":     _scaled(g(5),  _V_AC_DIVISOR,  10.0, 400.0),   # IR5  V_AC1
         "grid_hz":    _scaled(g(13), _F_AC_DIVISOR,  40.0,  70.0),   # IR13 F_AC1
         "status":     str(g(0)),                      # INVERTER_STATUS
-    }
+    })
 
 # ── Gateway AIO live data (IR base=1600, GivTCP gateway.py confirmed) ────────────
 def _build_from_gateway_page(g) -> dict:
@@ -2200,6 +2212,16 @@ _GATEWAY_POKE_1780 = _make_poke(0x11, 0x04, 1780, 60)
 _GATEWAY_SOC_POKE_SECS = 55          # how often to poke base=1780 for SOC
 _last_soc_poke = 0.0
 
+# Hybrid Gen1: battery charged/discharged TODAY live at IR 182/183, not IR 36/37
+# (givenergy-modbus manifest, from Gen1 wire captures: "GEN1 populates the alt2
+# daily registers as authoritative"; IR 36/37 are right on Gen2, AC and AIO).
+# They sit on the IR 180 page, which the live feed never asks for, so it is
+# requested sparingly - extra requests are what upset the Gen2 listen stream.
+_GEN1_BATT_POKE_SECS = 300
+_GEN1_BATT_FRESH_SECS = 900
+_last_gen1_poke = 0.0
+_gen1_batt_today = {"ts": 0.0, "chg": None, "dis": None}
+
 def _pop_data_frames(buf: bytearray):
     """Pull complete GivEnergy frames out of `buf` (each starts 0x59 0x59, total
     length = 6 + the MBAP length field). Returns a list of frames and resyncs
@@ -2266,6 +2288,14 @@ def _decode_listen_frame(frame: bytes):
         if len(frame) < regs_off + 60 * 2:
             return None
         return _build_from_gateway_page(g)
+
+    if base == 180 and count >= 4:
+        # Gen1 battery energy today: IR 182 = discharge, IR 183 = charge (deci kWh).
+        if len(frame) >= regs_off + 4 * 2:
+            dis, chg = g(2) / 10, g(3) / 10
+            if 0 <= dis <= 200 and 0 <= chg <= 200:
+                _gen1_batt_today.update(ts=time.time(), chg=chg, dis=dis)
+        return None
 
     if base == 1780 and count >= 22:
         # IR1801 = aio1_soc is at offset 21 from base 1780.
@@ -2704,8 +2734,13 @@ def _send_pokes(s):
             s.sendall(_GATEWAY_POKE_1780)
             _last_soc_poke = now
         return
+    global _last_gen1_poke
     if _inverter_slave in _POKE_BY_SLAVE:
         s.sendall(_POKE_BY_SLAVE[_inverter_slave])
+        if (_inverter_model == "Hybrid Inverter Gen 1"
+                and time.time() - _last_gen1_poke >= _GEN1_BATT_POKE_SECS):
+            s.sendall(_make_poke(_inverter_slave, 0x04, 180, 60))
+            _last_gen1_poke = time.time()
     else:
         for poke in _POKE_REQUESTS:
             s.sendall(poke)
@@ -3242,6 +3277,27 @@ _DTC_ONE_MODEL_NAME = {
     "8": "All in One",
 }
 
+# Models we must not write to. An EMS plant controller (DTC 0x5x) keeps its
+# schedule in a separate plant register block (HR 2040+, givenergy-modbus
+# model/ems.py); the inverter-level registers our controls use are accepted at
+# the modbus layer and then silently ignored or overridden (givenergy-modbus
+# #304), so every control would "succeed" and do nothing. Read-only until the
+# EMS block is implemented and tested on hardware.
+_WRITE_BLOCKED_MODELS = {
+    "Energy Management System": "GivEnergy EMS controller",
+    "EMS Commercial":           "GivEnergy EMS Commercial controller",
+}
+
+
+def _writes_blocked_reason(model: str) -> "str | None":
+    label = _WRITE_BLOCKED_MODELS.get(model or "")
+    if not label:
+        return None
+    return (f"Control is not supported on a {label} yet - it schedules the "
+            "batteries through its own plant registers, and inverter-level "
+            "changes would be silently ignored.")
+
+
 def _classify_model(raw_dtc: int, arm_fw: int):
     """Return (profile, model_name) from raw HR[0] and HR[21] values."""
     dtc_hex = f"{raw_dtc:04x}"
@@ -3648,7 +3704,8 @@ def _read_control_state() -> dict:
         "profile":          profile,
         "model":            model,
         "serial":           serial,
-        "writable":         profile not in ("three_phase_aio",),  # gateway_aio writes now confirmed
+        "writable":         (profile not in ("three_phase_aio",)  # gateway_aio writes now confirmed
+                             and not _writes_blocked_reason(model)),
         "enable_charge":    bool(hr(_HR["ENABLE_CHARGE"])),
         "enable_discharge": bool(hr(_HR["ENABLE_DISCHARGE"])),
         "battery_power_mode":   hr(_HR["BATTERY_POWER_MODE"]),
@@ -3699,6 +3756,10 @@ def _execute_control(command: str, params: dict) -> dict:
     """Write a control command to the inverter via library-free HR writes.
     Returns {ok, message}."""
 
+    blocked = _writes_blocked_reason(_inverter_model)
+    if blocked:
+        return {"ok": False, "message": blocked}
+
     # sync_time works on any profile — handle before detection
     if command == "sync_time":
         try:
@@ -3725,6 +3786,10 @@ def _execute_control(command: str, params: dict) -> dict:
             return {"ok": False, "message": err}
 
     slave, profile, model = _detect_inverter()
+
+    blocked = _writes_blocked_reason(model)   # model may only be known now
+    if blocked:
+        return {"ok": False, "message": blocked}
 
     if profile == "unknown":
         return {"ok": False, "message": f"Inverter not recognised ({model}) — writes disabled."}
@@ -3946,7 +4011,7 @@ def _sched_compute_writes(desired: dict):
     The register writes are absolute sets, so re-applying the full list is idempotent
     (a partial apply self-heals on the next retry). Raises on unsupported hardware."""
     slave, profile, model = _detect_inverter()
-    if profile not in _SCHED_PROFILES:
+    if profile not in _SCHED_PROFILES or _writes_blocked_reason(model):
         raise RuntimeError(f"Scheduler is not supported on this inverter ({model})")
 
     mode = desired["mode"]
@@ -4159,7 +4224,7 @@ def _quick_action_do(action: str):
     global _quick_action_snapshot
     from datetime import datetime
     slave, profile, model = _detect_inverter()
-    if profile not in _SCHED_PROFILES:
+    if profile not in _SCHED_PROFILES or _writes_blocked_reason(model):
         raise RuntimeError(f"Quick actions are not supported on this inverter ({model})")
 
     # Snapshot current register state so we can restore it exactly after the action.
@@ -5063,11 +5128,20 @@ def _battery_capacity_ah() -> "int | None":
     Pure cache read -- deliberately does no I/O, because /api/data calls this on
     every poll. _inverter_facts_loop owns refreshing it.
 
-    Stays None on profiles without LV battery modules: the AIO and three-phase
-    units have a different battery architecture and HR 55 does not carry the same
-    meaning there, so guessing would be worse than saying nothing.
+    Stays None on three-phase units (not in _BMS_SOC_PROFILES), whose battery
+    architecture differs. The All-in-One IS included (it shares the extended
+    profile) and its HR 55 is a real capacity, but against a ~307 V HV stack
+    rather than 51.2 V LV modules - see _battery_nominal_v().
     """
     return _batt_cap_cache["ah"]
+
+
+def _battery_nominal_v() -> float:
+    """Nominal battery voltage for the detected model (givenergy-modbus
+    Model.system_battery_voltage). The All-in-One (DTC 0x80xx) runs a ~307 V HV
+    stack; at 51.2 V its capacity read 6x too small, skewing the battery line,
+    predictive charge targets and the power-limit conversion."""
+    return 307.0 if _inverter_model == "All in One" else _BATT_NOMINAL_V
 
 
 def _battery_capacity_kwh() -> "float | None":
@@ -5075,7 +5149,7 @@ def _battery_capacity_kwh() -> "float | None":
     ah = _battery_capacity_ah()
     if not ah:
         return None
-    return round(ah * _BATT_NOMINAL_V / 1000.0, 1)
+    return round(ah * _battery_nominal_v() / 1000.0, 1)
 
 
 def _effective_battery_kwh() -> float:
