@@ -506,6 +506,17 @@ GitHub is the source of truth for all tracked bugs and enhancements.
 The only exception is pre-release UAT items found by Andi before a version ships.
 Do not maintain enhancement descriptions here -- open a GitHub issue instead.
 
+### v3.5 candidates
+
+- **[#62](https://github.com/ACBCSoftware/acbc-givenergy-dashboard/issues/62) -- Split EV and heat pump out of Home** (raised 24 Oct 2026; tester offered to try an early build). Planning notes from the thread, not repeated on the issue:
+  - Both loads are already inside the inverter's Home figure (heat pump confirmed; Zappi not wired to hide from the CT, shows in the GivEnergy app). So the model is Home = EV + heat pump + everything else, not extra consumption on top.
+  - Heat pump source: tester's emonPi. It runs its own local EmonCMS as well as forwarding to emoncms.org, so read the feed on the LAN (feed id + read API key) with no cloud dependency. Electrical and thermal power feeds both exist; use electrical.
+  - EV source: Zappi V2 with built-in myenergi hub, so myenergi's cloud API (hub serial + API key, digest auth). Same shape as the EcoFlow integration: cloud reader, offline is a normal state, never write 0 for "no reading".
+  - Tester's inverter: Gen 2 hybrid (`single_phase_2slot`).
+  - **Measure before display.** "Everything else" = Home minus the sub-loads is a derived figure, with the same lockstep-sampling hazard as the parked plug-in home-usage fix: a sub-load sample can briefly exceed Home. Pull real samples first and size the smoothing window on them, as for `_detect_plugin_solar()`.
+  - Storage: one nullable column per sub-load in `snapshots` (as `plugin_w`), NULL when the source is unconfigured or offline. History and daily totals need the same treatment before exports can include them.
+  - Ask testers never to post keys or hub serials on GitHub; entry is via Settings, stored in `config.ini` on their own server.
+
 ### Shipped in v3.2 (28 Aug 2026)
 
 - **#53 -- Backup/restore scope selection** (headline) -- export takes a scope (Database only / Settings only / Database + Settings), returned as a zip carrying `manifest.json` plus `history.db` and/or `config.ini`. Resolves the long-standing scope decision: rather than pick one policy for everyone, the user chooses per action. Import auto-detects the new zip format and still accepts legacy raw gzip/`.db` backups unchanged. `config.ini` restores stage to `config.ini.pending` alongside `history.db.pending` and apply on next start via `_apply_pending_imports()` (renamed from singular), backing up whatever they replace. A combined restore failing validation on either file is rejected whole, never half-applied. **The automatic daily backup deliberately stays database-only** -- it's a silent safety net, not a user-facing migration action.
