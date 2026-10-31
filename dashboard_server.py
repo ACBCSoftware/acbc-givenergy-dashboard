@@ -3282,6 +3282,16 @@ _DTC_ONE_MODEL_NAME = {
     "8": "All in One",
 }
 
+# Backup power (EPS) enable, HR 317 (1 = on). It sits in the HR 300-359
+# "AC config" block, which only AC-coupled inverters and the All-in-One have -
+# DC hybrids time out on it (givenergy-modbus #162) - so it is offered on those
+# two models only. Confirmed writable on AC via the GivEnergy portal (hass#52)
+# and read on a GIV-AC3.0 (29 Oct 2026: HR 317 = 1, and HR 307, the EPS nominal
+# voltage, = 2300 = 230.0 V, confirming the block layout on that hardware).
+_EPS_MODELS    = ("AC Coupled Inverter", "All in One")
+_HR_ENABLE_EPS = 317
+
+
 # Models we must not write to. An EMS plant controller (DTC 0x5x) keeps its
 # schedule in a separate plant register block (HR 2040+, givenergy-modbus
 # model/ems.py); the inverter-level registers our controls use are accepted at
@@ -3635,6 +3645,13 @@ def _read_control_state() -> dict:
             except Exception as exc:
                 log.debug("Control: HR 313-314 read failed (%s) - inverter limits not shown", exc)
 
+    eps_enabled = None   # None = not supported here, or the read failed
+    if model in _EPS_MODELS:
+        try:
+            eps_enabled = bool(_hr_read(slave, _HR_ENABLE_EPS, 1)[0])
+        except Exception as exc:
+            log.debug("Control: HR 317 (EPS) read failed (%s) - shown as unknown", exc)
+
     _aio_slots_ok = True
     if profile == "three_phase_aio":
         # Three-phase slot registers live in the 1100 range.
@@ -3727,6 +3744,8 @@ def _read_control_state() -> dict:
                                 regs_313[1] if regs_313 else hr(_HR["BATTERY_DISCHARGE_LIMIT"]), profile),
         "inverter_charge_limit_pct":    ac_limits[0] if ac_limits else None,
         "inverter_discharge_limit_pct": ac_limits[1] if ac_limits else None,
+        "eps_supported":        model in _EPS_MODELS,
+        "eps_enabled":          eps_enabled,
         "power_reserve":        hr(_HR["BATTERY_POWER_RESERVE"]),
         "charge_slots":         charge_slots,
         "discharge_slots":      discharge_slots,
@@ -3919,6 +3938,14 @@ def _do_control(slave: int, profile: str, command: str, params: dict) -> str:
         wr(_HR["BATTERY_POWER_MODE"], val)
         label = "Max Power / Export" if val == 0 else "Demand only"
         return f"Discharge mode set to {label}"
+
+    if command in ("enable_eps", "disable_eps"):
+        if _inverter_model not in _EPS_MODELS:
+            raise RuntimeError("Backup power (EPS) control is only available on "
+                               "AC-coupled and All-in-One inverters.")
+        on = command == "enable_eps"
+        wr(_HR_ENABLE_EPS, 1 if on else 0)
+        return f"Backup power (EPS) {'enabled' if on else 'disabled'}"
 
     raise ValueError(f"Unknown command: {command}")
 

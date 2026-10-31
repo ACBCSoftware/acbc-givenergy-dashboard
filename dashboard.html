@@ -1809,6 +1809,19 @@ body.tiled #hist-series-row{flex-basis:100%}
         <button class="ctrl-btn amber" onclick="ctrlConfirmSlots('Save all discharge slots','discharge')" style="margin-top:4px">Save Discharge Slots</button>
       </div>
 
+      <!-- Backup power (EPS): AC-coupled and All-in-One only (HR 317) -->
+      <div class="ctrl-section" id="ctrl-eps-section" style="display:none">
+        <div class="ctrl-heading">Backup power (EPS)</div>
+        <div class="ctrl-actions">
+          <button class="ctrl-btn green" onclick="ctrlConfirmCmd('Enable backup power (EPS)','enable_eps')">&#9650; Enable EPS</button>
+          <button class="ctrl-btn red"   onclick="ctrlConfirmCmd('Disable backup power (EPS)','disable_eps')">&#9660; Disable EPS</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Status</span>
+          <span class="ctrl-value" id="cv-eps">—</span>
+        </div>
+        <div class="sett-hint">Supplies the backup (EPS) circuit from the battery during a power cut. Only useful if a backup circuit is wired to the inverter.</div>
+      </div>
       <!-- System utilities -->
       <div class="ctrl-section">
         <div class="ctrl-heading">System</div>
@@ -2881,6 +2894,10 @@ async function loadControlState() {
     _configLimitSlider('discharge', d.discharge_limit);
     _showInverterLimit('charge',    d.inverter_charge_limit_pct);
     _showInverterLimit('discharge', d.inverter_discharge_limit_pct);
+    // EPS is only offered on models with the AC config block (server decides)
+    $('ctrl-eps-section').style.display = d.eps_supported ? '' : 'none';
+    $('cv-eps').textContent = d.eps_enabled == null ? 'Unknown'
+                            : d.eps_enabled ? 'Enabled' : 'Disabled';
 
     // Render slot grids dynamically from API arrays
     _renderSlots('charge',    d.charge_slots    || [], d.profile);
