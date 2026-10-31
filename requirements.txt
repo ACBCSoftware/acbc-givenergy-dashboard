@@ -6,3 +6,4 @@
 
 flask>=3.0
 givenergy-modbus>=2.0.4   # optional: used for Gen3 polling; dashboard works without it
+cryptography>=42          # optional: only for the Alexa skill ([alexa] in config.ini)

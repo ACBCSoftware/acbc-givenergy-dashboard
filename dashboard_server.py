@@ -5,6 +5,7 @@ Run:  python dashboard_server.py
 Open: http://localhost:7890  (or http://<your-PC-IP>:7890 from your phone)
 """
 import asyncio
+import base64
 import configparser
 import gzip
 import hashlib
@@ -27,7 +28,7 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, jsonify, make_response, request, send_file, send_from_directory
@@ -153,6 +154,10 @@ ECOFLOW_ENABLED    = _cfg.getboolean("ecoflow", "enabled",    fallback=False)
 ECOFLOW_ACCESS_KEY = _cfg.get(       "ecoflow", "access_key", fallback="").strip()
 ECOFLOW_SECRET_KEY = _cfg.get(       "ecoflow", "secret_key", fallback="").strip()
 ECOFLOW_SERIAL     = _cfg.get(       "ecoflow", "serial",     fallback="").strip()
+
+# Alexa custom skill (Echo Show). Blank skill_id = /alexa is not served at all.
+ALEXA_SKILL_ID      = _cfg.get(       "alexa", "skill_id",      fallback="").strip()
+ALEXA_ALLOW_CONTROL = _cfg.getboolean("alexa", "allow_control", fallback=False)
 
 
 def _sf_configured() -> bool:
@@ -4106,6 +4111,7 @@ _sched_applied_sig  = None        # signature of the last successfully-applied d
 _sched_applied_regs: dict = {}    # reg → last value we wrote, for delta writes
 _sched_was_enabled  = False
 _sched_last_status  = "idle"      # surfaced on /api/data: idle | applying | summary | error
+_sched_hold_until   = 0.0         # epoch: a one-off "hold the charge until" (Alexa), not persisted
 _CLEANUP_DESIRED    = {"mode": "baseline"}
 _CLEANUP_SIG        = json.dumps(_CLEANUP_DESIRED, sort_keys=True)
 
@@ -4624,6 +4630,8 @@ def _scheduler_loop():
                 now = time.localtime()
                 block_min = ((now.tm_hour * 60 + now.tm_min) // 30) * 30
                 want = _sched_desired_state(_sched_load_rules(), now.tm_wday, block_min)
+                if time.time() < _sched_hold_until:
+                    want = {"mode": "hold"}           # a timed hold asked for by voice
                 _sched_was_enabled = True
             elif _sched_was_enabled:
                 # Master just switched off: apply cleanup once, then hand off (want=None).
@@ -4833,10 +4841,18 @@ def delete_schedule(rid):
 @app.route("/api/schedules/config", methods=["POST"])
 def save_schedule_config():
     """Set the master on/off switch, baseline mode, and baseline SOC reserve."""
-    global SCHEDULER_ENABLED, SCHEDULER_BASELINE, SCHEDULER_BASELINE_SOC_RESERVE
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
-    data = (request.get_json(silent=True) or {})
+    _sched_set_config(request.get_json(silent=True) or {})
+    return jsonify({"ok":                   True,
+                    "master_enabled":        SCHEDULER_ENABLED,
+                    "baseline":              SCHEDULER_BASELINE,
+                    "baseline_soc_reserve":  SCHEDULER_BASELINE_SOC_RESERVE})
+
+
+def _sched_set_config(data: dict) -> None:
+    """Apply and persist scheduler settings. Shared by the page and Alexa."""
+    global SCHEDULER_ENABLED, SCHEDULER_BASELINE, SCHEDULER_BASELINE_SOC_RESERVE
     cfg  = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
     cfg.read(_CONFIG_PATH)
     if not cfg.has_section("scheduler"):
@@ -4855,15 +4871,11 @@ def save_schedule_config():
         cfg.set("scheduler", "baseline_soc_reserve", str(val))
     with open(_CONFIG_PATH, "w") as f:
         cfg.write(f)
-    return jsonify({"ok":                   True,
-                    "master_enabled":        SCHEDULER_ENABLED,
-                    "baseline":              SCHEDULER_BASELINE,
-                    "baseline_soc_reserve":  SCHEDULER_BASELINE_SOC_RESERVE})
+
 
 @app.route("/api/quick_action", methods=["POST"])
 def quick_action_endpoint():
     """Start or cancel a 1-hour quick charge / discharge action."""
-    global _quick_charge_until, _quick_discharge_until
     if not _action_authorised():
         return jsonify({"ok": False, "error": "Unauthorised"}), 401
     if not QUICK_ACTIONS_ENABLED:
@@ -4875,7 +4887,12 @@ def quick_action_endpoint():
 
     if action not in ("charge", "discharge"):
         return jsonify({"ok": False, "error": "action must be 'charge' or 'discharge'"})
+    return jsonify(_quick_action_apply(action, start))
 
+
+def _quick_action_apply(action: str, start: bool) -> dict:
+    """Start or cancel a quick action. Shared by the button and Alexa."""
+    global _quick_charge_until, _quick_discharge_until
     if not start:
         # Manual cancel: load persisted state so revert only touches registers
         # the action set. Slot time regs are cleared first so the firmware stops
@@ -4887,13 +4904,13 @@ def quick_action_endpoint():
             _quick_discharge_until = 0.0
         threading.Thread(target=_quick_action_revert,
                          args=(state, "manual"), daemon=True).start()
-        return jsonify({"ok": True, "message": f"Quick {action} cancelled"})
+        return {"ok": True, "message": f"Quick {action} cancelled"}
 
     # Start
     try:
         cs, ce, end_epoch = _quick_action_do(action)
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        return {"ok": False, "error": str(exc)}
 
     if action == "charge":
         _quick_charge_until    = end_epoch
@@ -4902,7 +4919,7 @@ def quick_action_endpoint():
         _quick_discharge_until = end_epoch
         _quick_charge_until    = 0.0
 
-    return jsonify({"ok": True, "message": f"Quick {action} started (slot {cs:04d}-{ce:04d})"})
+    return {"ok": True, "message": f"Quick {action} started (slot {cs:04d}-{ce:04d})"}
 
 
 @app.route("/api/logs")
@@ -5316,11 +5333,16 @@ def api_battery():
     """On-demand BMS read from battery module(s).  Not polled or stored.
     Opens a fresh socket (the listen loop reconnects within a few seconds).
     Returns per-module cell voltages, temps, SOC, cycles and health flags."""
+    return jsonify(_battery_modules())
+
+
+def _battery_modules() -> dict:
+    """The BMS read behind /api/battery, shared with Alexa."""
     if _inverter_profile in ("three_phase_aio", "gateway_aio"):
-        return jsonify({
+        return {
             "ok": False, "unsupported": True,
             "error": "Battery cell detail is not available on AIO/gateway inverters.",
-        })
+        }
     num     = max(1, NUM_BATTERIES)
     modules = []
     try:
@@ -5339,11 +5361,11 @@ def api_battery():
         finally:
             s.close()
     except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)})
+        return {"ok": False, "error": str(exc)}
     if not modules:
-        return jsonify({"ok": False,
-                        "error": "No battery modules responded — check num_batteries in settings."})
-    return jsonify({"ok": True, "modules": modules})
+        return {"ok": False,
+                "error": "No battery modules responded — check num_batteries in settings."}
+    return {"ok": True, "modules": modules}
 
 @app.route("/api/settings", methods=["GET"])
 def get_settings():
@@ -6198,7 +6220,15 @@ def sf_lookup_postcode():
 def api_history():
     period = request.args.get("period", "day")
     offset = max(0, int(request.args.get("offset", 0)))
+    return jsonify(_history_rows(period, offset))
 
+
+def _history_rows(period: str, offset: int, days: tuple = None) -> list:
+    """One period's energy totals (and costs, when a tariff is set): the day,
+    week, month or year `offset` periods back from the latest. With `days`
+    ('YYYY-MM-DD' first, last) only those dates are read, so the period is a
+    calendar one even if a day in between has no data (Alexa uses this)."""
+    offset = max(0, int(offset))
     # Use the last record of each day (MAX ts per day) rather than MAX() of
     # the daily-counter fields.  This avoids the midnight carryover bug where
     # the inverter hasn't yet reset its counter so the first few readings of a
@@ -6211,6 +6241,11 @@ def api_history():
     # UI can show the split while the solar and home totals below add it in.
     _ensure_daily_totals()
     daily_cte = "WITH daily AS (SELECT day, s, gi, go_, bc, bd, p FROM daily_totals)"
+    params: tuple = ()
+    if days:
+        daily_cte = ("WITH daily AS (SELECT day, s, gi, go_, bc, bd, p FROM daily_totals "
+                     "WHERE day BETWEEN ? AND ?)")
+        params, offset = tuple(days), 0
 
     if period == "week":
         # Monday of the week: subtract (weekday+6)%7 days so Mon=0 offset
@@ -6280,7 +6315,7 @@ def api_history():
         """
 
     with _db() as conn:
-        rows = conn.execute(sql).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     # Normalise: ensure the date field is always keyed as 'period'
     result = []
     for r in rows:
@@ -6321,7 +6356,7 @@ def api_history():
                     c["pending_days"] = pending
                 row["cost"] = c
 
-    return jsonify(result)
+    return result
 
 @app.route("/api/hourly")
 def api_hourly():
@@ -7411,6 +7446,1601 @@ def service_worker():
 def icons(filename):
     return send_from_directory(str(Path(__file__).parent / "icons"), filename)
 
+# ── Alexa skill (Echo Show) ───────────────────────────────────────────────────
+# A private custom skill whose HTTPS endpoint is this server's /alexa, reached
+# through the same Cloudflare Tunnel as the dashboard. Answers spoken questions
+# from the live cache and, on devices with a screen, opens /echo full-screen via
+# the Alexa Web API for Games (the dashboard plus a small bridge script that
+# lets voice switch views). Quick charge / discharge by voice is off unless
+# [alexa] allow_control = yes.
+#
+# Every request is verified the way Amazon requires of a self-hosted endpoint:
+# signing certificate URL, certificate chain to a trusted root issued for
+# echo-api.amazon.com, SHA-256 body signature, a 150 s timestamp window, and
+# our own skill ID. Anything that fails is rejected, so the public URL cannot
+# be used to drive the inverter.
+try:
+    from cryptography import x509 as _x509                                     # type: ignore
+    from cryptography.hazmat.primitives import hashes as _hashes               # type: ignore
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding  # type: ignore
+    from cryptography.x509.verification import PolicyBuilder as _PolicyBuilder, Store as _Store  # type: ignore
+    _ALEXA_CRYPTO = True
+except Exception:
+    _ALEXA_CRYPTO = False
+
+ALEXA_HTML_CDN        = "https://cdn.html.games.alexa.a2z.com"
+_ALEXA_MAX_SKEW_S     = 150
+_ALEXA_HTML_TIMEOUT_S = 1800   # longest idle time the Echo allows an HTML app
+_ALEXA_LIVE, _ALEXA_HIST = {"view": "live"}, {"view": "history"}
+_ALEXA_VIEWS = {               # VIEW_NAME slot value -> message for the /echo bridge
+    "live": _ALEXA_LIVE, "live view": _ALEXA_LIVE, "home": _ALEXA_LIVE,
+    "dashboard": _ALEXA_LIVE, "flow": _ALEXA_LIVE,
+    "history": _ALEXA_HIST, "graph": _ALEXA_HIST, "graphs": _ALEXA_HIST, "chart": _ALEXA_HIST,
+    "costs": _ALEXA_HIST, "solar split": _ALEXA_HIST, "tariff": _ALEXA_HIST,
+    "hourly": {"view": "hourly"}, "power graph": {"view": "hourly"}, "today": {"view": "hourly"},
+    "year in review": {"view": "yr-review"}, "year": {"view": "yr-review"},
+    "forecast": {"view": "live", "modal": "forecast"},
+    "solar forecast": {"view": "live", "modal": "forecast"},
+    "battery": {"view": "live", "modal": "battery"},
+    "battery detail": {"view": "live", "modal": "battery"},
+    "battery cells": {"view": "live", "modal": "battery"},
+    "schedule": {"view": "schedule"}, "scheduler": {"view": "schedule"},
+}
+# COST_PERIOD slot values: (history period, how many periods back)
+_ALEXA_PERIOD_BASE = {
+    "today": ("day", 0), "yesterday": ("day", 1),
+    "this week": ("week", 0), "last week": ("week", 1),
+    "this month": ("month", 0), "last month": ("month", 1),
+    "this year": ("year", 0), "last year": ("year", 1),
+}
+_ALEXA_CONFIRM_S = 120          # how long a "switch to storage mode?" question stays open
+_alexa_chain_cache: dict = {}   # cert URL -> (leaf, intermediates)
+_alexa_roots = None
+
+
+class AlexaVerifyError(Exception):
+    pass
+
+
+def _alexa_cert_url_ok(url: str) -> bool:
+    """Amazon's rules for SignatureCertChainUrl."""
+    try:
+        u = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    path = u.path
+    while "/./" in path:
+        path = path.replace("/./", "/")
+    return (u.scheme.lower() == "https"
+            and (u.hostname or "").lower() == "s3.amazonaws.com"
+            and u.port in (None, 443)
+            and path.startswith("/echo.api/")
+            and "/../" not in path)
+
+
+def _alexa_trust_roots() -> list:
+    """System CA bundle (certifi as a fallback), loaded once."""
+    global _alexa_roots
+    if _alexa_roots is None:
+        roots, paths = [], ssl.get_default_verify_paths()
+        candidates = [paths.cafile, paths.openssl_cafile, "/etc/ssl/certs/ca-certificates.crt"]
+        try:
+            import certifi   # type: ignore
+            candidates.append(certifi.where())
+        except Exception:
+            pass
+        for f in candidates:
+            if f and os.path.isfile(f):
+                try:
+                    roots = _x509.load_pem_x509_certificates(Path(f).read_bytes())
+                    break
+                except Exception as exc:
+                    log.debug("Alexa: could not load CA bundle %s (%s)", f, exc)
+        _alexa_roots = roots
+    return _alexa_roots
+
+
+def _alexa_fetch_chain(url: str):
+    if url not in _alexa_chain_cache:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            certs = _x509.load_pem_x509_certificates(r.read())
+        if not certs:
+            raise AlexaVerifyError("empty certificate chain")
+        _alexa_chain_cache[url] = (certs[0], certs[1:])
+    return _alexa_chain_cache[url]
+
+
+def _alexa_verify(headers, body: bytes, payload: dict, now: float = None) -> None:
+    """Raise AlexaVerifyError unless this is a genuine request for our skill."""
+    if not _ALEXA_CRYPTO:
+        raise AlexaVerifyError("the cryptography package is not installed")
+    url = headers.get("SignatureCertChainUrl", "")
+    sig = headers.get("Signature-256", "")
+    if not url or not sig:
+        raise AlexaVerifyError("missing signature headers")
+    if not _alexa_cert_url_ok(url):
+        raise AlexaVerifyError(f"untrusted certificate URL {url!r}")
+    try:
+        leaf, intermediates = _alexa_fetch_chain(url)
+        roots = _alexa_trust_roots()
+        if not roots:
+            raise AlexaVerifyError("no trusted root certificates available")
+        verifier = (_PolicyBuilder().store(_Store(roots))
+                    .build_server_verifier(_x509.DNSName("echo-api.amazon.com")))
+        verifier.verify(leaf, intermediates)   # chain, validity dates and SAN
+        leaf.public_key().verify(base64.b64decode(sig), body,
+                                 _padding.PKCS1v15(), _hashes.SHA256())
+    except AlexaVerifyError:
+        raise
+    except Exception as exc:
+        raise AlexaVerifyError(f"signature check failed: {exc}") from exc
+
+    ts = str((payload.get("request") or {}).get("timestamp", ""))
+    try:
+        sent = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        raise AlexaVerifyError(f"bad timestamp {ts!r}")
+    if abs((now if now is not None else time.time()) - sent) > _ALEXA_MAX_SKEW_S:
+        raise AlexaVerifyError("request timestamp is too old")
+
+    system = (payload.get("context") or {}).get("System") or {}
+    app_id = ((system.get("application") or {}).get("applicationId")
+              or ((payload.get("session") or {}).get("application") or {}).get("applicationId"))
+    if app_id != ALEXA_SKILL_ID:
+        raise AlexaVerifyError(f"request is for a different skill ({app_id})")
+
+
+# ·· Speech helpers ···········································································
+
+def _say_w(w) -> str:
+    w = abs(int(w or 0))
+    return f"{w / 1000:.1f} kilowatts" if w >= 1000 else f"{w} watts"
+
+
+def _say_num(k) -> str:
+    k = float(k or 0)
+    return f"{k:.0f}" if abs(k) >= 100 else f"{k:.1f}"
+
+
+def _say_kwh(k) -> str:
+    return f"{_say_num(k)} kilowatt hours"
+
+
+_CURRENCY_WORDS = {"£": ("pound", "pounds", "penny", "pence"),
+                   "€": ("euro", "euros", "cent", "cents"),
+                   "$": ("dollar", "dollars", "cent", "cents")}
+
+
+def _say_money(cur: str, pence) -> str:
+    """Money the way it's spoken: '42 pounds 10', '85 pence', '3 pounds and 5 pence'."""
+    p = int(abs(float(pence or 0)) + 0.5)
+    w = _CURRENCY_WORDS.get(cur)
+    if not w:
+        return f"{cur}{p / 100:.2f}"
+    major, minor = divmod(p, 100)
+    small = f"{minor} {w[2] if minor == 1 else w[3]}"
+    if not major:
+        return small
+    s = f"{major} {w[0] if major == 1 else w[1]}"
+    if minor >= 10:
+        return f"{s} {minor}"
+    return f"{s} and {small}" if minor else s
+
+
+def _say_rate(p) -> str:
+    """A unit rate in pence (cents) per kWh."""
+    unit = (_CURRENCY_WORDS.get(TARIFF_CURRENCY) or ("", "", "", "pence"))[3]
+    p = float(p or 0)
+    num = f"{abs(p):.1f}".rstrip("0").rstrip(".")
+    return f"{'minus ' if p < 0 else ''}{num} {unit} a kilowatt hour"
+
+
+def _say_time(t) -> str:
+    """A clock time as spoken: '2 am', '6:30 pm', 'midnight'."""
+    if (t.hour, t.minute) == (0, 0):
+        return "midnight"
+    if (t.hour, t.minute) == (12, 0):
+        return "midday"
+    h = t.hour % 12 or 12
+    sfx = "am" if t.hour < 12 else "pm"
+    return f"{h} {sfx}" if t.minute == 0 else f"{h}:{t.minute:02d} {sfx}"
+
+
+def _say_hhmm(hhmm: str) -> str:
+    h, m = (int(x) for x in hhmm.split(":")[:2])
+    return _say_time(datetime(2000, 1, 1, h, m))
+
+
+def _ordinal(n: int) -> str:
+    sfx = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{sfx}"
+
+
+def _say_date(d, today) -> str:
+    if d == today:
+        return "today"
+    if d == today - timedelta(days=1):
+        return "yesterday"
+    if (d.year, d.month) == (today.year, today.month):
+        return f"{d:%A} the {_ordinal(d.day)}"
+    return f"{_ordinal(d.day)} of {d:%B}" + ("" if d.year == today.year else f" {d.year}")
+
+
+def _say_duration(hours: float) -> str:
+    mins = hours * 60
+    if mins < 55:
+        return f"about {max(5, int(round(mins / 5)) * 5)} minutes"
+    if hours >= 10:
+        return f"about {int(round(hours))} hours"
+    half = round(hours * 2) / 2
+    whole = int(half)
+    if half != whole:
+        return f"about {whole} and a half hours"
+    return f"about {whole} hour" + ("" if whole == 1 else "s")
+
+
+def _say_mass(kg: float) -> str:
+    return f"{kg / 1000:.1f} tonnes" if kg >= 1000 else f"{kg:.0f} kilograms"
+
+
+# ·· UK dates and calendar periods ············································
+
+def _uk_dst(utc: datetime) -> bool:
+    """British Summer Time: from 01:00 UTC on the last Sunday of March to 01:00
+    UTC on the last Sunday of October."""
+    def last_sunday(month):
+        d = datetime(utc.year, month, 31, 1)      # March and October both have 31 days
+        return d - timedelta(days=(d.weekday() + 1) % 7)
+    return last_sunday(3) <= utc < last_sunday(10)
+
+
+def _alexa_now(ts: float = None) -> datetime:
+    """Wall-clock time in Europe/London. Worked out here rather than with
+    zoneinfo, so it needs no time-zone database (Windows has none)."""
+    utc = datetime.fromtimestamp(time.time() if ts is None else ts, timezone.utc)
+    utc = utc.replace(tzinfo=None)
+    return utc + timedelta(hours=1) if _uk_dst(utc) else utc
+
+
+def _alexa_period(label: str, today, back: int = 0) -> dict:
+    """The calendar dates a spoken period covers. Weeks start on Monday; 'this'
+    periods run from their start to today, 'last' ones are the whole previous
+    period. `back` steps that many periods further back (for comparisons)."""
+    kind, n = _ALEXA_PERIOD_BASE[label]
+    n += back
+    if kind == "day":
+        start = end = today - timedelta(days=n)
+        key = start.isoformat()
+    elif kind == "week":
+        start = today - timedelta(days=today.weekday() + 7 * n)
+        end = start + timedelta(days=6)
+        key = start.isoformat()
+    elif kind == "month":
+        y, m = divmod(today.year * 12 + today.month - 1 - n, 12)
+        start = today.replace(year=y, month=m + 1, day=1)
+        y2, m2 = divmod(y * 12 + m + 1, 12)
+        end = start.replace(year=y2, month=m2 + 1) - timedelta(days=1)
+        key = start.strftime("%Y-%m")
+    else:
+        start = today.replace(year=today.year - n, month=1, day=1)
+        end = start.replace(month=12, day=31)
+        key = str(start.year)
+    if back:
+        if n == 1:
+            label = {"day": "yesterday", "week": "last week", "month": "last month",
+                     "year": "last year"}[kind]
+        else:
+            label = {"day": _say_date(start, today), "week": "the week before",
+                     "month": f"{start:%B}", "year": str(start.year)}[kind]
+    return {"label": label, "period": kind, "back": n, "key": key,
+            "start": start, "end": min(end, today), "to_date": n == 0}
+
+
+def _alexa_when(p: dict) -> str:
+    """'This month so far', 'Last week' - the start of a spoken answer."""
+    s = p["label"][0].upper() + p["label"][1:]
+    return s + " so far" if p["to_date"] else s
+
+
+def _alexa_period_slot(intent: str, slots: dict, default: str = "today",
+                       name: str = "period") -> dict:
+    """The period a request is about, with what was heard and whether it was
+    assumed - logged so a misheard period can be diagnosed."""
+    slot = slots.get(name) or {}
+    label = _alexa_slot_match(slot, _ALEXA_PERIOD_BASE)
+    p = _alexa_period(label or default, _alexa_now().date())
+    p["assumed"] = label is None
+    log.info("Alexa: %s period heard=%r -> %s (%s to %s)%s", intent, slot.get("value") or "",
+             p["label"], p["start"], p["end"], " [assumed]" if p["assumed"] else "")
+    return p
+
+
+def _alexa_row(p: dict) -> "dict | None":
+    rows = _history_rows(p["period"], 0, (p["start"].isoformat(), p["end"].isoformat()))
+    return rows[0] if rows else None
+
+
+def _alexa_history_view(p: dict) -> dict:
+    return {"view": "history", "period": p["period"], "offset": p["back"]}
+
+
+def _alexa_timed(fn, timeout: float):
+    """Run a slow read (the inverter, the BMS) in a thread, so it can't push the
+    reply past Alexa's 8 second limit."""
+    box: dict = {}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except Exception as exc:
+            box["e"] = exc
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "e" in box:
+        raise box["e"]
+    if "v" not in box:
+        raise TimeoutError(f"no answer within {timeout:.0f}s")
+    return box["v"]
+
+
+_alexa_ctrl = {"ts": 0.0, "state": None}
+
+
+def _alexa_control_state(max_age: float = 60) -> "dict | None":
+    """The inverter's settings (mode, reserve, EPS), read at most once a minute."""
+    if _alexa_ctrl["state"] and time.time() - _alexa_ctrl["ts"] < max_age:
+        return _alexa_ctrl["state"]
+    try:
+        st = _alexa_timed(_read_control_state, 5.0)
+    except Exception as exc:
+        log.info("Alexa: inverter settings not read (%s)", exc)
+        return None
+    if not st.get("ok"):
+        return None
+    _alexa_ctrl.update(ts=time.time(), state=st)
+    return st
+
+
+def _alexa_reserve() -> "tuple[int, bool]":
+    """Battery reserve percent, and whether it was actually read."""
+    st = _alexa_control_state()
+    if st and st.get("soc_reserve") is not None:
+        return int(st["soc_reserve"]), True
+    return (SCHEDULER_BASELINE_SOC_RESERVE if SCHEDULER_ENABLED else 4), False
+
+
+# ·· Live answers ·············································································
+
+def _alexa_live() -> dict:
+    with _lock:
+        data = dict(_cached) if _cached else {}
+    now = time.time()
+    data["quick_charge_active"]    = _quick_charge_until    > now
+    data["quick_discharge_active"] = _quick_discharge_until > now
+    if data and ECOFLOW_ENABLED:
+        # Added for /api/data rather than kept in the cache, so add it here too
+        try:
+            data["plugin_w"]     = _ef_snapshot()["power_w"] or 0
+            data["plugin_today"] = round(_plugin_kwh_today(), 2)
+        except Exception as exc:
+            log.debug("Alexa: plug-in solar not read (%s)", exc)
+    return data
+
+
+def _alexa_battery_text(d: dict) -> str:
+    s = f"The battery is at {d.get('soc', 0)} percent"
+    cap = _battery_capacity_kwh()
+    if cap:
+        s += f", about {cap * (d.get('soc') or 0) / 100:.1f} kilowatt hours"
+    if d.get("battery_charging"):
+        s += f", charging at {_say_w(d.get('battery_w'))}"
+    elif d.get("battery_discharging"):
+        s += f", discharging at {_say_w(d.get('battery_w'))}"
+    else:
+        s += ", and idle"
+    return s + "."
+
+
+def _alexa_solar_text(d: dict) -> str:
+    solar_w = (d.get("solar_w") or 0) + (d.get("plugin_w") or 0)
+    today   = (d.get("solar_today") or 0) + (d.get("plugin_today") or 0)
+    return f"Solar is making {_say_w(solar_w)} right now, and {_say_kwh(today)} so far today."
+
+
+def _alexa_home_text(d: dict) -> str:
+    home_w = (d.get("home_w") or 0) + (d.get("plugin_w") or 0)
+    return f"The house is using {_say_w(home_w)}."
+
+
+def _alexa_grid_text(d: dict) -> str:
+    if d.get("grid_importing"):
+        now = f"You're importing {_say_w(d.get('grid_w'))} from the grid."
+    elif d.get("grid_exporting"):
+        now = f"You're exporting {_say_w(d.get('grid_w'))} to the grid."
+    else:
+        now = "Nothing is going to or from the grid."
+    return (f"{now} Today you've imported {_say_kwh(d.get('grid_in_today'))} "
+            f"and exported {_say_kwh(d.get('grid_out_today'))}.")
+
+
+def _alexa_today_text(d: dict) -> str:
+    s = (f"Today, solar has made {_say_kwh(d.get('solar_today'))}. "
+         f"You've imported {_say_kwh(d.get('grid_in_today'))} "
+         f"and exported {_say_kwh(d.get('grid_out_today'))}.")
+    cur = d.get("currency_symbol") or ""
+    if d.get("import_cost_p") is not None and cur:
+        s += f" Imports have cost about {_say_money(cur, d['import_cost_p'])}"
+        if d.get("export_income_p"):
+            s += f" and exports have earned {_say_money(cur, d['export_income_p'])}"
+        s += "."
+    return s
+
+
+def _alexa_summary_text(d: dict) -> str:
+    s = (f"{_alexa_battery_text(d)} Solar is making {_say_w(d.get('solar_w'))} "
+         f"and the house is using {_say_w(d.get('home_w'))}.")
+    # Today's costs so far: import, standing charge, export credit, net
+    c = _get_costs_for_period("day", datetime.now().strftime("%Y-%m-%d"))
+    if c:
+        cur, net = TARIFF_CURRENCY, c.get("net_cost_p") or 0
+        parts = [f"import {_say_money(cur, c.get('import_cost_p'))}"]
+        if c.get("standing_charge_p"):
+            parts.append(f"standing charge {_say_money(cur, c['standing_charge_p'])}")
+        if c.get("export_income_p"):
+            parts.append(f"export credit {_say_money(cur, c['export_income_p'])}")
+        s += f" Today so far: {', '.join(parts)}, so "
+        s += f"{_say_money(cur, net)} net." if net >= 0 else f"you're {_say_money(cur, net)} in credit."
+    return s
+
+
+def _alexa_slot_match(slot, known):
+    """The entry of `known` a slot refers to, or None. Prefers the canonical value
+    Alexa matched a synonym to, then the words actually spoken."""
+    slot = slot or {}
+    names = [v.get("value", {}).get("name", "")
+             for auth in ((slot.get("resolutions") or {}).get("resolutionsPerAuthority") or [])
+             if (auth.get("status") or {}).get("code") == "ER_SUCCESS_MATCH"
+             for v in auth.get("values") or []]
+    names.append(slot.get("value") or "")
+    return next((n.lower().strip() for n in names if n and n.lower().strip() in known), None)
+
+
+# ·· Money ····················································································
+
+def _alexa_cost_text(p: dict) -> "tuple[str, str | None]":
+    """Spoken cost breakdown for a period, and the energy figures to offer after."""
+    row = _alexa_row(p)
+    if not row:
+        return f"I don't have any data for {p['label']}.", None
+    energy = (f"You imported {_say_kwh(row.get('grid_in_kwh'))} "
+              f"and exported {_say_kwh(row.get('grid_out_kwh'))}.")
+    c = row.get("cost")
+    if not c:
+        return (f"{_alexa_when(p)}: {energy} There's no tariff set up in the dashboard, "
+                "so I can't work out the costs.", None)
+    cur = c.get("currency_symbol") or ""
+    parts = [f"import {_say_money(cur, c.get('import_cost_p'))}"]
+    if c.get("export_income_p"):
+        parts.append(f"export credit {_say_money(cur, c['export_income_p'])}")
+    if c.get("standing_charge_p"):
+        parts.append(f"standing charge {_say_money(cur, c['standing_charge_p'])}")
+    net = c.get("net_cost_p")
+    if net is None:
+        net = ((c.get("import_cost_p") or 0) + (c.get("standing_charge_p") or 0)
+               - (c.get("export_income_p") or 0))
+    s = f"{_alexa_when(p)}: {', '.join(parts)}, so "
+    s += f"{_say_money(cur, net)} net." if net >= 0 else f"you're {_say_money(cur, net)} in credit."
+    if c.get("pending_days"):
+        s += " Some days are still being worked out, so this may change."
+    return s, energy
+
+
+def _alexa_earnings_text(p: dict) -> str:
+    row = _alexa_row(p)
+    if not row:
+        return f"I don't have any data for {p['label']}."
+    kwh = _say_kwh(row.get("grid_out_kwh"))
+    c = row.get("cost")
+    if not c:
+        return (f"{_alexa_when(p)}, you exported {kwh}. There's no tariff set up, "
+                "so I can't say what it earned.")
+    return (f"{_alexa_when(p)}, exports earned "
+            f"{_say_money(c.get('currency_symbol') or '', c.get('export_income_p'))} from {kwh}.")
+
+
+def _alexa_savings_text(p: dict) -> str:
+    row = _alexa_row(p)
+    if not row:
+        return f"I don't have any data for {p['label']}."
+    c = row.get("cost")
+    if not c:
+        return "There's no tariff set up in the dashboard, so I can't work out savings."
+    saved = _yr_savings_p(row.get("home_kwh") or 0, c.get("import_cost_p") or 0,
+                          c.get("export_income_p") or 0)
+    cur = c.get("currency_symbol") or ""
+    if saved <= 0:
+        return f"{_alexa_when(p)}, solar and the battery haven't saved anything yet."
+    return (f"{_alexa_when(p)}, solar and the battery together have saved about "
+            f"{_say_money(cur, saved)}, compared with buying all "
+            f"{_say_kwh(row.get('home_kwh'))} from the grid.")
+
+
+def _alexa_year_review_text() -> str:
+    now = datetime.now()
+    yr = _year_review_data(now.year)
+    cur = yr.get("currency_symbol") or TARIFF_CURRENCY
+    carbon = yr.get("carbon") or {}
+    s = (f"This year so far, solar has made {_say_kwh(carbon.get('solar_kwh'))}, "
+         f"saving about {_say_mass(carbon.get('co2_kg') or 0)} of carbon dioxide.")
+    best = (yr.get("solar") or {}).get("best")
+    if best:
+        d = datetime.strptime(best["date"], "%Y-%m-%d").date()
+        s += f" The best solar day was {_say_date(d, now.date())}, with {_say_kwh(best['kwh'])}."
+    proj = yr.get("projection") or {}
+    if proj.get("net_cost_p") is not None and proj.get("has_enough_data"):
+        s += f" The estimated net cost for the whole year is {_say_money(cur, proj['net_cost_p'])}"
+        if proj.get("savings_p"):
+            s += f", with savings of about {_say_money(cur, proj['savings_p'])}"
+        s += "."
+    elif not proj.get("has_enough_data"):
+        s += " There isn't enough data yet for a full-year estimate."
+    return s
+
+
+# ·· Tariff ···················································································
+
+_ALEXA_TARIFF_NAMES = {
+    "octopus_agile": "Octopus Agile", "octopus_tracker": "Octopus Tracker",
+    "octopus_cosy": "Cosy Octopus", "octopus_go": "Octopus Go",
+    "octopus_flux": "Octopus Flux", "octopus_intelligent_flux": "Intelligent Octopus Flux",
+    "octopus_flexible": "Octopus Flexible", "edf_freephase": "EDF FreePhase Dynamic",
+}
+
+
+def _alexa_rate_slots(now: float, hours: int = 24) -> list:
+    """(start, import rate) for each half hour from now, as far as rates are known."""
+    start = now - now % 1800
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES:
+        with _db() as conn:
+            rows = conn.execute(
+                "SELECT slot_start, import_p FROM agile_rates WHERE slot_start >= ? "
+                "AND slot_start < ? ORDER BY slot_start",
+                (_agile_slot_start(start), _agile_slot_start(start + hours * 3600))).fetchall()
+        return [(datetime.strptime(r[0], "%Y-%m-%dT%H:%M:%SZ")
+                 .replace(tzinfo=timezone.utc).timestamp(), float(r[1])) for r in rows]
+    return [(t, _tariff_import_rate(t))
+            for t in range(int(start), int(start + hours * 3600), 1800)]
+
+
+def _alexa_flat(slots: list) -> bool:
+    return len({round(r, 2) for _, r in slots}) <= 1
+
+
+def _alexa_cheapest(slots: list, n: int = 4) -> "tuple[float, float] | None":
+    """Start and average rate of the cheapest unbroken run of n half hours."""
+    n = max(1, min(n, len(slots)))
+    best = None
+    for i in range(len(slots) - n + 1):
+        win = slots[i:i + n]
+        if win[-1][0] - win[0][0] != (n - 1) * 1800:
+            continue
+        avg = sum(r for _, r in win) / n
+        if best is None or avg < best[1]:
+            best = (win[0][0], avg)
+    return best
+
+
+def _alexa_at(ts: float) -> str:
+    """'2 am', or '2 am tomorrow' when it isn't today."""
+    t, today = _alexa_now(ts), _alexa_now().date()
+    return _say_time(t) + ("" if t.date() == today else " tomorrow")
+
+
+def _alexa_tariff_text(kind: "str | None") -> str:
+    if not _tariff_configured():
+        return "There's no tariff set up in the dashboard yet."
+    now = time.time()
+    name = _ALEXA_TARIFF_NAMES.get(TARIFF_SOURCE) or (
+        "a time of use tariff" if TARIFF_TOU else "a flat rate tariff")
+    if kind == "standing charge":
+        num = f"{TARIFF_STANDING_P:.2f}".rstrip("0").rstrip(".")
+        unit = (_CURRENCY_WORDS.get(TARIFF_CURRENCY) or ("", "", "", "pence"))[3]
+        return f"The standing charge is {num} {unit} a day."
+    if kind == "export":
+        return f"Exports earn {_say_rate(_tariff_export_rate(now))} right now."
+    if kind == "tariff":
+        return (f"You're on {name}. Imports cost {_say_rate(_tariff_import_rate(now))} "
+                f"right now, and exports earn {_say_rate(_tariff_export_rate(now))}.")
+    rate = _tariff_import_rate(now)
+    s = f"Electricity costs {_say_rate(rate)} right now."
+    slots = _alexa_rate_slots(now)
+    if not slots or _alexa_flat(slots):
+        return s + " Your rate is the same all day."
+    rates = [r for _, r in slots]
+    avg = sum(rates) / len(rates)
+    if rate <= min(rates) + 0.5:
+        s += " That's as cheap as it gets in the next day."
+    elif rate <= avg * 0.9:
+        s += " That's cheaper than usual."
+    elif rate >= avg * 1.15:
+        s += " That's on the expensive side."
+    else:
+        s += " That's about average."
+    nxt = next(((t, r) for t, r in slots if abs(r - rate) >= 0.05), None)
+    if nxt:
+        s += f" It changes to {_say_rate(nxt[1])} at {_alexa_at(nxt[0])}."
+    return s
+
+
+def _alexa_cheapest_text(when: "str | None") -> str:
+    if not _tariff_configured():
+        return "There's no tariff set up in the dashboard yet."
+    now = time.time()
+    slots = _alexa_rate_slots(now)
+    if not slots:
+        return "I don't have the coming rates yet. Try again later."
+    if _alexa_flat(slots):
+        return "Your rates are flat, so it costs the same whatever time you use power."
+    today = _alexa_now(now)
+    if when == "tonight":
+        lo = today.replace(hour=18, minute=0, second=0, microsecond=0)
+        hi = lo + timedelta(hours=14)                      # to 8 am
+        slots = [(t, r) for t, r in slots if lo <= _alexa_now(t) < hi] or slots
+    elif when == "today":
+        slots = [(t, r) for t, r in slots if _alexa_now(t).date() == today.date()] or slots
+    best = _alexa_cheapest(slots)
+    if not best:
+        return "I don't have enough of the coming rates to say."
+    t, avg = best
+    start = "start now" if t <= now else f"are from {_alexa_at(t)}"
+    s = f"The cheapest two hours {start}, at an average of {_say_rate(avg)}."
+    if TARIFF_SOURCE in _VARIABLE_RATE_SOURCES and slots[-1][0] - now < 20 * 3600:
+        s += " Later rates aren't published yet."
+    return s
+
+
+def _alexa_good_time_text(d: dict) -> str:
+    if d.get("grid_exporting") and (d.get("grid_w") or 0) >= 1000:
+        return f"Yes, you're exporting {_say_w(d.get('grid_w'))} of spare solar right now."
+    if not _tariff_configured():
+        return "There's no tariff set up, so I can't compare prices."
+    now = time.time()
+    slots = _alexa_rate_slots(now)
+    rate = _tariff_import_rate(now)
+    if not slots or _alexa_flat(slots):
+        return "Your rates are flat, so any time costs the same."
+    best = _alexa_cheapest(slots)
+    if not best:
+        return f"Power costs {_say_rate(rate)} right now."
+    t, avg = best
+    if rate <= avg + 1:
+        return f"Yes, now is about as cheap as it gets, at {_say_rate(rate)}."
+    return (f"It'd be cheaper from {_alexa_at(t)}, at about {_say_rate(avg)}, "
+            f"compared with {_say_rate(rate)} now.")
+
+
+# ·· Forecast and weather ·····················································
+
+def _alexa_recent_solar() -> "float | None":
+    """Average daily solar over the last two weeks, for 'is that a good day?'."""
+    today = datetime.now().date()
+    _ensure_daily_totals()
+    with _db() as conn:
+        row = conn.execute("SELECT AVG(s + p) FROM daily_totals WHERE day >= ? AND day < ?",
+                           ((today - timedelta(days=14)).isoformat(), today.isoformat())).fetchone()
+    return float(row[0]) if row and row[0] else None
+
+
+def _alexa_forecast_text(day: "str | None") -> str:
+    if not _sf_configured():
+        return "The solar forecast isn't set up. You can add it under Settings, Integrations."
+    with _lock:
+        sf = dict(_sf_cached)
+    if not sf:
+        return "The solar forecast hasn't been fetched yet. Try again in a few minutes."
+    now = datetime.now()
+    t_key, m_key = now.date().isoformat(), (now.date() + timedelta(days=1)).isoformat()
+    days = {d["date"]: d["value"] / 1000 for d in sf.get("watt_hours_day", [])}
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+    left = sum(p["value"] for p in sf.get("watt_hours_period", [])
+               if p["timestamp"][:10] == t_key and p["timestamp"] > stamp) / 1000
+    today, tomorrow = days.get(t_key), days.get(m_key)
+    typical = _alexa_recent_solar()
+
+    def verdict(k):
+        if not typical:
+            return ""
+        avg = f"the last two weeks' average of {_say_num(typical)}"
+        if k >= typical * 1.2:
+            return f" That's better than {avg}."
+        if k <= typical * 0.8:
+            return f" That's below {avg}."
+        return f" That's about the same as {avg}."
+
+    if day == "tomorrow" or (day is None and today is None):
+        if tomorrow is None:
+            return "There's no forecast for tomorrow yet."
+        return f"Forecast.Solar expects {_say_kwh(tomorrow)} tomorrow.{verdict(tomorrow)}"
+    if today is None:
+        return "There's no forecast for today."
+    s = f"Forecast.Solar expects {_say_kwh(today)} today"
+    s += f", with about {_say_num(left)} still to come" if left >= 0.1 else ", and it's mostly done"
+    if day == "today" or tomorrow is None:
+        return s + "." + verdict(today)
+    s += f", and {_say_kwh(tomorrow)} tomorrow"
+    if tomorrow >= today * 1.15:
+        return s + ", so tomorrow looks better."
+    if tomorrow <= today * 0.85:
+        return s + ", so today is the better day."
+    return s + ", so they're much the same."
+
+
+_MET_WEATHER = {
+    0: "clear", 1: "sunny", 2: "partly cloudy", 3: "partly cloudy", 5: "misty", 6: "foggy",
+    7: "cloudy", 8: "overcast", 9: "light showers", 10: "light showers", 11: "drizzly",
+    12: "raining lightly", 13: "heavy showers", 14: "heavy showers", 15: "raining heavily",
+    16: "sleet showers", 17: "sleet showers", 18: "sleeting", 19: "hail showers",
+    20: "hail showers", 21: "hailing", 22: "light snow showers", 23: "light snow showers",
+    24: "snowing lightly", 25: "heavy snow showers", 26: "heavy snow showers",
+    27: "snowing heavily", 28: "thundery showers", 29: "thundery showers", 30: "thundery",
+}
+_COMPASS = {"N": "northerly", "NNE": "northerly", "NE": "north-easterly", "ENE": "easterly",
+            "E": "easterly", "ESE": "easterly", "SE": "south-easterly", "SSE": "southerly",
+            "S": "southerly", "SSW": "southerly", "SW": "south-westerly", "WSW": "westerly",
+            "W": "westerly", "WNW": "westerly", "NW": "north-westerly", "NNW": "northerly"}
+
+
+def _alexa_weather_text() -> str:
+    if not (MET_API_KEY and MET_GEOHASH):
+        return "Weather isn't set up. You can add a Met Office key under Settings, Integrations."
+    with _lock:
+        w = dict(_weather_cached)
+    if not w.get("ok"):
+        return "I don't have a weather reading yet."
+    s = f"At the house it's {w.get('temp')} degrees"
+    sky = _MET_WEATHER.get(w.get("weather_code"))
+    if sky:
+        s += f" and {sky}"
+    wind = _COMPASS.get(str(w.get("wind_dir") or "").upper())
+    if w.get("wind_mph"):
+        s += f", with a {w['wind_mph']} mile an hour {wind or ''} wind".replace("  ", " ")
+    if w.get("humidity") is not None:
+        s += f" and {round(w['humidity'])} percent humidity"
+    return s + "."
+
+
+# ·· Battery ··················································································
+
+def _alexa_battery_detail_text(d: dict, detail: "str | None") -> str:
+    if detail == "temperature":
+        t = d.get("t_battery")
+        return "I don't have a battery temperature." if t is None else \
+            f"The battery is at {float(t):.1f} degrees."
+    cap = _battery_capacity_kwh()
+    if detail == "capacity":
+        if not cap:
+            return "I don't know the battery's capacity yet."
+        reserve, read = _alexa_reserve()
+        usable = max(0.0, cap * ((d.get("soc") or 0) - reserve) / 100)
+        s = (f"About {usable:.1f} kilowatt hours is usable before the {reserve} percent "
+             f"reserve, out of {cap:.1f} in total.")
+        return s if read else "I couldn't read the reserve setting, so this assumes it. " + s
+    try:
+        bms = _alexa_timed(_battery_modules, 6.0)
+    except Exception as exc:
+        log.info("Alexa: BMS read failed (%s)", exc)
+        return "I couldn't reach the battery management system just now. Try again in a moment."
+    if not bms.get("ok"):
+        return ("Battery health isn't available on this inverter." if bms.get("unsupported")
+                else "I couldn't read the battery management system just now.")
+    mods = bms["modules"]
+    cycles = max((m.get("cycles") or 0) for m in mods)
+    if detail == "cycles":
+        return f"The battery has done {cycles} charge cycles."
+    healthy = all(m.get("status_ok") for m in mods)
+    cells = [c for m in mods for c in (m.get("cells_mv") or []) if c]
+    s = ("The battery reports healthy, with no warnings." if healthy
+         else "The battery is reporting a warning. Have a look at the battery detail in the dashboard.")
+    s += f" It's done {cycles} cycles"
+    if cells:
+        s += f", and the cells are balanced to within {max(cells) - min(cells)} millivolts"
+    return s + "."
+
+
+def _alexa_runtime_text(d: dict, goal: "str | None") -> str:
+    cap = _battery_capacity_kwh()
+    if not cap:
+        return "I don't know the battery's capacity yet."
+    soc = d.get("soc") or 0
+    now = _alexa_now()
+    if goal == "full" or (goal is None and d.get("battery_charging")):
+        if soc >= 99:
+            return "The battery is already full."
+        if not d.get("battery_charging") or not d.get("battery_w"):
+            return f"The battery isn't charging at the moment. It's at {soc} percent."
+        hours = cap * (100 - soc) / 100 * 1000 / d["battery_w"]
+        return (f"At {_say_w(d['battery_w'])}, it'll be full in {_say_duration(hours)}, "
+                f"around {_say_time(now + timedelta(hours=hours))}.")
+    reserve, _ = _alexa_reserve()
+    usable = cap * max(0, soc - reserve) / 100
+    if usable <= 0:
+        return f"The battery is down to its {reserve} percent reserve."
+    if d.get("battery_discharging") and d.get("battery_w"):
+        load = d["battery_w"]
+    else:
+        with _db() as conn:
+            row = conn.execute("SELECT AVG(home_w - solar_w) FROM snapshots WHERE ts >= ?",
+                               (int(time.time()) - 7200,)).fetchone()
+        load = float(row[0]) if row and row[0] else 0
+    if load < 50:
+        return (f"The battery has {usable:.1f} kilowatt hours to use, and solar is covering "
+                "the house at the moment.")
+    hours = usable * 1000 / load
+    end = now + timedelta(hours=hours)
+    s = (f"At around {_say_w(load)}, the battery's {usable:.1f} usable kilowatt hours "
+         f"will last {_say_duration(hours)}, until about {_say_time(end)}"
+         + ("" if end.date() == now.date() else " tomorrow") + ".")
+    if 14 <= now.hour < 23:
+        evening = now.replace(hour=23, minute=30, second=0, microsecond=0)
+        s += (" That should see you through the evening." if end >= evening
+              else " It may run out before the end of the evening.")
+    return s
+
+
+# ·· Inverter, plug-in solar, system ··········································
+
+def _alexa_inverter_text(d: dict, aspect: "str | None") -> str:
+    online = time.time() - (d.get("ts") or 0) < max(120, POLL_INTERVAL * 6)
+    v, hz = d.get("grid_v"), d.get("grid_hz")
+    if aspect == "voltage":
+        if not v:
+            return "I don't have a grid voltage reading."
+        ok = 216 <= v <= 253
+        return f"Grid voltage is {v:.0f} volts, " + ("which is normal." if ok else
+                                                    "which is outside the normal range.")
+    if aspect == "frequency":
+        if not hz:
+            return "I don't have a grid frequency reading."
+        return f"The grid is at {hz:.2f} hertz" + (", which is normal." if 49.5 <= hz <= 50.5
+                                                   else ", which is outside the normal range.")
+    if aspect == "online":
+        return (f"Yes, the inverter is online and reporting {_status_label(d.get('status')).lower()}."
+                if online else "No, the dashboard hasn't heard from the inverter for a while.")
+    st = _alexa_control_state()
+    if aspect == "backup":
+        if not st:
+            return "I couldn't read the inverter's settings just now."
+        if not st.get("eps_supported"):
+            return "This inverter doesn't have a backup power setting I can read."
+        return f"Backup power is switched {'on' if st.get('eps_enabled') else 'off'}."
+    if st:
+        mode = ("eco mode" if not st.get("enable_discharge") else
+                "storage mode, set to export" if st.get("battery_power_mode") == 0 else
+                "storage mode")
+    else:
+        mode = None
+    if aspect == "mode":
+        if not mode:
+            return "I couldn't read the inverter's mode just now."
+        s = f"The inverter is in {mode}."
+        if SCHEDULER_ENABLED:
+            s += " The scheduler is on, so it may change that."
+        return s
+    s = ("The inverter is online" if online else "The inverter seems to be offline")
+    s += f" and reporting {_status_label(d.get('status')).lower()}."
+    if mode:
+        s += f" It's in {mode}."
+    if v:
+        s += f" Grid voltage is {v:.0f} volts."
+    return s
+
+
+def _alexa_plugin_text(d: dict) -> str:
+    if not ECOFLOW_ENABLED:
+        return "Plug-in solar isn't set up in the dashboard."
+    now_w, today = d.get("plugin_w") or 0, d.get("plugin_today") or 0
+    total = (d.get("solar_today") or 0) + today
+    s = (f"The plug-in panels are making {_say_w(now_w)}, and "
+         f"{_say_kwh(today)} so far today")
+    if total > 0.05:
+        s += f", {100 * today / total:.0f} percent of today's solar"
+    return s + "."
+
+
+def _alexa_solar_split_text(p: dict) -> str:
+    row = _alexa_row(p)
+    if not row or not row.get("solar_kwh"):
+        return f"I don't have any solar data for {p['label']}."
+    solar, exp = row.get("solar_kwh") or 0, row.get("grid_out_kwh") or 0
+    used = max(0.0, solar - exp)
+    home, imp = row.get("home_kwh") or 0, row.get("grid_in_kwh") or 0
+    s = (f"{_alexa_when(p)}, solar made {_say_kwh(solar)}. You used {_say_num(used)} of it "
+         f"yourselves, {100 * used / solar:.0f} percent, and exported {_say_num(exp)}.")
+    if home > 0:
+        s += (f" Solar and the battery covered {100 * max(0.0, 1 - imp / home):.0f} percent "
+              "of what the house used.")
+    return s
+
+
+def _alexa_compare_text(p: dict, other: dict) -> str:
+    a, b = _alexa_row(p), _alexa_row(other)
+    if not a or not b:
+        return f"I don't have data for both {p['label']} and {other['label']}."
+
+    def line(p_, r):
+        s = (f"{_alexa_when(p_)}: solar {_say_num(r.get('solar_kwh'))}, "
+             f"house {_say_num(r.get('home_kwh'))} kilowatt hours")
+        c = r.get("cost")
+        if c and c.get("net_cost_p") is not None:
+            cur = c.get("currency_symbol") or ""
+            s += (f", net cost {_say_money(cur, c['net_cost_p'])}" if c["net_cost_p"] >= 0
+                  else f", {_say_money(cur, c['net_cost_p'])} in credit")
+        return s + "."
+    s = f"{line(p, a)} {line(other, b)}"
+    sa, sb = a.get("solar_kwh") or 0, b.get("solar_kwh") or 0
+    if not p["to_date"]:
+        if sa > sb * 1.05:
+            s += f" So {p['label']} made more solar."
+        elif sa < sb * 0.95:
+            s += f" So {p['label']} made less solar."
+    return s
+
+
+_ALEXA_RECORDS = ("best solar day", "worst solar day", "highest usage day",
+                  "peak usage", "peak solar")
+
+
+def _alexa_records_text(kind: str, p: dict) -> str:
+    today = _alexa_now().date()
+    first, last = p["start"].isoformat(), p["end"].isoformat()
+    if kind in ("peak usage", "peak solar"):
+        col = "home_w" if kind == "peak usage" else "solar_w"
+        lo = int(datetime.combine(p["start"], datetime.min.time()).timestamp())
+        hi = int(datetime.combine(p["end"] + timedelta(days=1), datetime.min.time()).timestamp())
+        with _db() as conn:
+            row = conn.execute(f"SELECT ts, {col} FROM snapshots WHERE ts >= ? AND ts < ? "
+                               f"ORDER BY {col} DESC LIMIT 1", (lo, hi)).fetchone()
+        if not row or not row[1]:
+            return f"I don't have any readings for {p['label']}."
+        at = datetime.fromtimestamp(row[0])
+        when = _say_time(at) + ("" if p["period"] == "day" else f" on {_say_date(at.date(), today)}")
+        what = "house usage" if kind == "peak usage" else "solar"
+        return f"The highest {what} {p['label']} was {_say_w(row[1])}, at {when}."
+    _ensure_daily_totals()
+    home = "MAX(0, s + p + gi + bd - go_ - bc)"
+    expr, order = {"best solar day": ("s + p", "DESC"), "worst solar day": ("s + p", "ASC"),
+                   "highest usage day": (home, "DESC")}[kind]
+    # A part-day can't be the worst day, so today is left out of 'worst'
+    if kind == "worst solar day" and last == today.isoformat() and first != last:
+        last = (today - timedelta(days=1)).isoformat()
+    with _db() as conn:
+        row = conn.execute(f"SELECT day, {expr} FROM daily_totals WHERE day BETWEEN ? AND ? "
+                           f"ORDER BY 2 {order} LIMIT 1", (first, last)).fetchone()
+    if not row:
+        return f"I don't have any data for {p['label']}."
+    d = datetime.strptime(row[0], "%Y-%m-%d").date()
+    noun = {"best solar day": "best solar day", "worst solar day": "worst solar day",
+            "highest usage day": "day the house used most"}[kind]
+    return f"The {noun} {p['label']} was {_say_date(d, today)}, with {_say_kwh(row[1])}."
+
+
+def _alexa_rule_phrase(r: dict) -> str:
+    span = f"from {_say_hhmm(r['start'])} to {_say_hhmm(r['end'])}"
+    if r["action"] == "charge":
+        s = f"a charge {span}, to {r.get('target_soc') or 100} percent"
+        return s + (", using predictive charging" if r.get("predictive") else "")
+    if r["action"] == "export":
+        return f"an export {span}, down to {r.get('target_soc') or 4} percent"
+    return f"a hold {span}"
+
+
+def _alexa_next_rule(rules: list, now: datetime, action: str = None):
+    """The next rule to start after `now`, and when: (datetime, rule) or None."""
+    best = None
+    for r in rules:
+        if action and r["action"] != action:
+            continue
+        h, m = (int(x) for x in r["start"].split(":"))
+        for k in range(8):
+            day = now + timedelta(days=k)
+            if not r["days_mask"] & (1 << day.weekday()):
+                continue
+            at = day.replace(hour=h, minute=m, second=0, microsecond=0)
+            if at > now:
+                if best is None or at < best[0]:
+                    best = (at, r)
+                break
+    return best
+
+
+def _alexa_day_word(at: datetime, now: datetime) -> str:
+    if at.date() == now.date():
+        return "tonight" if at.hour >= 17 else "today"
+    if at.date() == now.date() + timedelta(days=1):
+        return "tonight" if at.hour < 8 else "tomorrow"
+    return f"on {at:%A}"
+
+
+def _alexa_scheduler_text() -> str:
+    rules = _sched_load_rules()
+    if not SCHEDULER_ENABLED:
+        return "The scheduler is switched off" + (
+            f", with {len(rules)} rule{'' if len(rules) == 1 else 's'} ready." if rules else ".")
+    now = datetime.now()
+    s = f"The scheduler is on, with {SCHEDULER_BASELINE} mode in between rules."
+    if time.time() < _sched_hold_until:
+        s += f" It's holding the battery charge until {_alexa_at(_sched_hold_until)}."
+    else:
+        t_min = now.hour * 60 + now.minute
+        active = [r for r in rules if r["days_mask"] & (1 << now.weekday())
+                  and _block_contains(r["start"], r["end"], t_min)]
+        if active:
+            r = max(active, key=lambda r: _SCHED_PRECEDENCE[r["action"]])
+            s += f" Right now it's running {_alexa_rule_phrase(r)}."
+        else:
+            s += " No rule is active right now."
+    nxt = _alexa_next_rule(rules, now)
+    if nxt:
+        s += f" Next is {_alexa_rule_phrase(nxt[1])}, {_alexa_day_word(nxt[0], now)}."
+    elif not rules:
+        s += " There are no rules set up."
+    return s
+
+
+def _alexa_predictive_text() -> str:
+    rules = [r for r in _sched_load_rules() if r["action"] == "charge"]
+    pred = [r for r in rules if r.get("predictive")]
+    if not SCHEDULER_ENABLED:
+        return "The scheduler is switched off, so nothing is set to charge overnight."
+    now = datetime.now()
+    if not pred:
+        nxt = _alexa_next_rule(rules, now)
+        s = "Predictive charging isn't switched on."
+        if nxt:
+            s += f" The next charge is {_alexa_rule_phrase(nxt[1])}, {_alexa_day_word(nxt[0], now)}."
+        return s
+    nxt = _alexa_next_rule(pred, now)
+    when = f" {_alexa_day_word(nxt[0], now)}" if nxt else ""
+    target = _compute_predictive_target()
+    kwh = _get_tomorrow_forecast_kwh()
+    if target is None:
+        fixed = (nxt[1] if nxt else pred[0]).get("target_soc") or 100
+        return (f"Predictive charging is on, but there's no forecast to work from, "
+                f"so the charge{when} will go to its set {fixed} percent.")
+    return (f"Predictive charging is on. With {_say_kwh(kwh)} of solar forecast for tomorrow, "
+            f"the battery will charge to {target} percent{when}.")
+
+
+def _alexa_health_text(d: dict, aspect: "str | None") -> str:
+    today = datetime.now().date()
+    start = int(datetime.combine(today, datetime.min.time()).timestamp())
+    with _db() as conn:
+        events = conn.execute("SELECT ts, kind, message FROM event_log WHERE ts >= ? "
+                              "ORDER BY ts DESC", (start,)).fetchall()
+    lost = [e for e in events if "Lost connection" in (e["message"] or "")]
+    faults = [e for e in events if e["kind"] == "fault"]
+    name, when = _last_backup_info()
+    online = time.time() - (d.get("ts") or 0) < max(120, POLL_INTERVAL * 6)
+
+    def backup():
+        if not BACKUP_ENABLED:
+            return "Automatic backups are switched off."
+        if not when:
+            return "There hasn't been a backup yet."
+        at = datetime.strptime(when, "%Y-%m-%d %H:%M")
+        return f"The last backup was {_say_date(at.date(), today)} at {_say_time(at)}."
+
+    def update():
+        if not CHECK_UPDATES:
+            return "Update checks are switched off."
+        if _update_info.get("available"):
+            return f"Version {_update_info.get('latest')} is available."
+        return f"You're up to date, on version {APP_VERSION}."
+
+    def connection():
+        if not lost:
+            return "The inverter hasn't dropped out today."
+        n = len(lost)
+        return (f"The connection to the inverter dropped {n} time{'' if n == 1 else 's'} today, "
+                f"most recently at {_say_time(datetime.fromtimestamp(lost[0]['ts']))}.")
+
+    if aspect == "backup":
+        return backup()
+    if aspect == "update":
+        return update()
+    if aspect == "connection":
+        return connection()
+    if aspect == "log":
+        if not events:
+            return "Nothing has been logged today."
+        lines = [f"At {_say_time(datetime.fromtimestamp(e['ts']))}, "
+                 f"{(e['message'] or '').replace('→', 'to').rstrip('.')}." for e in events[:3]]
+        return "The latest entries: " + " ".join(lines)
+    problems = []
+    if not online:
+        problems.append("the dashboard hasn't heard from the inverter for a while")
+    if faults:
+        problems.append(f"there {'was' if len(faults) == 1 else 'were'} {len(faults)} "
+                        f"fault{'' if len(faults) == 1 else 's'} logged today")
+    if lost:
+        problems.append(f"the connection dropped {len(lost)} time{'' if len(lost) == 1 else 's'}")
+    if problems:
+        return "Not quite: " + ", and ".join(problems) + ". " + backup()
+    return f"Everything looks fine. The inverter is online. {backup()} {update()}"
+
+
+# ·· Controls (confirmed before they run) ·····································
+
+def _alexa_control_blocked() -> "str | None":
+    if not ALEXA_ALLOW_CONTROL:
+        return ("Voice control is switched off. Turn on allow control in the Alexa "
+                "section of the config file.")
+    if REQUIRE_AUTH:
+        return ("Controls need the dashboard password, so they only work in the app. "
+                "Turn off require password for controls to use them by voice.")
+    return None
+
+
+_ALEXA_TIME_WORDS = {"MO": "07:00", "AF": "12:00", "EV": "17:00", "NI": "21:00"}
+
+
+def _alexa_until(value: str, now: datetime) -> "datetime | None":
+    """The next time an AMAZON.TIME value comes round."""
+    v = _ALEXA_TIME_WORDS.get(value or "", value or "")
+    try:
+        h, m = (int(x) for x in v.split(":")[:2])
+        at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+    except ValueError:
+        return None
+    return at if at > now else at + timedelta(days=1)
+
+
+def _alexa_plan(intent: str, slots: dict) -> "tuple[str, dict | None]":
+    """What a control intent would do, as (question, pending action) - or
+    (reason it can't, None)."""
+    blocked = _alexa_control_blocked()
+    if blocked:
+        return blocked, None
+    if intent in ("QuickChargeIntent", "QuickDischargeIntent",
+                  "CancelQuickChargeIntent", "CancelQuickDischargeIntent"):
+        if not QUICK_ACTIONS_ENABLED:
+            return "Quick actions aren't enabled in the dashboard settings.", None
+        action = "charge" if "Charge" in intent else "discharge"
+        start = not intent.startswith("Cancel")
+        q = (f"Start a quick {action} for an hour." if start else f"Cancel the quick {action}.")
+        return q, {"do": "quick", "action": action, "start": start}
+    if intent == "ModeIntent":
+        mode = _alexa_slot_match(slots.get("mode"), ("eco", "storage"))
+        if not mode:
+            return "Do you want eco mode or storage mode?", None
+        return f"Switch the inverter to {mode} mode.", {"do": "mode", "value": mode}
+    if intent == "ExportIntent":
+        how = _alexa_slot_match(slots.get("export_mode"), ("export", "demand only")) or "export"
+        q = ("Let the battery export at full power when it discharges." if how == "export"
+             else "Set the battery to demand only, so it won't export.")
+        return q, {"do": "export", "value": how}
+    if intent == "ReserveIntent":
+        try:
+            pct = int(float((slots.get("percent") or {}).get("value")))
+        except (TypeError, ValueError):
+            return "What percentage should the reserve be?", None
+        if not 4 <= pct <= 100:
+            return "The reserve has to be between 4 and 100 percent.", None
+        return f"Set the battery reserve to {pct} percent.", {"do": "reserve", "value": pct}
+    if intent == "HoldChargeIntent":
+        if not SCHEDULER_ENABLED:
+            return ("Holding the charge uses the scheduler, which is switched off. "
+                    "Say turn the scheduler on first."), None
+        now = _alexa_now()
+        at = _alexa_until((slots.get("until") or {}).get("value"), now)
+        if not at:
+            return "Until what time?", None
+        until = time.time() + (at - now).total_seconds()
+        day = "" if at.date() == now.date() else " tomorrow"
+        return (f"Hold the battery charge until {_say_time(at)}{day}.",
+                {"do": "hold", "until": until})
+    if intent == "SchedulerToggleIntent":
+        on = _alexa_slot_match(slots.get("state"), ("on", "off"))
+        if not on:
+            return "Do you want the scheduler on or off?", None
+        if (on == "on") == SCHEDULER_ENABLED:
+            return f"The scheduler is already {on}.", None
+        return f"Turn the scheduler {on}.", {"do": "scheduler", "value": on == "on"}
+    if intent == "ClockSyncIntent":
+        return "Set the inverter's clock to the dashboard's time.", {"do": "clock"}
+    return "Sorry, I can't do that.", None
+
+
+def _alexa_run(p: dict) -> str:
+    """Carry out a confirmed control and say what happened."""
+    global _sched_hold_until
+    blocked = _alexa_control_blocked()
+    if blocked:
+        return blocked
+    do = p.get("do")
+    log.info("Alexa: control %s confirmed", json.dumps(p))
+    _alexa_ctrl["ts"] = 0.0                          # settings are about to change
+    if do == "quick":
+        res = _quick_action_apply(p["action"], bool(p["start"]))
+        if not res.get("ok"):
+            return f"Sorry, that didn't work. {res.get('error', '')}".strip()
+        return (f"Done, quick {p['action']} started for an hour." if p["start"]
+                else f"Done, the quick {p['action']} is cancelled.")
+    if do == "hold":
+        _sched_hold_until = float(p["until"])
+        return (f"Done, holding the battery charge until {_alexa_at(_sched_hold_until)}. "
+                "The scheduler takes over again after that.")
+    if do == "scheduler":
+        _sched_set_config({"master_enabled": bool(p["value"])})
+        return f"Done, the scheduler is now {'on' if SCHEDULER_ENABLED else 'off'}."
+    cmd = {"mode":    ("set_mode_storage" if p.get("value") == "storage" else "set_mode_dynamic", {}),
+           "export":  ("set_discharge_mode", {"value": 0 if p.get("value") == "export" else 1}),
+           "reserve": ("set_soc_reserve", {"value": p.get("value")}),
+           "clock":   ("sync_time", {})}.get(do)
+    if not cmd:
+        return "Sorry, I've lost track of what to change. Please ask again."
+    res = _execute_control(*cmd)
+    if not res.get("ok"):
+        return f"Sorry, that didn't work. {res.get('message', '')}".strip()
+    if do == "mode":
+        s = f"Done, the inverter is now in {p['value']} mode."
+        return s + (" The scheduler is on, so it may change that at its next rule."
+                    if SCHEDULER_ENABLED else "")
+    if do == "export":
+        return ("Done, the battery will export when it discharges." if p["value"] == "export"
+                else "Done, the battery is on demand only.")
+    if do == "reserve":
+        return f"Done, the battery reserve is now {p['value']} percent."
+    return f"Done, the inverter clock is set to {_say_time(_alexa_now())}."
+
+
+# ·· Request handling ·························································
+
+def _alexa_has_screen(payload: dict) -> bool:
+    dev = (((payload.get("context") or {}).get("System") or {}).get("device") or {})
+    return "Alexa.Presentation.HTML" in (dev.get("supportedInterfaces") or {})
+
+
+_ALEXA_TILED_MIN_PX = 1600   # screen width in device pixels
+
+
+def _alexa_layout(payload: dict) -> str:
+    """Tiled on a big Show (the 15" reports 1920 wide), Classic on the smaller
+    ones: the 9" (1280x800, so 962x602 CSS pixels) squashes the six tiles.
+    Auto can't decide this - it picks the phone layout on any touch screen."""
+    vp = (payload.get("context") or {}).get("Viewport") or {}
+    return "tiled" if (vp.get("pixelWidth") or 0) >= _ALEXA_TILED_MIN_PX else "classic"
+
+
+def _alexa_response(speech: str, payload: dict, view: dict = None, end: bool = False,
+                    reprompt: str = None, ask: str = None, state: dict = None) -> dict:
+    """Build the reply. On a screen device the dashboard stays up with the
+    session (shouldEndSession left out), and `view` - a message for the /echo
+    bridge such as {"view": "history", "period": "week", "offset": 1} - goes
+    to the page that is already open, or starts it there. `ask` ends the
+    reply with a question (kept open for an answer); `state` is remembered for
+    that answer - details to give on "yes", or a control waiting to be confirmed."""
+    attrs = dict((payload.get("session") or {}).get("attributes") or {})
+    for k in ("more", "pending"):
+        attrs.pop(k, None)
+    attrs.update(state or {})
+    if ask:
+        speech = f"{speech} {ask}"
+        reprompt = reprompt or ask
+    resp: dict = {"outputSpeech": {"type": "PlainText", "text": speech}} if speech else {}
+    if reprompt:
+        resp["reprompt"] = {"outputSpeech": {"type": "PlainText", "text": reprompt}}
+    screen = _alexa_has_screen(payload) and not end
+    if screen and attrs.get("html_open"):
+        if view:
+            resp["directives"] = [{"type": "Alexa.Presentation.HTML.HandleMessage",
+                                   "message": view}]
+    elif screen:
+        resp["directives"] = [{
+            "type": "Alexa.Presentation.HTML.Start",
+            "data": view or {"view": "live"},
+            "request": {"uri": f"https://{request.host}/echo?layout={_alexa_layout(payload)}",
+                        "method": "GET"},
+            "configuration": {"timeoutInSeconds": _ALEXA_HTML_TIMEOUT_S},
+        }]
+        attrs["html_open"] = True
+    if end:
+        resp["shouldEndSession"] = True
+    elif not screen:
+        resp["shouldEndSession"] = reprompt is None
+    return {"version": "1.0", "sessionAttributes": attrs, "response": resp}
+
+
+_ALEXA_HELP = ("You can ask things like: how much is in the battery, what did this month "
+               "cost, what's the solar forecast for tomorrow, or when is power cheapest "
+               "tonight. If voice control is on, you can also say switch to eco mode.")
+_ALEXA_TRY = ("what did this week cost", "what's the solar forecast for tomorrow",
+              "how long will the battery last", "when is power cheapest tonight",
+              "how much of today's solar did we use")
+# Intents whose answer depends on a period, so "what about last month?" can follow on
+_ALEXA_PERIOD_INTENTS = {"CostIntent": "today", "EarningsIntent": "today",
+                         "SavingsIntent": "this year", "SolarSplitIntent": "today",
+                         "CompareIntent": "today", "RecordsIntent": None}
+
+
+def _alexa_period_answer(intent: str, slots: dict, payload: dict) -> dict:
+    """Answers that take a period: costs, earnings, savings, solar split,
+    comparisons and records."""
+    state = {"last": intent}
+    if intent == "RecordsIntent":
+        attrs = (payload.get("session") or {}).get("attributes") or {}
+        kind = (_alexa_slot_match(slots.get("record"), _ALEXA_RECORDS)
+                or attrs.get("record") or "peak usage")
+        state["record"] = kind
+        p = _alexa_period_slot(intent, slots, "today" if kind.startswith("peak") else "this month")
+        return _alexa_response(_alexa_records_text(kind, p), payload, state=state)
+    p = _alexa_period_slot(intent, slots, _ALEXA_PERIOD_INTENTS[intent])
+    if intent == "CostIntent":
+        speech, energy = _alexa_cost_text(p)
+        if p["assumed"] and energy:
+            return _alexa_response(f"I'll assume you mean today. {speech}", payload,
+                                   view=_alexa_history_view(p), state=state,
+                                   ask="Want this week, this month or this year?")
+        return _alexa_response(speech, payload, view=_alexa_history_view(p),
+                               state={**state, "more": energy} if energy else state,
+                               ask="Want the energy figures?" if energy else None)
+    if intent == "EarningsIntent":
+        return _alexa_response(_alexa_earnings_text(p), payload,
+                               view=_alexa_history_view(p), state=state)
+    if intent == "SavingsIntent":
+        return _alexa_response(_alexa_savings_text(p), payload, state=state)
+    if intent == "SolarSplitIntent":
+        return _alexa_response(_alexa_solar_split_text(p), payload,
+                               view=_alexa_history_view(p), state=state)
+    # CompareIntent: with the other period, or the one before
+    other_label = _alexa_slot_match(slots.get("versus"), _ALEXA_PERIOD_BASE)
+    today = _alexa_now().date()
+    other = (_alexa_period(other_label, today) if other_label
+             else _alexa_period(p["label"], today, back=1))
+    return _alexa_response(_alexa_compare_text(p, other), payload,
+                           view=_alexa_history_view(p), state=state)
+
+
+def _alexa_handle(payload: dict) -> dict:
+    req   = payload.get("request") or {}
+    rtype = req.get("type", "")
+    dev = (((payload.get("context") or {}).get("System") or {}).get("device") or {})
+    vp  = (payload.get("context") or {}).get("Viewport") or {}
+    if rtype == "Alexa.Presentation.HTML.Message":
+        # The /echo page's report: browser, screen size and any script errors
+        log.info("Alexa: Echo page report %s", json.dumps(req.get("message"))[:2000])
+        return {"version": "1.0", "response": {}}
+    intent = (req.get("intent") or {}).get("name", "")
+    slots  = (req.get("intent") or {}).get("slots") or {}
+    heard  = {k: v.get("value") for k, v in slots.items() if (v or {}).get("value")}
+    log.info("Alexa: %s %s%s (screen=%s, interfaces=%s, viewport=%s, reason=%s)", rtype, intent,
+             f" {heard}" if heard else "", _alexa_has_screen(payload),
+             ",".join(sorted(dev.get("supportedInterfaces") or {})) or "none",
+             f"{vp.get('pixelWidth')}x{vp.get('pixelHeight')} {vp.get('shape', '')}".strip()
+             if vp else "none", req.get("reason", ""))
+    if rtype == "SessionEndedRequest" and req.get("error"):
+        # How Alexa reports a directive it could not carry out, e.g. the page failing to open
+        log.warning("Alexa: session ended with error %s (reason %s)",
+                    req["error"], req.get("reason"))
+    if rtype == "SessionEndedRequest" or rtype.startswith("Alexa.Presentation.HTML."):
+        return {"version": "1.0", "response": {}}
+
+    d = _alexa_live()
+    if not d:
+        return _alexa_response("The dashboard can't reach the inverter right now.", payload, end=True)
+    if rtype == "LaunchRequest":
+        # A Show opens the dashboard without a word; a speaker gets the summary
+        if _alexa_has_screen(payload):
+            return _alexa_response("", payload)
+        return _alexa_response(_alexa_summary_text(d), payload,
+                               reprompt="What would you like to know?")
+    if rtype != "IntentRequest":
+        return {"version": "1.0", "response": {}}
+
+    attrs = (payload.get("session") or {}).get("attributes") or {}
+    if intent in ("AMAZON.StopIntent", "AMAZON.CancelIntent", "AMAZON.NavigateHomeIntent"):
+        return _alexa_response("Okay.", payload, end=True)
+    if intent == "AMAZON.YesIntent":
+        pending = attrs.get("pending")
+        if pending and time.time() < pending.get("expires", 0):
+            return _alexa_response(_alexa_run(pending), payload)
+        if pending:
+            return _alexa_response("That question timed out, so I haven't changed anything. "
+                                   "Please ask again.", payload)
+        if attrs.get("more"):
+            return _alexa_response(attrs["more"], payload)
+        return _alexa_response("Okay.", payload)
+    if intent == "AMAZON.NoIntent":
+        return _alexa_response("Okay, I'll leave it." if attrs.get("pending") else "Okay.",
+                               payload)
+    if intent == "AMAZON.HelpIntent":
+        return _alexa_response(_ALEXA_HELP, payload, reprompt="What would you like to know?")
+
+    texts = {"BatteryIntent": _alexa_battery_text, "SolarIntent": _alexa_solar_text,
+             "HomeIntent": _alexa_home_text, "GridIntent": _alexa_grid_text,
+             "TodayIntent": _alexa_today_text, "SummaryIntent": _alexa_summary_text,
+             "PlugInSolarIntent": _alexa_plugin_text, "GoodTimeIntent": _alexa_good_time_text}
+    if intent in texts:
+        return _alexa_response(texts[intent](d), payload)
+    if intent == "PeriodOnlyIntent":
+        # "What about last month?" - the same question as before, for another period
+        intent = attrs.get("last") if attrs.get("last") in _ALEXA_PERIOD_INTENTS else "CostIntent"
+    if intent in _ALEXA_PERIOD_INTENTS:
+        return _alexa_period_answer(intent, slots, payload)
+    if intent == "YearReviewIntent":
+        return _alexa_response(_alexa_year_review_text(), payload, view={"view": "yr-review"})
+    if intent == "TariffIntent":
+        kind = _alexa_slot_match(slots.get("rate"), ("import", "export", "standing charge", "tariff"))
+        return _alexa_response(_alexa_tariff_text(kind), payload)
+    if intent == "CheapestTimeIntent":
+        when = _alexa_slot_match(slots.get("when"), ("today", "tonight"))
+        return _alexa_response(_alexa_cheapest_text(when), payload)
+    if intent == "ForecastIntent":
+        day = _alexa_slot_match(slots.get("day"), ("today", "tomorrow"))
+        return _alexa_response(_alexa_forecast_text(day), payload,
+                               view={"view": "live", "modal": "forecast"})
+    if intent == "WeatherIntent":
+        return _alexa_response(_alexa_weather_text(), payload)
+    if intent == "BatteryDetailIntent":
+        detail = _alexa_slot_match(slots.get("detail"), ("health", "temperature", "cycles", "capacity"))
+        return _alexa_response(_alexa_battery_detail_text(d, detail), payload,
+                               view={"view": "live", "modal": "battery"} if detail in (None, "health", "cycles") else None)
+    if intent == "BatteryRuntimeIntent":
+        goal = _alexa_slot_match(slots.get("goal"), ("full", "empty"))
+        return _alexa_response(_alexa_runtime_text(d, goal), payload)
+    if intent == "InverterStatusIntent":
+        aspect = _alexa_slot_match(slots.get("inverter_part"),
+                                   ("mode", "online", "backup", "voltage", "frequency"))
+        return _alexa_response(_alexa_inverter_text(d, aspect), payload)
+    if intent == "SchedulerIntent":
+        return _alexa_response(_alexa_scheduler_text(), payload)
+    if intent == "PredictiveChargeIntent":
+        return _alexa_response(_alexa_predictive_text(), payload)
+    if intent == "SystemHealthIntent":
+        aspect = _alexa_slot_match(slots.get("system_part"), ("backup", "update", "connection", "log"))
+        return _alexa_response(_alexa_health_text(d, aspect), payload)
+    if intent == "ShowViewIntent":
+        spoken = _alexa_slot_match(slots.get("view"), _ALEXA_VIEWS)
+        view = _ALEXA_VIEWS.get(spoken)
+        if not view:
+            return _alexa_response("I can show the live view, history, the power graph, the "
+                                   "solar forecast, the battery, the schedule or year in review.",
+                                   payload)
+        if view["view"] == "schedule" and REQUIRE_AUTH:
+            return _alexa_response("The schedule needs the dashboard password, so I can't "
+                                   "open it here. Ask me what the scheduler is doing instead.",
+                                   payload)
+        return _alexa_response("Okay.", payload, view=view)
+    if intent in ("QuickChargeIntent", "QuickDischargeIntent", "CancelQuickChargeIntent",
+                  "CancelQuickDischargeIntent", "ModeIntent", "ExportIntent", "ReserveIntent",
+                  "HoldChargeIntent", "SchedulerToggleIntent", "ClockSyncIntent"):
+        question, pending = _alexa_plan(intent, slots)
+        if not pending:
+            return _alexa_response(question, payload)
+        pending["expires"] = time.time() + _ALEXA_CONFIRM_S
+        return _alexa_response(question, payload, ask="Are you sure?", state={"pending": pending})
+    tip = _ALEXA_TRY[int(time.time()) % len(_ALEXA_TRY)]
+    return _alexa_response(f"Sorry, I didn't get that. Try asking: {tip}.", payload,
+                           reprompt="What would you like to know?")
+
+
+@app.route("/alexa", methods=["POST"])
+def alexa_endpoint():
+    if not ALEXA_SKILL_ID:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    body = request.get_data(cache=True)
+    try:
+        payload = json.loads(body)
+        _alexa_verify(request.headers, body, payload)
+    except (ValueError, AlexaVerifyError) as exc:
+        log.warning("Alexa: rejected request - %s", exc)
+        return jsonify({"ok": False, "error": "Bad request"}), 400
+    return jsonify(_alexa_handle(payload))
+
+
+# Injected into dashboard.html for the Echo: the Alexa HTML SDK plus a listener
+# that hands view changes from the skill to the page's own showView(), and for
+# history the period (setPeriod) and how many periods back (histOffset).
+_ALEXA_BRIDGE = f"""<script src="{ALEXA_HTML_CDN}/alexa-html/latest/alexa-html.js"></script>
+<script>
+(function () {{
+  if (!window.Alexa) return;
+  function go(m) {{
+    if (!m || !m.view || typeof showView !== 'function') return;
+    // Pop-ups (solar forecast, battery detail) open over the live view
+    if (typeof closeSolarForecast === 'function') closeSolarForecast();
+    var bm = document.getElementById('batt-modal');
+    if (bm) bm.classList.remove('open');
+    showView(m.view);
+    if (m.modal === 'forecast' && typeof openSolarForecast === 'function') openSolarForecast();
+    if (m.modal === 'battery' && typeof openBattModal === 'function') openBattModal();
+    if (m.period && typeof loadHistory === 'function') {{
+      // setPeriod() with an offset, in one fetch (top-level lets are shared)
+      histPeriod = m.period;
+      histOffset = m.offset || 0;
+      document.querySelectorAll('.period-btn').forEach(function (b) {{
+        b.classList.toggle('active', b.dataset.p === m.period); }});
+      loadHistory();
+    }}
+  }}
+  Alexa.create({{version: '1.1'}}).then(function (r) {{
+    if (!r.alexa) return;
+    go(r.message);
+    r.alexa.skill.onMessage(go);
+    // Report the browser, screen and any script errors back to the skill log
+    setTimeout(function () {{
+      try {{
+        r.alexa.skill.sendMessage({{echo_report: {{
+          ua: navigator.userAgent, w: window.innerWidth, h: window.innerHeight,
+          dpr: window.devicePixelRatio, script_ok: typeof showView === 'function',
+          errors: (window.__echoErr || []).slice(0, 10)}}}});
+      }} catch (e) {{}}
+    }}, 5000);
+  }}).catch(function () {{}});
+}})();
+</script>
+"""
+
+
+# Old-browser-safe (ES5) on purpose: it must run even where the dashboard's own
+# script cannot. Five seconds in, it reports straight to /echo/report, which
+# works whether or not the Alexa SDK started.
+#
+# It also fits the dashboard to the Echo before the page builds:
+#  - The Echo's web view has DOM storage switched off (localStorage is null),
+#    which stopped start-up at the first getItem - "Connecting..." for ever. An
+#    in-memory stand-in lets it run; nothing there needs to persist.
+#  The Start URL sets the layout (?layout=tiled on a 15" Show, classic on a
+#  9" - see _alexa_layout), as Auto would pick the phone layout on a touch screen.
+_ECHO_ERROR_CATCHER = """<script>(function(){var ok=false;try{ok=!!window.localStorage;}catch(e){}
+if(!ok){var m={},s={getItem:function(k){return Object.prototype.hasOwnProperty.call(m,k)?m[k]:null;},
+setItem:function(k,v){m[k]=String(v);},removeItem:function(k){delete m[k];},clear:function(){m={};},
+key:function(i){return Object.keys(m)[i]||null;}};
+Object.defineProperty(s,'length',{get:function(){return Object.keys(m).length;}});
+try{Object.defineProperty(window,'localStorage',{value:s,configurable:true});}catch(e){}}})();</script>
+<script>window.__echoErr=[];window.addEventListener('error',function(e){
+window.__echoErr.push((e.message||'error')+' @'+String(e.filename||'').split('/').pop()+':'+e.lineno);});
+setTimeout(function(){try{var d=JSON.stringify({ua:navigator.userAgent,w:window.innerWidth,
+h:window.innerHeight,dpr:window.devicePixelRatio,alexa_sdk:!!window.Alexa,
+script_ok:typeof showView==='function',errors:window.__echoErr.slice(0,10)});
+new Image().src='/echo/report?d='+encodeURIComponent(d).slice(0,3000);}catch(x){}},5000);</script>
+"""
+_echo_reports: list = []   # timestamps, to cap how often /echo/report can log
+
+
+@app.route("/echo/report")
+def echo_report():
+    """Diagnostics from the Echo page (browser, screen, script errors). Public,
+    so it only logs while the skill is configured, at most 20 times an hour."""
+    if not ALEXA_SKILL_ID:
+        return ("", 404)
+    now = time.time()
+    _echo_reports[:] = [t for t in _echo_reports if now - t < 3600]
+    if len(_echo_reports) < 20:
+        _echo_reports.append(now)
+        log.info("Alexa: Echo page report %s", request.args.get("d", "")[:3000])
+    return ("", 204)
+
+
+@app.route("/echo")
+def echo_page():
+    if not ALEXA_SKILL_ID:
+        return jsonify({"ok": False, "error": "Not found"}), 404
+    html = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
+    # Collect script errors from the very start, for the bridge's report
+    h = html.find("<head>")
+    if h >= 0:
+        h += len("<head>")
+        html = html[:h] + _ECHO_ERROR_CATCHER + html[h:]
+    i = html.rfind("</body>")
+    html = html[:i] + _ALEXA_BRIDGE + html[i:] if i >= 0 else html + _ALEXA_BRIDGE
+    resp = make_response(html)
+    resp.headers["Content-Type"]  = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # ── Embedding (#61) ───────────────────────────────────────────────────────────
 # By default nothing may show the dashboard inside a frame. That is what stops
 # another site loading it invisibly over its own page and tricking clicks onto
@@ -7455,13 +9085,15 @@ def add_security_headers(response):
         response.headers["X-Frame-Options"] = "DENY"
         frame = "frame-ancestors 'none'"
     # CSP: allow inline scripts/styles (single-page app requirement) but block
-    # external origins, object embeds, and framing from outside.
+    # external origins, object embeds, and framing from outside. The Echo page
+    # alone may also load Amazon's Alexa HTML SDK.
+    alexa = f" {ALEXA_HTML_CDN}" if request.path == "/echo" else ""
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline'; "
+        f"script-src 'self' 'unsafe-inline'{alexa}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data: blob:; "
-        "connect-src 'self'; "
+        f"connect-src 'self'{alexa}; "
         "font-src 'self' data:; "
         "object-src 'none'; "
         "base-uri 'self'; "

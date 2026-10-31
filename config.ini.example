@@ -158,6 +158,23 @@ access_key =
 secret_key =
 serial     =
 
+[alexa]
+; Voice control and a full-screen dashboard on an Amazon Echo Show, through
+; your own private Alexa skill. Needs the dashboard reachable over HTTPS from
+; the internet (e.g. the Cloudflare Tunnel above) and the "cryptography" Python
+; package. Setup steps: alexa/README.md.
+;
+; skill_id: the Skill ID from the Alexa developer console (amzn1.ask.skill...).
+;           Leave blank to switch voice off - /alexa and /echo are then not served.
+;           Requests for any other skill, or not signed by Amazon, are refused.
+; allow_control: let voice change the inverter (mode, export, reserve, hold,
+;           scheduler on/off, clock sync, quick charge/discharge). Each asks
+;           "are you sure?" first. Only works while "require password for
+;           controls" is off, since the Echo can't give the password. Anyone who
+;           can speak to the Echo can use it.
+skill_id      =
+allow_control = no
+
 [logging]
 ; Log level: warning (default) | info | debug
 ; Debug captures detailed inverter communication -- use only for fault diagnosis.

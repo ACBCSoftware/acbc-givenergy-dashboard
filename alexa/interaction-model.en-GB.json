@@ -1,0 +1,1218 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "the energy portal",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": [
+            "what can I ask",
+            "what can you do",
+            "what can I say"
+          ]
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.YesIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NoIntent",
+          "samples": []
+        },
+        {
+          "name": "SummaryIntent",
+          "samples": [
+            "how are we doing",
+            "how's the house",
+            "give me a summary",
+            "what's happening",
+            "what's going on"
+          ]
+        },
+        {
+          "name": "BatteryIntent",
+          "samples": [
+            "what's the battery at",
+            "what is the battery at",
+            "how much is in the battery",
+            "how much charge is in the battery",
+            "battery level",
+            "how's the battery",
+            "is the battery charging"
+          ]
+        },
+        {
+          "name": "SolarIntent",
+          "samples": [
+            "how much solar",
+            "how much solar are we making",
+            "what's the solar doing",
+            "how are the panels doing",
+            "how much solar today",
+            "solar"
+          ]
+        },
+        {
+          "name": "HomeIntent",
+          "samples": [
+            "how much power is the house using",
+            "what's the house using",
+            "how much are we using",
+            "house usage",
+            "what's the load"
+          ]
+        },
+        {
+          "name": "GridIntent",
+          "samples": [
+            "are we importing",
+            "are we exporting",
+            "what's the grid doing",
+            "how much have we imported",
+            "how much have we exported",
+            "grid"
+          ]
+        },
+        {
+          "name": "TodayIntent",
+          "samples": [
+            "how was today",
+            "what about today",
+            "today's summary",
+            "today's energy"
+          ]
+        },
+        {
+          "name": "CostIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "what did {period} cost",
+            "what has {period} cost",
+            "how much did {period} cost",
+            "how much has {period} cost",
+            "what's {period} cost us",
+            "what has {period} cost us",
+            "{period} cost",
+            "how much did we spend {period}",
+            "how much have we spent {period}",
+            "what did we spend {period}",
+            "what have we spent {period}",
+            "how much have we paid {period}",
+            "how much did we pay {period}",
+            "what are the costs for {period}",
+            "what were the costs {period}",
+            "cost breakdown for {period}",
+            "give me the cost breakdown for {period}",
+            "give me the costs for {period}",
+            "the costs for {period}",
+            "costs {period}",
+            "{period} costs",
+            "what's the bill {period}",
+            "what's the bill for {period}",
+            "what's our electric bill {period}",
+            "what's the electric bill for {period}",
+            "what's the damage {period}",
+            "what's the running total {period}",
+            "what's the bill",
+            "what's the damage",
+            "what's the running total",
+            "how much have we spent",
+            "how much have we paid",
+            "cost breakdown",
+            "what are the costs"
+          ]
+        },
+        {
+          "name": "EarningsIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "how much did we earn {period}",
+            "how much did we earn from exporting {period}",
+            "how much have we earned {period}",
+            "how much have we earned from exporting {period}",
+            "what did exports earn {period}",
+            "what did we make from exports {period}",
+            "how much did we earn",
+            "how much have we earned",
+            "what have exports earned"
+          ]
+        },
+        {
+          "name": "SavingsIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "how much has solar saved us {period}",
+            "how much has solar saved us",
+            "how much has the battery saved us {period}",
+            "how much has the battery saved us",
+            "how much have we saved {period}",
+            "how much have we saved",
+            "what have the panels saved us {period}",
+            "what have the panels saved us"
+          ]
+        },
+        {
+          "name": "YearReviewIntent",
+          "samples": [
+            "what's our estimated annual cost",
+            "what will this year cost us",
+            "what's the estimated cost for the year",
+            "give me the year in review",
+            "read me the year in review",
+            "how's the year going"
+          ]
+        },
+        {
+          "name": "SolarSplitIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "how much of today's solar did we use ourselves",
+            "how much of our solar did we use {period}",
+            "how much of our solar did we use",
+            "what percentage of our power came from solar {period}",
+            "what percentage of our power came from solar",
+            "how self sufficient are we {period}",
+            "how self sufficient are we",
+            "where did our solar go {period}",
+            "where did our solar go",
+            "solar split {period}"
+          ]
+        },
+        {
+          "name": "CompareIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            },
+            {
+              "name": "versus",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "how does {period} compare to {versus}",
+            "how does {period} compare",
+            "how did {period} compare to {versus}",
+            "compare {period} with {versus}",
+            "compare {period} to {versus}",
+            "compare {period}",
+            "was {period} better than {versus}",
+            "how does today compare to yesterday",
+            "was today better than yesterday"
+          ]
+        },
+        {
+          "name": "RecordsIntent",
+          "slots": [
+            {
+              "name": "record",
+              "type": "RECORD_KIND"
+            },
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "what was our {record} {period}",
+            "what was the {record} {period}",
+            "what was our {record}",
+            "what was the {record}",
+            "when was our {record} {period}",
+            "when was the {record} {period}",
+            "when was our {record}",
+            "when did we use the most power {period}",
+            "when did we use the most power"
+          ]
+        },
+        {
+          "name": "PeriodOnlyIntent",
+          "slots": [
+            {
+              "name": "period",
+              "type": "COST_PERIOD"
+            }
+          ],
+          "samples": [
+            "{period}",
+            "what about {period}",
+            "how about {period}",
+            "and {period}",
+            "and what about {period}"
+          ]
+        },
+        {
+          "name": "TariffIntent",
+          "slots": [
+            {
+              "name": "rate",
+              "type": "RATE_KIND"
+            }
+          ],
+          "samples": [
+            "what's the {rate} right now",
+            "what's the current {rate}",
+            "what's the {rate}",
+            "what is the {rate}",
+            "what's the electricity rate right now",
+            "what's the current agile price",
+            "is power cheap at the moment",
+            "is electricity cheap right now",
+            "is power expensive right now",
+            "how much is a unit right now",
+            "what tariff are we on",
+            "what's our tariff"
+          ]
+        },
+        {
+          "name": "CheapestTimeIntent",
+          "slots": [
+            {
+              "name": "when",
+              "type": "CHEAP_WHEN"
+            }
+          ],
+          "samples": [
+            "when is the cheapest time to charge {when}",
+            "when is the cheapest time to charge",
+            "when is power cheapest {when}",
+            "when is power cheapest",
+            "when is electricity cheapest {when}",
+            "when is electricity cheapest",
+            "when's the cheapest time to use power {when}",
+            "when's the cheapest time to use power",
+            "when are the cheap rates {when}"
+          ]
+        },
+        {
+          "name": "GoodTimeIntent",
+          "slots": [
+            {
+              "name": "appliance",
+              "type": "APPLIANCE"
+            }
+          ],
+          "samples": [
+            "is now a good time to run the {appliance}",
+            "is now a good time to use the {appliance}",
+            "is it a good time to put the {appliance} on",
+            "should I run the {appliance} now",
+            "is now a good time to use power",
+            "is now a good time to use electricity"
+          ]
+        },
+        {
+          "name": "ForecastIntent",
+          "slots": [
+            {
+              "name": "day",
+              "type": "DAY_NAME"
+            }
+          ],
+          "samples": [
+            "what's the solar forecast for {day}",
+            "what's the solar forecast",
+            "is it going to be a good solar day {day}",
+            "is it going to be a good solar day",
+            "how much solar are we expecting {day}",
+            "how much solar are we expecting",
+            "how much solar will we get {day}",
+            "is tomorrow better than today for solar",
+            "solar forecast",
+            "what's the forecast for solar"
+          ]
+        },
+        {
+          "name": "WeatherIntent",
+          "samples": [
+            "what's the weather doing at the house",
+            "what's the weather like at the house",
+            "what's the temperature outside",
+            "how warm is it outside",
+            "how cold is it outside",
+            "is it windy outside"
+          ]
+        },
+        {
+          "name": "PredictiveChargeIntent",
+          "samples": [
+            "what's the battery set to charge to tonight",
+            "how much will we charge overnight",
+            "how much will the battery charge tonight",
+            "is predictive charging switched on",
+            "is predictive charging on",
+            "what's the overnight charge target"
+          ]
+        },
+        {
+          "name": "BatteryDetailIntent",
+          "slots": [
+            {
+              "name": "detail",
+              "type": "BATTERY_DETAIL"
+            }
+          ],
+          "samples": [
+            "how healthy is the battery",
+            "what's the battery {detail}",
+            "what is the battery {detail}",
+            "battery {detail}",
+            "how many cycles has the battery done",
+            "how much usable capacity do we have left",
+            "how much usable energy is left",
+            "how hot is the battery"
+          ]
+        },
+        {
+          "name": "BatteryRuntimeIntent",
+          "slots": [
+            {
+              "name": "goal",
+              "type": "RUNTIME_GOAL"
+            }
+          ],
+          "samples": [
+            "how long will the battery last",
+            "will the battery get us through the evening",
+            "will the battery last the night",
+            "will the battery last until morning",
+            "when will the battery be {goal}",
+            "how long until the battery is {goal}",
+            "how long till the battery is {goal}",
+            "when will we run out of battery"
+          ]
+        },
+        {
+          "name": "InverterStatusIntent",
+          "slots": [
+            {
+              "name": "inverter_part",
+              "type": "INVERTER_ASPECT"
+            }
+          ],
+          "samples": [
+            "what {inverter_part} is the inverter in",
+            "are we in eco or storage mode",
+            "is the inverter {inverter_part}",
+            "is the {inverter_part} on",
+            "is the grid {inverter_part} OK",
+            "what's the grid {inverter_part}",
+            "what is the grid {inverter_part}",
+            "inverter status",
+            "how's the inverter",
+            "what's the inverter doing"
+          ]
+        },
+        {
+          "name": "PlugInSolarIntent",
+          "samples": [
+            "how much is the plug-in solar making",
+            "how much of our solar is from the plug-in panels",
+            "what are the plug-in panels doing",
+            "how's the plug-in solar"
+          ]
+        },
+        {
+          "name": "SchedulerIntent",
+          "samples": [
+            "what's the scheduler doing tonight",
+            "what's the scheduler doing",
+            "what's the next scheduled charge",
+            "are any rules active at the moment",
+            "is the scheduler on",
+            "what's scheduled tonight"
+          ]
+        },
+        {
+          "name": "SystemHealthIntent",
+          "slots": [
+            {
+              "name": "system_part",
+              "type": "HEALTH_ASPECT"
+            }
+          ],
+          "samples": [
+            "is everything working",
+            "is everything OK",
+            "any problems with the system",
+            "are there any problems",
+            "when was the last {system_part}",
+            "is there an {system_part} available",
+            "did we lose {system_part} to the inverter today",
+            "what's in the activity {system_part}",
+            "read me the activity {system_part}"
+          ]
+        },
+        {
+          "name": "ShowViewIntent",
+          "slots": [
+            {
+              "name": "view",
+              "type": "VIEW_NAME"
+            }
+          ],
+          "samples": [
+            "show {view}",
+            "show me {view}",
+            "show the {view}",
+            "show me the {view}",
+            "go to {view}",
+            "go to the {view}",
+            "open {view}",
+            "open the {view}"
+          ]
+        },
+        {
+          "name": "ModeIntent",
+          "slots": [
+            {
+              "name": "mode",
+              "type": "MODE_NAME"
+            }
+          ],
+          "samples": [
+            "switch to {mode} mode",
+            "change to {mode} mode",
+            "put the inverter in {mode} mode",
+            "set the inverter to {mode} mode",
+            "{mode} mode"
+          ]
+        },
+        {
+          "name": "ExportIntent",
+          "slots": [
+            {
+              "name": "export_mode",
+              "type": "EXPORT_MODE"
+            }
+          ],
+          "samples": [
+            "switch to {export_mode}",
+            "switch the battery to {export_mode}",
+            "set the battery to {export_mode}",
+            "put the battery on {export_mode}",
+            "turn on export"
+          ]
+        },
+        {
+          "name": "ReserveIntent",
+          "slots": [
+            {
+              "name": "percent",
+              "type": "AMAZON.NUMBER"
+            }
+          ],
+          "samples": [
+            "set the battery reserve to {percent} percent",
+            "set the reserve to {percent} percent",
+            "change the battery reserve to {percent} percent",
+            "change the reserve to {percent} percent",
+            "set the battery reserve",
+            "{percent} percent"
+          ]
+        },
+        {
+          "name": "HoldChargeIntent",
+          "slots": [
+            {
+              "name": "until",
+              "type": "AMAZON.TIME"
+            }
+          ],
+          "samples": [
+            "hold the battery charge until {until}",
+            "hold the charge until {until}",
+            "hold the battery until {until}",
+            "keep the battery charge until {until}",
+            "hold the battery charge",
+            "until {until}"
+          ]
+        },
+        {
+          "name": "SchedulerToggleIntent",
+          "slots": [
+            {
+              "name": "state",
+              "type": "ON_OFF"
+            }
+          ],
+          "samples": [
+            "turn the scheduler {state}",
+            "switch the scheduler {state}",
+            "turn {state} the scheduler",
+            "switch {state} the scheduler"
+          ]
+        },
+        {
+          "name": "ClockSyncIntent",
+          "samples": [
+            "sync the inverter clock",
+            "set the inverter clock",
+            "update the inverter time",
+            "sync the clock"
+          ]
+        },
+        {
+          "name": "QuickChargeIntent",
+          "samples": [
+            "charge the battery",
+            "start charging",
+            "start a quick charge",
+            "quick charge",
+            "boost the battery"
+          ]
+        },
+        {
+          "name": "QuickDischargeIntent",
+          "samples": [
+            "discharge the battery",
+            "start discharging",
+            "start a quick discharge",
+            "quick discharge",
+            "export the battery"
+          ]
+        },
+        {
+          "name": "CancelQuickChargeIntent",
+          "samples": [
+            "stop charging",
+            "cancel the charge",
+            "cancel quick charge",
+            "stop the quick charge"
+          ]
+        },
+        {
+          "name": "CancelQuickDischargeIntent",
+          "samples": [
+            "stop discharging",
+            "cancel the discharge",
+            "cancel quick discharge",
+            "stop the quick discharge"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "name": "COST_PERIOD",
+          "values": [
+            {
+              "name": {
+                "value": "today",
+                "synonyms": [
+                  "so far today",
+                  "for today",
+                  "today so far"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "yesterday",
+                "synonyms": [
+                  "for yesterday",
+                  "yesterday's"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "this week",
+                "synonyms": [
+                  "so far this week",
+                  "this week so far",
+                  "the past week",
+                  "the last seven days",
+                  "the week so far",
+                  "week to date",
+                  "this week's"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "last week",
+                "synonyms": [
+                  "last week's",
+                  "the previous week",
+                  "previous week"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "this month",
+                "synonyms": [
+                  "so far this month",
+                  "this month so far",
+                  "month to date",
+                  "the month so far",
+                  "the past month",
+                  "the last thirty days",
+                  "this month's"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "last month",
+                "synonyms": [
+                  "last month's",
+                  "the previous month",
+                  "previous month"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "this year",
+                "synonyms": [
+                  "so far this year",
+                  "this year so far",
+                  "year to date",
+                  "the year so far",
+                  "this calendar year",
+                  "this year's"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "last year",
+                "synonyms": [
+                  "last year's",
+                  "the previous year",
+                  "previous year"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "VIEW_NAME",
+          "values": [
+            {
+              "name": {
+                "value": "live",
+                "synonyms": [
+                  "live view",
+                  "home",
+                  "dashboard",
+                  "flow"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "history",
+                "synonyms": [
+                  "graph",
+                  "graphs",
+                  "chart"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "costs",
+                "synonyms": [
+                  "cost",
+                  "money"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "solar split",
+                "synonyms": [
+                  "solar breakdown"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "tariff",
+                "synonyms": [
+                  "rates"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "hourly",
+                "synonyms": [
+                  "power graph",
+                  "today"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "year in review",
+                "synonyms": [
+                  "year"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "forecast",
+                "synonyms": [
+                  "solar forecast",
+                  "the forecast"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "battery",
+                "synonyms": [
+                  "battery detail",
+                  "battery cells",
+                  "battery health"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "schedule",
+                "synonyms": [
+                  "scheduler",
+                  "schedules"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "RECORD_KIND",
+          "values": [
+            {
+              "name": {
+                "value": "best solar day",
+                "synonyms": [
+                  "sunniest day",
+                  "biggest solar day",
+                  "best day for solar"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "worst solar day",
+                "synonyms": [
+                  "dullest day",
+                  "lowest solar day",
+                  "worst day for solar"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "highest usage day",
+                "synonyms": [
+                  "busiest day",
+                  "biggest usage day",
+                  "day we used the most"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "peak usage",
+                "synonyms": [
+                  "highest house usage",
+                  "peak load",
+                  "highest demand",
+                  "most power used"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "peak solar",
+                "synonyms": [
+                  "highest solar",
+                  "peak generation",
+                  "most solar power"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "RATE_KIND",
+          "values": [
+            {
+              "name": {
+                "value": "import",
+                "synonyms": [
+                  "electricity rate",
+                  "unit rate",
+                  "import rate",
+                  "electricity price",
+                  "agile price",
+                  "price",
+                  "rate"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "export",
+                "synonyms": [
+                  "export rate",
+                  "export price"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "standing charge",
+                "synonyms": [
+                  "daily charge",
+                  "standing charges"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "tariff",
+                "synonyms": [
+                  "tariff name"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "CHEAP_WHEN",
+          "values": [
+            {
+              "name": {
+                "value": "today",
+                "synonyms": [
+                  "this afternoon"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "tonight",
+                "synonyms": [
+                  "overnight",
+                  "this evening"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "APPLIANCE",
+          "values": [
+            {
+              "name": {
+                "value": "washing machine",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "dishwasher",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "tumble dryer",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "dryer",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "oven",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "immersion",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "car charger",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "kettle",
+                "synonyms": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "DAY_NAME",
+          "values": [
+            {
+              "name": {
+                "value": "today",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "tomorrow",
+                "synonyms": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "BATTERY_DETAIL",
+          "values": [
+            {
+              "name": {
+                "value": "health",
+                "synonyms": [
+                  "condition",
+                  "state of health"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "temperature",
+                "synonyms": [
+                  "temp"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "cycles",
+                "synonyms": [
+                  "cycle count",
+                  "charge cycles"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "capacity",
+                "synonyms": [
+                  "usable capacity",
+                  "usable energy"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "RUNTIME_GOAL",
+          "values": [
+            {
+              "name": {
+                "value": "full",
+                "synonyms": [
+                  "charged",
+                  "fully charged"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "empty",
+                "synonyms": [
+                  "flat",
+                  "run out"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "INVERTER_ASPECT",
+          "values": [
+            {
+              "name": {
+                "value": "mode",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "online",
+                "synonyms": [
+                  "connected"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "backup",
+                "synonyms": [
+                  "backup circuit",
+                  "backup power",
+                  "eps"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "voltage",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "frequency",
+                "synonyms": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "HEALTH_ASPECT",
+          "values": [
+            {
+              "name": {
+                "value": "backup",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "update",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "connection",
+                "synonyms": []
+              }
+            },
+            {
+              "name": {
+                "value": "log",
+                "synonyms": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "MODE_NAME",
+          "values": [
+            {
+              "name": {
+                "value": "eco",
+                "synonyms": [
+                  "dynamic",
+                  "eco mode"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "storage",
+                "synonyms": [
+                  "storage mode"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "EXPORT_MODE",
+          "values": [
+            {
+              "name": {
+                "value": "export",
+                "synonyms": [
+                  "max power",
+                  "full export",
+                  "export mode"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "demand only",
+                "synonyms": [
+                  "demand",
+                  "no export",
+                  "demand mode"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ON_OFF",
+          "values": [
+            {
+              "name": {
+                "value": "on",
+                "synonyms": [
+                  "back on"
+                ]
+              }
+            },
+            {
+              "name": {
+                "value": "off",
+                "synonyms": []
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
